@@ -4,17 +4,20 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from legalqa.bm25 import BM25Index
 from legalqa.answer_style import build_answer_style_profile, generation_plan
 from legalqa.chunking import chunk_documents
 from legalqa.data import Chunk, Document, QARecord, deterministic_split, write_json
 from legalqa.dense_store import ensure_global_dense_index, search_global_dense_index
-from legalqa.generation import Candidate, make_train_memory_candidate
+from legalqa.generation import Candidate, make_qwen_agentic_candidate, make_train_memory_candidate, parse_agentic_step
+from legalqa.models import GenerationResult
 from legalqa.fingerprint import adapter_fingerprint, checkpoint_fingerprint, corpus_content_fingerprint
 from legalqa.index import build_index
 from legalqa.metrics import meteor_exact, rouge_l_f1
 from legalqa.legal_graph import temporal_relation_adjustment
-from legalqa.pipeline import _append_candidate, _load_candidate_cache, run_pipeline
+from legalqa.pipeline import _append_candidate, _load_candidate_cache, _merge_tool_evidence, run_pipeline
 from legalqa.prompts import qwen_user_prompt
 from legalqa.retrieval import Evidence, deduplicate_and_merge_evidence
 from legalqa.routing import decide_route
@@ -23,6 +26,7 @@ from legalqa.sqlite_retrieval import (
     _filter_graph_candidates,
     load_retrieval_cache,
     retrieve_sqlite_batch,
+    sqlite_bm25_search_fn,
 )
 from legalqa.sqlite_store import SQLiteLegalStore, build_sqlite_store, prepare_sqlite_weak_pairs
 from legalqa.verifier import score_candidates
@@ -617,3 +621,192 @@ def test_generated_answer_compaction_removes_loops_and_stops_on_sentence_boundar
     )
     assert "Quy định bổ sung" in untrimmed
     assert untrimmed_report["duplicate_sentences_removed"] == 1
+
+
+def test_parse_agentic_step_detects_tool_call_and_final_answer():
+    query, answer = parse_agentic_step("TRA_CUU: mức phạt chậm đóng bảo hiểm xã hội")
+    assert answer is None
+    assert query == "mức phạt chậm đóng bảo hiểm xã hội"
+
+    # Marker phải được nhận dù model bỏ dấu tiếng Việt ở nhãn lệnh.
+    query_no_diacritics, _ = parse_agentic_step("tra cuu: thời hạn khiếu nại")
+    assert query_no_diacritics == "thời hạn khiếu nại"
+
+    query_none, answer_only = parse_agentic_step("Theo Điều 1, người lao động được nghỉ phép.")
+    assert query_none is None
+    assert answer_only == "Theo Điều 1, người lao động được nghỉ phép."
+
+    # Marker phát ra nhưng không kèm truy vấn: vẫn phải nhận diện là "có ý định
+    # tool-call" (query rỗng) chứ không được rơi xuống nhánh coi nguyên văn
+    # "TRA_CUU:" là câu trả lời cuối cùng.
+    empty_query, empty_answer = parse_agentic_step("TRA_CUU:")
+    assert empty_query == ""
+    assert empty_answer is None
+
+
+def test_agentic_candidate_issues_tool_call_then_answers(tmp_path):
+    config = minimal_config(tmp_path)
+    config["generation"].update({"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 3})
+    seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {}), 0.9)]
+    extra_chunk = Chunk("c2", "d1", "Điều 2. Mức phạt chậm đóng là 0,03%/ngày.", "Luật", "Điều 2", {})
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls == 1:
+                assert "CÔNG CỤ TRA CỨU" in user
+                return GenerationResult("TRA_CUU: mức phạt chậm đóng", 12, True, False)
+            assert "LỊCH SỬ TRA CỨU" in user
+            return GenerationResult("Theo Điều 2, mức phạt chậm đóng là 0,03%/ngày.", 20, True, False)
+
+    search_calls: list[str] = []
+
+    def fake_search(query: str) -> list[Evidence]:
+        search_calls.append(query)
+        return [Evidence(extra_chunk, 0.8)]
+
+    generator = FakeGenerator()
+    candidate = make_qwen_agentic_candidate(generator, "Mức phạt chậm đóng bảo hiểm là bao nhiêu?", seed_evidence, config, fake_search)
+
+    assert generator.calls == 2
+    assert search_calls == ["mức phạt chậm đóng"]
+    assert candidate.source == "qwen3.5-2b-agentic"
+    assert "0,03%" in candidate.answer
+    assert candidate.details["tool_calls_used"] == 1
+    assert candidate.details["evidence_added_total"] == 1
+
+
+def test_agentic_candidate_skips_tool_section_when_search_fn_missing(tmp_path):
+    config = minimal_config(tmp_path)
+    seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            assert "CÔNG CỤ TRA CỨU" not in user
+            return GenerationResult("Theo Điều 1, người lao động được nghỉ phép.", 10, True, False)
+
+    candidate = make_qwen_agentic_candidate(FakeGenerator(), "Người lao động có được nghỉ phép không?", seed_evidence, config, None)
+    assert candidate.details["tool_calls_used"] == 0
+    assert candidate.details["evidence_added_total"] == 0
+
+
+def test_agentic_candidate_raises_when_model_ignores_tool_call_limit(tmp_path):
+    # Model vẫn phát "TRA_CUU:" ở lượt cuối cùng (đã hết hạn mức) -> không được
+    # nộp nguyên văn marker làm câu trả lời, phải báo lỗi để pipeline loại bỏ.
+    config = minimal_config(tmp_path)
+    config["generation"]["agentic_max_tool_calls"] = 1
+    seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            return GenerationResult("TRA_CUU: gì đó", 5, True, False)
+
+    with pytest.raises(RuntimeError):
+        make_qwen_agentic_candidate(FakeGenerator(), "Câu hỏi?", seed_evidence, config, lambda q: [])
+
+
+def test_agentic_candidate_raises_on_empty_tool_query(tmp_path):
+    config = minimal_config(tmp_path)
+    seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            return GenerationResult("TRA_CUU:", 3, True, False)
+
+    with pytest.raises(RuntimeError):
+        make_qwen_agentic_candidate(FakeGenerator(), "Câu hỏi?", seed_evidence, config, lambda q: [])
+
+
+def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_path):
+    # render_evidence (prompts.py) cắt bỏ hoàn toàn phần vượt max_context_chars.
+    # Nếu căn cứ tra cứu thêm bị nối vào CUỐI danh sách, ngân sách ký tự đã bị
+    # căn cứ ban đầu dùng hết và nó sẽ không bao giờ lọt vào prompt của lượt kế
+    # tiếp -> tool-call trở thành vô ích một cách âm thầm. Test này khoá lại
+    # hành vi: căn cứ mới phải được ưu tiên trước.
+    config = minimal_config(tmp_path)
+    config["generation"]["max_context_chars"] = 260
+    long_seed = Chunk("s1", "d1", "X" * 200, "Luật", "Điều 1", {})
+    extra_chunk = Chunk("s2", "d1", "Mức phạt là 0,03% mỗi ngày theo Điều 2.", "Luật", "Điều 2", {})
+    seed_evidence = [Evidence(long_seed, 0.9)]
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.prompts: list[str] = []
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            self.prompts.append(user)
+            if self.calls == 1:
+                return GenerationResult("TRA_CUU: mức phạt", 5, True, False)
+            return GenerationResult("Theo Điều 2, mức phạt là 0,03% mỗi ngày.", 10, True, False)
+
+    def fake_search(query: str) -> list[Evidence]:
+        return [Evidence(extra_chunk, 0.8)]
+
+    generator = FakeGenerator()
+    make_qwen_agentic_candidate(generator, "Mức phạt là bao nhiêu?", seed_evidence, config, fake_search)
+
+    second_prompt = generator.prompts[1]
+    assert "Mức phạt là 0,03%" in second_prompt
+
+
+def test_merge_tool_evidence_lets_verifier_see_tool_retrieved_citations(tmp_path):
+    # Không hợp nhất: verifier chấm answer agentic dựa trên evidence_by_id
+    # seed-only, nên "Điều 2"/"0,03%" (chỉ có trong đoạn tra cứu thêm) bị coi
+    # là trích dẫn không có căn cứ -> phạt oan chính vì tool-call đã hoạt động
+    # đúng. Sau khi hợp nhất, verifier phải thấy đủ căn cứ.
+    config = minimal_config(tmp_path)
+    seed_chunk = Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {})
+    tool_chunk_text = "Điều 2. Mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày."
+    evidence_by_id = {"q1": [Evidence(seed_chunk, 0.9)]}
+    question = "Mức phạt chậm đóng bảo hiểm xã hội là bao nhiêu?"
+    answer_text = "Theo Điều 2, mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày."
+    tool_evidence = [{
+        "chunk_id": "c2", "doc_id": "d1", "title": "Luật", "heading": "Điều 2",
+        "text": tool_chunk_text, "score": 0.8, "bm25_score": 0.8,
+    }]
+
+    before = score_candidates(question, evidence_by_id["q1"], [Candidate("qwen3.5-2b-agentic", answer_text)], config)[0]
+    assert before.details["citation_precision"] == 0.0
+
+    _merge_tool_evidence(evidence_by_id, "q1", tool_evidence)
+    after = score_candidates(question, evidence_by_id["q1"], [Candidate("qwen3.5-2b-agentic", answer_text)], config)[0]
+    assert after.details["citation_precision"] == 1.0
+
+    # Gọi lại lần 2 (mô phỏng cache-hit ở lượt chạy sau) không được thêm trùng.
+    _merge_tool_evidence(evidence_by_id, "q1", tool_evidence)
+    assert len(evidence_by_id["q1"]) == 2
+
+
+def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):
+    # Trên Kaggle, retrieval ban đầu dùng SQLite (FTS5) chứ không phải
+    # HybridRetriever; tool-call agentic phải tự mở connection readonly riêng
+    # vì retrieve_sqlite_batch đã đóng connection của nó ngay sau khi trả kết
+    # quả (xem docstring sqlite_bm25_search_fn).
+    config = minimal_config(tmp_path)
+    corpus = tmp_path / "contexts"
+    corpus.mkdir()
+    (corpus / "doc.json").write_text(
+        json.dumps(
+            {
+                "id": "d1",
+                "title": "Luật",
+                "text": "Điều 2. Mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày.",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    database = tmp_path / "legal.sqlite"
+    build_sqlite_store(config, corpus, database)
+
+    with sqlite_bm25_search_fn(config, database) as search_fn:
+        results = search_fn("mức phạt chậm đóng bảo hiểm")
+        assert results
+        assert results[0].chunk.doc_id == "d1"
+        assert results[0].stage == "tool_call"
+        assert results[0].bm25_score == results[0].score

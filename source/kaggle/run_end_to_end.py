@@ -25,7 +25,7 @@ from legalqa.budget import count_system_budget  # noqa: E402
 from legalqa.config import load_config  # noqa: E402
 from legalqa.data import deterministic_split, load_qa, qa_as_object, write_json  # noqa: E402
 from legalqa.pipeline import generate_from_evidence  # noqa: E402
-from legalqa.sqlite_retrieval import retrieve_sqlite_batch  # noqa: E402
+from legalqa.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
 from legalqa.sqlite_store import build_sqlite_store, prepare_sqlite_weak_pairs  # noqa: E402
 from legalqa.submission import create_submission  # noqa: E402
 
@@ -322,7 +322,13 @@ def main() -> None:
         reuse_cache=not args.no_reuse_retrieval and not args.force_train,
     )
     predictions = working / "predictions.json"
-    generation_report = generate_from_evidence(config, public_questions, evidence, predictions)
+    if config["generation"].get("agentic_enabled", False):
+        with sqlite_bm25_search_fn(config, database) as agentic_search_fn:
+            generation_report = generate_from_evidence(
+                config, public_questions, evidence, predictions, agentic_search_fn
+            )
+    else:
+        generation_report = generate_from_evidence(config, public_questions, evidence, predictions)
     submission_report = create_submission(public_path, predictions, submission)
 
     manifest = {

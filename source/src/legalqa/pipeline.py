@@ -5,14 +5,15 @@ import hashlib
 import os
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
-from .data import load_qa, write_json
+from .data import Chunk, load_qa, write_json
 from .generation import (
     Candidate,
     extractive_candidate,
+    make_qwen_agentic_candidate,
     make_qwen_candidate,
     make_train_memory_candidate,
 )
@@ -123,6 +124,49 @@ def _fatal_generation_error(error: RuntimeError) -> bool:
     return any(marker in message for marker in fatal_markers)
 
 
+def _merge_tool_evidence(
+    evidence_by_id: dict[str, list[Evidence]],
+    question_id: str,
+    tool_evidence: list[dict[str, Any]],
+) -> None:
+    """Hợp nhất căn cứ do tool-call agentic tìm thêm vào evidence_by_id.
+
+    verifier.score_candidates chấm mọi candidate của một câu hỏi (kể cả
+    extractive/train-memory/qwen thường) dựa trên evidence_by_id[question_id];
+    nếu không hợp nhất, candidate agentic bị unsupported_penalty phạt oan vì
+    trích dẫn căn cứ mà nó tự tra cứu thêm chứ verifier "chưa thấy". Chạy cho
+    cả nhánh cache-hit lẫn vừa sinh mới vì scoring luôn chạy lại mỗi lần,
+    không phụ thuộc candidate cache.
+    """
+    if not tool_evidence:
+        return
+    existing_ids = {item.chunk.chunk_id for item in evidence_by_id[question_id]}
+    for entry in tool_evidence:
+        if entry["chunk_id"] in existing_ids:
+            continue
+        evidence_by_id[question_id].append(
+            Evidence(
+                chunk=Chunk(
+                    chunk_id=entry["chunk_id"],
+                    doc_id=entry["doc_id"],
+                    text=entry["text"],
+                    title=entry.get("title", ""),
+                    heading=entry.get("heading", ""),
+                ),
+                # score=0.0 cố ý: score gốc của tool-call nằm trên thang
+                # lexical (~1-20+), khác thang RRF-fused (~0.02-1) của evidence
+                # thường. Nếu giữ nguyên, chunk này sẽ nghiễm nhiên thành phần
+                # tử "top" trong retrieval_confidence (reranker_score=0 kéo
+                # confidence tụt giả tạo) dù mục đích merge chỉ để verifier
+                # thấy được citation/numbers, không phải để xếp hạng.
+                score=0.0,
+                bm25_score=float(entry.get("bm25_score", 0.0)),
+                stage="tool_call",
+            )
+        )
+        existing_ids.add(entry["chunk_id"])
+
+
 def _trace_evidence(items: list[Evidence]) -> list[dict[str, Any]]:
     return [
         {
@@ -164,7 +208,12 @@ def run_pipeline(
         unload_model(reranker)
         dense_encoder = reranker = None
 
-    return generate_from_evidence(config, questions, evidence_by_id, output_path)
+    # retriever.retrieve_bm25_only chỉ dùng self.index.bm25 (không phải model GPU),
+    # nên vẫn hoạt động an toàn sau khi dense_encoder/reranker đã unload ở trên.
+    agentic_search_fn = (
+        retriever.retrieve_bm25_only if config["generation"].get("agentic_enabled", False) else None
+    )
+    return generate_from_evidence(config, questions, evidence_by_id, output_path, agentic_search_fn)
 
 
 def generate_from_evidence(
@@ -172,6 +221,7 @@ def generate_from_evidence(
     questions,
     evidence_by_id: dict[str, list[Evidence]],
     output_path: str | Path | None = None,
+    agentic_search_fn: Callable[[str], list[Evidence]] | None = None,
 ) -> dict[str, Any]:
     """Generate and select answers from retrieval results, independent of index backend."""
     artifacts = Path(config["paths"]["artifacts"])
@@ -265,6 +315,91 @@ def generate_from_evidence(
                 unload_model(generator, "Qwen")
             if recovery:
                 recovery.snapshot("qwen", completed, len(questions), force=True)
+
+    if config["generation"].get("agentic_enabled", False) and model_paths.get("generator"):
+        if agentic_search_fn is None:
+            print(
+                "[Qwen-agentic] agentic_enabled=true nhưng caller không truyền agentic_search_fn "
+                "(backend truy hồi này chưa hỗ trợ tool-call); bỏ qua ứng viên agentic.",
+                flush=True,
+            )
+        else:
+            cache_path = candidate_cache_dir / "qwen_agentic.jsonl"
+            cached = _load_candidate_cache(cache_path, include_metadata=True)
+            base_namespace = run_namespace or model_paths.get("generator_adapter") or model_paths.get("generator")
+            # Gộp thêm 2 tham số điều khiển vòng lặp tool-call vào namespace: nếu
+            # đổi agentic_max_tool_calls/agentic_evidence_per_call để thử nghiệm,
+            # cache cũ (sinh với tham số khác) sẽ tự động bị bỏ qua thay vì trả về
+            # câu trả lời cũ một cách âm thầm.
+            agentic_namespace = (
+                f"{base_namespace}::calls={config['generation'].get('agentic_max_tool_calls', 2)}"
+                f"::per_call={config['generation'].get('agentic_evidence_per_call', 3)}"
+            )
+            missing = [
+                item for item in questions
+                if _candidate_key(item, evidence_by_id[item.question_id], "qwen-agentic", agentic_namespace) not in cached
+            ]
+            completed = len(questions) - len(missing)
+            generator = None
+            consecutive_errors = 0
+            try:
+                generator = QwenTextGenerator(config) if missing else None
+                for item in questions:
+                    key = _candidate_key(
+                        item, evidence_by_id[item.question_id], "qwen-agentic",
+                        agentic_namespace,
+                    )
+                    if key in cached:
+                        entry = cached[key]
+                        candidates_by_id[item.question_id].append(
+                            Candidate("qwen3.5-2b-agentic", entry["answer"], details=entry.get("metadata", {}))
+                        )
+                        _merge_tool_evidence(
+                            evidence_by_id, item.question_id,
+                            entry.get("metadata", {}).get("tool_evidence", []),
+                        )
+                        continue
+                    try:
+                        candidate = make_qwen_agentic_candidate(
+                            generator,
+                            item.question,
+                            evidence_by_id[item.question_id],
+                            config,
+                            agentic_search_fn,
+                            retrieval_diagnostics.get(item.question_id),
+                        )
+                        candidates_by_id[item.question_id].append(candidate)
+                        _merge_tool_evidence(
+                            evidence_by_id, item.question_id,
+                            candidate.details.get("tool_evidence", []),
+                        )
+                        _append_candidate(
+                            cache_path,
+                            key,
+                            item.question_id,
+                            candidate.answer,
+                            candidate.details,
+                        )
+                        cached[key] = {"answer": candidate.answer, "metadata": candidate.details}
+                        completed += 1
+                        consecutive_errors = 0
+                        if recovery:
+                            recovery.snapshot("qwen_agentic", completed, len(questions))
+                        if completed % 25 == 0:
+                            print(f"[Qwen-agentic] generated {completed:,}/{len(questions):,}", flush=True)
+                    except RuntimeError as exc:
+                        errors.setdefault(item.question_id, []).append(f"Qwen-agentic: {exc}")
+                        consecutive_errors += 1
+                        if _fatal_generation_error(exc) or consecutive_errors >= 3:
+                            raise RuntimeError(
+                                f"Qwen-agentic dừng tại question_id={item.question_id} sau "
+                                f"{consecutive_errors} lỗi liên tiếp; cache đã hoàn thành={completed}."
+                            ) from exc
+            finally:
+                if config["runtime"].get("unload_after_stage", True):
+                    unload_model(generator, "Qwen-agentic")
+                if recovery:
+                    recovery.snapshot("qwen_agentic", completed, len(questions), force=True)
 
     semantic_encoder = None
     if model_paths.get("verifier") and float(config["selection"].get("legal_semantic", 0.0)) > 0:

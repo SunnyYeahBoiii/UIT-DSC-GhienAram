@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .answer_style import generation_plan
-from .prompts import SYSTEM_PROMPT, qwen_user_prompt
+from .prompts import AGENTIC_SYSTEM_PROMPT, SYSTEM_PROMPT, qwen_agentic_user_prompt, qwen_user_prompt
 from .retrieval import Evidence
 from .text import citations, legal_tokens, normalize_text, numbers, split_sentences, words
 
@@ -189,6 +190,157 @@ def make_qwen_candidate(
                 >= float(config.get("retrieval", {}).get("train_memory_fewshot_threshold", 0.70))
                 for item in (retrieval_diagnostics or {}).get("train_memory", [])
             ),
+        },
+    )
+
+
+_TOOL_CALL_MARKER = re.compile(r"^\s*tra[_\s]*cuu\s*[:：]", re.IGNORECASE)
+
+
+def _strip_diacritics(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(character for character in decomposed if unicodedata.category(character) != "Mn")
+
+
+def parse_agentic_step(raw_text: str) -> tuple[str | None, str | None]:
+    """Phân loại một lượt sinh trong vòng lặp agentic.
+
+    Model được hướng dẫn mở đầu bằng "TRA_CUU: <truy vấn>" khi muốn tra cứu
+    thêm; mọi output khác coi là câu trả lời cuối. So khớp marker trên bản đã
+    bỏ dấu vì model 2B đôi lúc bỏ dấu tiếng Việt ở nhãn lệnh, còn truy vấn giữ
+    nguyên dấu để BM25 tra cứu đúng.
+    Trả về (query, None) nếu là tool call, hoặc (None, answer) nếu là câu trả lời.
+    """
+    first_line, _, _ = raw_text.strip().partition("\n")
+    if _TOOL_CALL_MARKER.match(_strip_diacritics(first_line)):
+        query = re.split(r"[:：]", first_line, maxsplit=1)[-1].strip()
+        return query, None
+    return None, clean_answer(raw_text)
+
+
+def make_qwen_agentic_candidate(
+    generator,
+    question: str,
+    evidence: list[Evidence],
+    config: dict,
+    search_fn: Callable[[str], list[Evidence]] | None,
+    retrieval_diagnostics: dict | None = None,
+) -> Candidate:
+    """Biến thể agentic của make_qwen_candidate: model có thể tự phát ra
+    truy vấn ("TRA_CUU: ...") để lấy thêm căn cứ giữa các lượt sinh, thay vì
+    chỉ dùng đúng một lần retrieve cố định trước đó (xem pipeline.run_pipeline).
+    """
+    route = (retrieval_diagnostics or {}).get("route", {}).get("route", "simple")
+    plan = generation_plan(question, route, config)
+    token_limit = int(plan["max_new_tokens"])
+    generation_cfg = config.get("generation", {})
+    max_tool_calls = max(0, int(generation_cfg.get("agentic_max_tool_calls", 2)))
+    evidence_per_call = max(1, int(generation_cfg.get("agentic_evidence_per_call", 3)))
+
+    current_evidence = list(evidence)
+    seen_chunk_ids = {item.chunk.chunk_id for item in current_evidence}
+    tool_evidence_pool: list[Evidence] = []
+    transcript: list[dict[str, Any]] = []
+    answer = ""
+    generated_tokens = 0
+    truncated = False
+    terminated_by_eos = True
+
+    for step in range(max_tool_calls + 1):
+        allow_tool = search_fn is not None and step < max_tool_calls
+        prompt = qwen_agentic_user_prompt(
+            question, current_evidence, config, retrieval_diagnostics, transcript, allow_tool,
+        )
+        result = generator.generate_with_metadata(
+            AGENTIC_SYSTEM_PROMPT if allow_tool else SYSTEM_PROMPT,
+            prompt,
+            max_new_tokens=token_limit,
+        )
+        generated_tokens += result.generated_tokens
+        # Gán (không OR) giống terminated_by_eos: câu trả lời cuối luôn đến từ
+        # lượt vừa chạy, nên "truncated" của final answer không được kế thừa
+        # từ các lượt tool-call trước đó — một lượt tool-call sinh dài rồi bị
+        # cắt (đọc câu TRA_CUU: ở dòng đầu, phần đuôi bị bỏ) không đại diện
+        # cho chất lượng của lượt trả lời thật sự.
+        truncated = result.truncated
+        terminated_by_eos = result.terminated_by_eos
+        query, final_answer = parse_agentic_step(result.text)
+        if not allow_tool:
+            # Lượt cuối không còn hạn mức tra cứu: nếu model vẫn phát "TRA_CUU:"
+            # thì đó là output hỏng (marker không phải câu trả lời thật), không
+            # được lấy làm đáp án — phải báo lỗi để pipeline loại candidate này
+            # thay vì nộp nguyên văn "TRA_CUU: ..." làm câu trả lời.
+            if query is not None:
+                raise RuntimeError(
+                    "Qwen (agentic) vẫn phát TRA_CUU sau khi hết hạn mức tra cứu."
+                )
+            answer = final_answer or ""
+            break
+        if query is None:
+            answer = final_answer or ""
+            break
+        if not query:
+            raise RuntimeError("Qwen (agentic) phát TRA_CUU nhưng không kèm truy vấn.")
+        new_evidence = search_fn(query)
+        added = [item for item in new_evidence if item.chunk.chunk_id not in seen_chunk_ids][:evidence_per_call]
+        for item in added:
+            seen_chunk_ids.add(item.chunk.chunk_id)
+        # Chèn căn cứ mới lên đầu danh sách: model chỉ tra cứu thêm khi thấy
+        # thiếu, nên phần vừa tìm được cần ưu tiên ngân sách ký tự của
+        # render_evidence hơn căn cứ ban đầu — nếu nối vào cuối, ngân sách
+        # (max_context_chars) thường đã bị các đoạn ban đầu dùng hết và căn cứ
+        # mới sẽ bị cắt bỏ hoàn toàn (xem prompts.render_evidence).
+        current_evidence = added + current_evidence
+        tool_evidence_pool.extend(added)
+        transcript.append(
+            {"step": step + 1, "query": query, "evidence_added": [item.chunk.chunk_id for item in added]}
+        )
+
+    if not answer:
+        raise RuntimeError("Qwen (agentic) sinh câu trả lời rỗng.")
+    compaction = {
+        "raw_words": len(words(answer)),
+        "compacted_words": len(words(answer)),
+        "duplicate_sentences_removed": 0,
+        "compaction_applied": False,
+    }
+    if bool(generation_cfg.get("compact_generated_answers", True)):
+        answer, compaction = compact_generated_answer(
+            answer,
+            int(plan["maximum_words"]),
+            hard_trim=bool(generation_cfg.get("hard_trim_generated_answers", False)),
+        )
+    return Candidate(
+        "qwen3.5-2b-agentic",
+        answer,
+        details={
+            "route": route,
+            "generated_tokens": generated_tokens,
+            "terminated_by_eos": terminated_by_eos,
+            "truncated": truncated,
+            "token_limit": token_limit,
+            "style_plan": plan,
+            **compaction,
+            "tool_calls": transcript,
+            "tool_calls_used": len(transcript),
+            "evidence_added_total": len(tool_evidence_pool),
+            # Bản sao serializable của các Evidence tra cứu thêm — pipeline dùng
+            # để hợp nhất vào evidence_by_id trước khi verifier chấm điểm, tránh
+            # phạt answer vì trích dẫn căn cứ mà verifier "chưa thấy" (đến từ
+            # tool-call chứ không phải retrieval ban đầu). Lưu dạng dict để sống
+            # sót qua candidate cache JSONL, không phụ thuộc lại vào index gốc.
+            "tool_evidence": [
+                {
+                    "chunk_id": item.chunk.chunk_id,
+                    "doc_id": item.chunk.doc_id,
+                    "title": item.chunk.title,
+                    "heading": item.chunk.heading,
+                    "text": item.chunk.text,
+                    "score": item.score,
+                    "bm25_score": item.bm25_score,
+                }
+                for item in tool_evidence_pool
+            ],
         },
     )
 

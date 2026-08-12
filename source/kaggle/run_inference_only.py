@@ -41,7 +41,7 @@ from legalqa.models import (  # noqa: E402
 )
 from legalqa.pipeline import generate_from_evidence  # noqa: E402
 from legalqa.recovery import RecoveryManager, restore_recovery_bundle  # noqa: E402
-from legalqa.sqlite_retrieval import retrieve_sqlite_batch  # noqa: E402
+from legalqa.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
 from legalqa.sqlite_store import build_sqlite_store  # noqa: E402
 from legalqa.sqlite_store import SQLiteLegalStore  # noqa: E402
 from legalqa.submission import create_submission  # noqa: E402
@@ -550,7 +550,13 @@ def main() -> None:
 
     predictions = working / "predictions.json"
     generation_started = time.time()
-    generation_report = generate_from_evidence(config, questions, evidence, predictions)
+    if config["generation"].get("agentic_enabled", False):
+        with sqlite_bm25_search_fn(config, database) as agentic_search_fn:
+            generation_report = generate_from_evidence(
+                config, questions, evidence, predictions, agentic_search_fn
+            )
+    else:
+        generation_report = generate_from_evidence(config, questions, evidence, predictions)
     generation_minutes = (time.time() - generation_started) / 60
     submission_report = create_submission(public_path, predictions, submission)
 

@@ -93,6 +93,14 @@ generation:
   qwen_enabled: true
   bartpho_enabled: false
   extractive_enabled: true
+  # Vòng lặp tool-call: model có thể tự phát truy vấn "TRA_CUU: ..." để BM25
+  # (SQLite FTS5) tra thêm căn cứ giữa các lượt sinh. Mặc định tắt để không
+  # đổi hành vi baseline; bật thử bằng true (tốn thêm tối đa
+  # agentic_max_tool_calls lượt sinh/câu hỏi).
+  agentic_enabled: true
+  agentic_max_tool_calls: 2
+  agentic_evidence_per_call: 3
+  agentic_bm25_top_k: 60
   max_context_chars: 18000
   max_new_tokens: 900
   simple_max_new_tokens: 512

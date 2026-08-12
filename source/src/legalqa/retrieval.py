@@ -193,6 +193,21 @@ class HybridRetriever:
         self.dense_encoder = dense_encoder
         self.reranker = reranker
 
+    def retrieve_bm25_only(self, query: str, top_k: int | None = None) -> list[Evidence]:
+        """Tra cứu nhẹ chỉ dùng BM25, không cần dense_encoder/reranker còn sống.
+
+        Dùng cho vòng lặp tool-call của model sinh: model có thể tự phát ra
+        truy vấn giữa lúc generate, sau khi dense/reranker đã được unload để
+        tiết kiệm VRAM (xem pipeline.run_pipeline).
+        """
+        cfg = self.config["retrieval"]
+        limit = int(top_k if top_k is not None else cfg.get("agentic_bm25_top_k", cfg["bm25_top_k"]))
+        results = self.index.bm25.search(query, limit)
+        return [
+            Evidence(chunk=self.index.chunks[chunk_index], score=score, bm25_score=score, stage="tool_call")
+            for chunk_index, score in results
+        ]
+
     def retrieve(self, question: str) -> list[Evidence]:
         cfg = self.config["retrieval"]
         bm25 = self.index.bm25.search(question, int(cfg["bm25_top_k"]))

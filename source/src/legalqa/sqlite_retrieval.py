@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from .data import Chunk, QARecord
 from .dense_store import ensure_global_dense_index, search_global_dense_index
@@ -178,6 +179,33 @@ def _filter_graph_candidates(
         "reranker_threshold": threshold if reranker_available else None,
         "lexical_threshold": lexical_threshold if not reranker_available else None,
     }
+
+
+@contextmanager
+def sqlite_bm25_search_fn(
+    config: dict[str, Any], database_path: str | Path
+) -> Iterator[Callable[[str], list[Evidence]]]:
+    """Hàm tra cứu nhẹ cho vòng lặp tool-call agentic, tương đương
+    HybridRetriever.retrieve_bm25_only nhưng cho backend SQLite (Kaggle).
+
+    retrieve_sqlite_batch mở SQLiteLegalStore trong một khối `with` nội bộ và
+    đóng lại ngay khi retrieval ban đầu xong, nên không còn connection nào
+    sống để tái sử dụng cho các lượt tra cứu phát sinh giữa lúc generate. Hàm
+    này tự mở một connection readonly riêng, giữ sống trong suốt
+    generate_from_evidence() (nơi gọi phải dùng `with sqlite_bm25_search_fn(...)
+    as search_fn:`), và đóng lại khi thoát khối.
+    """
+    cfg = config["retrieval"]
+    top_k = int(cfg.get("agentic_bm25_top_k", cfg.get("bm25_top_k", 100)))
+    with SQLiteLegalStore(database_path, readonly=True) as store:
+        def search(query: str) -> list[Evidence]:
+            hits = store.search_chunks(query, top_k=top_k)
+            return [
+                Evidence(chunk=hit.chunk, score=hit.lexical_score, bm25_score=hit.lexical_score, stage="tool_call")
+                for hit in hits
+            ]
+
+        yield search
 
 
 def retrieve_sqlite_batch(

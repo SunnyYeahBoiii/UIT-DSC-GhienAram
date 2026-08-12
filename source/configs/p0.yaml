@@ -46,6 +46,13 @@ generation:
   qwen_enabled: true
   bartpho_enabled: true
   extractive_enabled: true
+  # Vòng lặp tool-call: model có thể tự phát truy vấn "TRA_CUU: ..." để
+  # BM25 tra thêm căn cứ giữa các lượt sinh (agentic search). Mặc định tắt
+  # để không đổi hành vi baseline hiện tại; bật thử bằng true.
+  agentic_enabled: false
+  agentic_max_tool_calls: 2
+  agentic_evidence_per_call: 3
+  agentic_bm25_top_k: 60
   max_context_chars: 26000
   max_new_tokens: 1050
   do_sample: false
