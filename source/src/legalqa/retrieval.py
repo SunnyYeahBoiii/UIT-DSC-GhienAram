@@ -86,6 +86,9 @@ def deduplicate_and_merge_evidence(
     limit: int,
     *,
     prefer_document_diversity: bool,
+    max_documents: int | None = None,
+    diversity_bonus: float = 0.05,
+    minimum_score_ratio: float = 0.0,
 ) -> list[Evidence]:
     """Merge adjacent windows and remove near-duplicate evidence slots."""
     if limit <= 0:
@@ -144,14 +147,34 @@ def deduplicate_and_merge_evidence(
     if not prefer_document_diversity:
         return merged[:limit]
     selected: list[Evidence] = []
-    remaining = list(merged)
+    top_score = max((item.score for item in merged), default=0.0)
+    remaining = [
+        item
+        for item in merged
+        if top_score <= 0.0 or item.score >= top_score * max(0.0, minimum_score_ratio)
+    ]
     seen_docs: set[str] = set()
     while remaining and len(selected) < limit:
-        fresh_index = next(
-            (index for index, item in enumerate(remaining) if item.chunk.doc_id not in seen_docs),
-            0,
+        allowed = [
+            (index, item)
+            for index, item in enumerate(remaining)
+            if item.chunk.doc_id in seen_docs
+            or max_documents is None
+            or len(seen_docs) < max_documents
+        ]
+        if not allowed:
+            break
+        best_index, item = min(
+            allowed,
+            key=lambda pair: (
+                -(
+                    pair[1].score
+                    + (diversity_bonus if pair[1].chunk.doc_id not in seen_docs else 0.0)
+                ),
+                pair[1].chunk.chunk_id,
+            ),
         )
-        item = remaining.pop(fresh_index)
+        remaining.pop(best_index)
         selected.append(item)
         seen_docs.add(item.chunk.doc_id)
     return selected

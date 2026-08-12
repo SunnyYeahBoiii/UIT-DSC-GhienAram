@@ -14,6 +14,7 @@ from .retrieval import Evidence, deduplicate_and_merge_evidence
 from .routing import decide_route
 from .sqlite_store import SQLiteHit, SQLiteLegalStore
 from .text import citations, document_numbers, numbers
+from .train_memory import ensure_train_memory_index, search_train_memory
 
 
 class RetrievalBatch(dict[str, list[Evidence]]):
@@ -24,10 +25,12 @@ class RetrievalBatch(dict[str, list[Evidence]]):
         evidence: dict[str, list[Evidence]] | None = None,
         diagnostics: dict[str, dict[str, Any]] | None = None,
         index_report: dict[str, Any] | None = None,
+        memory_report: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(evidence or {})
         self.diagnostics = diagnostics or {}
         self.index_report = index_report or {}
+        self.memory_report = memory_report or {}
 
 
 def _evidence_payload(evidence: Evidence, include_chunk: bool) -> dict[str, Any]:
@@ -145,6 +148,38 @@ def _rerank_batch(
         evidence.score += weight * evidence.reranker_score
 
 
+def _filter_graph_candidates(
+    question: str,
+    route_features: dict[str, float],
+    initial: list[Evidence],
+    proposed: list[Evidence],
+    retrieval_cfg: dict[str, Any],
+    *,
+    reranker_available: bool,
+) -> tuple[list[Evidence], dict[str, float | None]]:
+    """Keep graph chunks only when they remain relevant after relation expansion."""
+    floor = float(retrieval_cfg.get("graph_min_reranker", 0.12))
+    relative = float(retrieval_cfg.get("graph_relative_reranker", 0.30))
+    initial_top = max((item.reranker_score for item in initial[:5]), default=0.0)
+    threshold = max(floor, relative * initial_top)
+    if asks_for_current_law(question) or route_features.get("complex_cue", 0.0) > 0:
+        discount = float(
+            retrieval_cfg.get("graph_temporal_threshold_discount", 0.60)
+        )
+        threshold = max(floor * 0.5, threshold * discount)
+    lexical_threshold = float(
+        retrieval_cfg.get("graph_min_lexical_without_reranker", 2.0)
+    )
+    if reranker_available:
+        accepted = [item for item in proposed if item.reranker_score >= threshold]
+    else:
+        accepted = [item for item in proposed if item.bm25_score >= lexical_threshold]
+    return accepted, {
+        "reranker_threshold": threshold if reranker_available else None,
+        "lexical_threshold": lexical_threshold if not reranker_available else None,
+    }
+
+
 def retrieve_sqlite_batch(
     config: dict[str, Any],
     database_path: str | Path,
@@ -158,7 +193,7 @@ def retrieve_sqlite_batch(
             loaded = load_retrieval_cache(cache)
             expected = {item.question_id for item in questions}
             if set(loaded) == expected and all(loaded.diagnostics.get(key) for key in expected):
-                print(f"[Retrieval] reused v3 cache: {cache}", flush=True)
+                print(f"[Retrieval] reused graph-gated cache: {cache}", flush=True)
                 return loaded
             print(
                 f"[Retrieval] cache thiếu/thừa ID hoặc diagnostics; sẽ tính lại: "
@@ -183,7 +218,11 @@ def retrieve_sqlite_batch(
 
     lexical_by_id: dict[str, list[SQLiteHit]] = {}
     dense_by_id: dict[str, list[tuple[SQLiteHit, float]]] = {item.question_id: [] for item in questions}
+    memory_by_id: dict[str, list[dict[str, Any]]] = {
+        item.question_id: [] for item in questions
+    }
     dense_index_report: dict[str, Any] = {"enabled": False}
+    memory_index_report: dict[str, Any] = {"enabled": False}
     with SQLiteLegalStore(database_path, readonly=True) as store:
         for question_number, question in enumerate(questions, 1):
             lexical_by_id[question.question_id] = store.search_chunks(
@@ -197,29 +236,58 @@ def retrieve_sqlite_batch(
             and model_paths.get("embedding")
             and dense_k > 0
         )
-        if use_dense:
+        train_path = config.get("runtime", {}).get("train_path")
+        use_memory = bool(
+            retrieval_cfg.get("train_memory_enabled", True)
+            and model_paths.get("embedding")
+            and train_path
+            and int(retrieval_cfg.get("train_memory_top_k", 3)) > 0
+        )
+        if use_dense or use_memory:
             print("[Global dense] loading embedding model", flush=True)
             encoder = DenseEncoder(config)
             try:
-                dense_dir = Path(
-                    config.get("runtime", {}).get("dense_index_dir")
-                    or Path(database_path).with_name("global_dense_index")
-                )
-                dense_index_report = ensure_global_dense_index(config, store, encoder, dense_dir)
                 query_vectors = encoder.encode([item.question for item in questions])
-                dense_results = search_global_dense_index(
-                    query_vectors,
-                    dense_dir,
-                    dense_k,
-                    device=str(config["runtime"].get("device", "cuda:0")),
-                    block_size=int(retrieval_cfg.get("dense_search_block", 8192)),
-                )
-                for question, ranked in zip(questions, dense_results):
-                    rowids = [rowid for rowid, _ in ranked]
-                    hit_map = {hit.rowid: hit for hit in store.hits_for_rowids(rowids)}
-                    dense_by_id[question.question_id] = [
-                        (hit_map[rowid], score) for rowid, score in ranked if rowid in hit_map
-                    ]
+                if use_dense:
+                    dense_dir = Path(
+                        config.get("runtime", {}).get("dense_index_dir")
+                        or Path(database_path).with_name("global_dense_index")
+                    )
+                    dense_index_report = ensure_global_dense_index(
+                        config, store, encoder, dense_dir
+                    )
+                    dense_results = search_global_dense_index(
+                        query_vectors,
+                        dense_dir,
+                        dense_k,
+                        device=str(config["runtime"].get("device", "cuda:0")),
+                        block_size=int(retrieval_cfg.get("dense_search_block", 8192)),
+                    )
+                    for question, ranked in zip(questions, dense_results):
+                        rowids = [rowid for rowid, _ in ranked]
+                        hit_map = {hit.rowid: hit for hit in store.hits_for_rowids(rowids)}
+                        dense_by_id[question.question_id] = [
+                            (hit_map[rowid], score)
+                            for rowid, score in ranked
+                            if rowid in hit_map
+                        ]
+                if use_memory:
+                    memory_dir = Path(
+                        config.get("runtime", {}).get("train_memory_dir")
+                        or Path(database_path).with_name("global_dense_index") / "train_memory"
+                    )
+                    memory_index_report = ensure_train_memory_index(
+                        config, encoder, train_path, memory_dir
+                    )
+                    memory_results = search_train_memory(
+                        query_vectors,
+                        memory_dir,
+                        int(retrieval_cfg.get("train_memory_top_k", 3)),
+                        device=str(config["runtime"].get("device", "cuda:0")),
+                        exclude_question_ids={item.question_id for item in questions},
+                    )
+                    for question, ranked in zip(questions, memory_results):
+                        memory_by_id[question.question_id] = ranked
             finally:
                 unload_model(encoder, "global embedding")
 
@@ -271,6 +339,7 @@ def retrieve_sqlite_batch(
                     for hit, score in dense[:trace_dense_k]
                 ],
                 "fused_top": _trace_rank(items, trace_fused_k),
+                "train_memory": memory_by_id[question.question_id],
             }
 
         reranker = None
@@ -302,13 +371,15 @@ def retrieve_sqlite_batch(
                 config,
             )
 
-        # Deterministic, bounded legal-retrieval agent: expand structural and
-        # document relations, keep a visited set, and stop when no new document exists.
+        # Deterministic, bounded legal-retrieval agent. Unlike v8, every graph
+        # hop is reranked and relevance-gated *before* its documents are allowed
+        # to become the next frontier.
         extras_by_id: dict[str, list[Evidence]] = {item.question_id: [] for item in questions}
         iteration_logs: dict[str, list[dict[str, Any]]] = {item.question_id: [] for item in questions}
-        max_iterations = max(1, min(4, int(config.get("routing", {}).get("max_iterations", 3))))
-        max_new_docs = max(1, int(config.get("routing", {}).get("max_new_docs_per_iteration", 4)))
+        max_iterations = max(1, min(4, int(config.get("routing", {}).get("max_iterations", 2))))
+        max_new_docs = max(1, int(config.get("routing", {}).get("max_new_docs_per_iteration", 3)))
         graph_top_per_doc = max(1, int(config.get("routing", {}).get("graph_chunks_per_document", 2)))
+        graph_states: dict[str, dict[str, Any]] = {}
         for question in questions:
             question_id = question.question_id
             initial = fused_by_id[question_id]
@@ -329,10 +400,36 @@ def retrieve_sqlite_batch(
                         )
                     )
                 continue
-
             frontier = list(dict.fromkeys(item.chunk.doc_id for item in initial[:3]))
-            visited = set(frontier)
-            for iteration in range(1, max_iterations + 1):
+            graph_states[question_id] = {
+                "frontier": frontier,
+                "visited": set(frontier),
+                "active": True,
+            }
+
+        if reranker is not None:
+            simple_extras = {
+                question_id: items
+                for question_id, items in extras_by_id.items()
+                if routes[question_id].route == "simple" and items
+            }
+            _rerank_batch(
+                reranker,
+                questions_by_id,
+                simple_extras,
+                float(retrieval_cfg.get("reranker_weight", 0.72)),
+            )
+
+        for iteration in range(1, max_iterations + 1):
+            proposals: dict[str, list[Evidence]] = {}
+            proposal_meta: dict[str, dict[str, Any]] = {}
+            for question in questions:
+                question_id = question.question_id
+                state = graph_states.get(question_id)
+                if not state or not state["active"]:
+                    continue
+                frontier = list(state["frontier"])
+                visited = set(state["visited"])
                 edges = store.relation_edges(frontier)
                 neighbors: dict[str, tuple[float, Any]] = {}
                 for edge in edges:
@@ -350,17 +447,19 @@ def retrieve_sqlite_batch(
                     iteration_logs[question_id].append(
                         {"iteration": iteration, "frontier": frontier, "new_documents": [], "stopped": "no_new_relation"}
                     )
-                    break
+                    state["active"] = False
+                    continue
                 new_docs = [doc_id for doc_id, _ in chosen]
                 hits = store.rank_chunks_in_documents(
                     question.question, new_docs, top_per_document=graph_top_per_doc
                 )
                 edge_by_doc = {doc_id: value[1] for doc_id, value in chosen}
                 relation_score_by_doc = {doc_id: value[0] for doc_id, value in chosen}
+                proposed_items: list[Evidence] = []
                 for hit in hits:
                     edge = edge_by_doc[hit.chunk.doc_id]
                     relation_score = relation_score_by_doc[hit.chunk.doc_id]
-                    extras_by_id[question_id].append(
+                    proposed_items.append(
                         Evidence(
                             hit.chunk,
                             score=(
@@ -378,34 +477,84 @@ def retrieve_sqlite_batch(
                             ],
                         )
                     )
-                iteration_logs[question_id].append(
-                    {
-                        "iteration": iteration,
-                        "frontier": frontier,
-                        "new_documents": new_docs,
-                        "relations": [
-                            {
-                                "source_doc_id": edge_by_doc[doc_id].source_doc_id,
-                                "target_doc_id": edge_by_doc[doc_id].target_doc_id,
-                                "type": edge_by_doc[doc_id].relation_type,
-                                "direction": edge_by_doc[doc_id].direction,
-                                "confidence": edge_by_doc[doc_id].confidence,
-                            }
-                            for doc_id in new_docs
-                        ],
-                    }
+                proposals[question_id] = proposed_items
+                proposal_meta[question_id] = {
+                    "frontier": frontier,
+                    "new_docs": new_docs,
+                    "edge_by_doc": edge_by_doc,
+                }
+
+            if not proposals:
+                break
+            if reranker is not None:
+                print(
+                    f"[Retrieval reranker] graph relevance gate iteration {iteration}",
+                    flush=True,
                 )
-                visited.update(new_docs)
-                frontier = new_docs
+                _rerank_batch(
+                    reranker,
+                    questions_by_id,
+                    proposals,
+                    float(retrieval_cfg.get("reranker_weight", 0.72)),
+                )
+
+            accepted_in_iteration = 0
+            for question_id, proposed_items in proposals.items():
+                question = questions_by_id[question_id]
+                state = graph_states[question_id]
+                meta = proposal_meta[question_id]
+                route_features = routes[question_id].features
+                accepted, gate = _filter_graph_candidates(
+                    question,
+                    route_features,
+                    fused_by_id[question_id],
+                    proposed_items,
+                    retrieval_cfg,
+                    reranker_available=reranker is not None,
+                )
+                accepted_docs = list(
+                    dict.fromkeys(item.chunk.doc_id for item in accepted)
+                )
+                rejected_docs = [
+                    doc_id for doc_id in meta["new_docs"] if doc_id not in accepted_docs
+                ]
+                extras_by_id[question_id].extend(accepted)
+                accepted_in_iteration += len(accepted)
+                relations = []
+                for doc_id in meta["new_docs"]:
+                    edge = meta["edge_by_doc"][doc_id]
+                    relations.append(
+                        {
+                            "source_doc_id": edge.source_doc_id,
+                            "target_doc_id": edge.target_doc_id,
+                            "type": edge.relation_type,
+                            "direction": edge.direction,
+                            "confidence": edge.confidence,
+                            "accepted": doc_id in accepted_docs,
+                        }
+                    )
+                log = {
+                    "iteration": iteration,
+                    "frontier": meta["frontier"],
+                    "proposed_documents": meta["new_docs"],
+                    "new_documents": accepted_docs,
+                    "rejected_documents": rejected_docs,
+                    "proposed_chunks": len(proposed_items),
+                    "accepted_chunks": len(accepted),
+                    **gate,
+                    "relations": relations,
+                }
+                state["visited"].update(meta["new_docs"])
+                if accepted_docs:
+                    state["frontier"] = accepted_docs
+                else:
+                    state["active"] = False
+                    log["stopped"] = "no_relevant_relation"
+                iteration_logs[question_id].append(log)
+            if accepted_in_iteration == 0:
+                break
 
         if reranker is not None:
-            print("[Retrieval reranker] structural/graph expansion pass", flush=True)
-            _rerank_batch(
-                reranker,
-                questions_by_id,
-                extras_by_id,
-                float(retrieval_cfg.get("reranker_weight", 0.72)),
-            )
             unload_model(reranker, "reranker")
 
         final: dict[str, list[Evidence]] = {}
@@ -435,7 +584,16 @@ def retrieve_sqlite_batch(
             else:
                 limit = int(retrieval_cfg.get("complex_evidence_top_k", 8))
                 selected = deduplicate_and_merge_evidence(
-                    combined, limit, prefer_document_diversity=True
+                    combined,
+                    limit,
+                    prefer_document_diversity=True,
+                    max_documents=int(retrieval_cfg.get("complex_max_documents", 4)),
+                    diversity_bonus=float(
+                        retrieval_cfg.get("complex_diversity_bonus", 0.04)
+                    ),
+                    minimum_score_ratio=float(
+                        retrieval_cfg.get("complex_min_score_ratio", 0.42)
+                    ),
                 )
             if not selected:
                 selected = deduplicate_and_merge_evidence(
@@ -455,7 +613,9 @@ def retrieve_sqlite_batch(
                 selected_evidence=_trace_rank(selected, len(selected)),
             )
 
-    batch = RetrievalBatch(final, diagnostics, dense_index_report)
+    batch = RetrievalBatch(
+        final, diagnostics, dense_index_report, memory_report=memory_index_report
+    )
     if cache:
         _save_cache(cache, questions, batch)
     return batch

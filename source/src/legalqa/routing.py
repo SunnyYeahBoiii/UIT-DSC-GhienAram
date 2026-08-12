@@ -28,8 +28,7 @@ def decide_route(
     """Route easy one-document questions away from costly graph expansion."""
     retrieval_score, features = retrieval_confidence(evidence)
     cfg = config.get("routing", {})
-    simple_threshold = float(cfg.get("simple_confidence_threshold", 0.72))
-    minimum_reranker = float(cfg.get("simple_min_reranker", 0.72))
+    simple_threshold = float(cfg.get("simple_confidence_threshold", 0.68))
     top_reranker = float(features.get("top_reranker", 0.0))
     explicit_citation = float(bool(citations(question) or document_numbers(question)))
     complex_cue = float(has_complex_cue(question))
@@ -46,25 +45,27 @@ def decide_route(
         subquestion_signal=subquestion_signal,
     )
 
+    # Relations are extremely common in the corpus and therefore are not, by
+    # themselves, evidence that a question needs multi-document expansion.
+    # The v8 public trace routed 60.9% of questions to Complex and 96.1% of its
+    # final graph chunks had reranker < 0.1. Complex is now opt-in on a strong
+    # linguistic cue, genuinely weak retrieval, or *tight* cross-document tie.
     force_complex = complex_cue > 0 or subquestion_signal > 0
-    weak_retrieval = retrieval_score < float(cfg.get("complex_below_confidence", 0.46))
-    ambiguous = multi_document_competition > 0 and features.get("margin", 0.0) < float(
-        cfg.get("complex_max_margin", 0.08)
+    weak_retrieval = retrieval_score < float(cfg.get("complex_below_confidence", 0.30))
+    concentration_ceiling = float(
+        cfg.get("complex_max_document_concentration", 0.40)
     )
-    relation_trigger = discovered_relations > 0 and (
-        explicit_citation > 0 or retrieval_score < simple_threshold
+    ambiguous = (
+        multi_document_competition > 0
+        and features.get("margin", 0.0) < float(cfg.get("complex_max_margin", 0.02))
+        and features.get("document_concentration", 0.0) <= concentration_ceiling
     )
-    safe_simple = (
-        retrieval_score >= simple_threshold
-        and top_reranker >= minimum_reranker
-        and not force_complex
-        and not ambiguous
-        and not relation_trigger
+    relation_trigger = bool(
+        discovered_relations > 0
+        and explicit_citation > 0
+        and (ambiguous or force_complex)
     )
-    if safe_simple:
-        reason = "high-confidence one-document first pass"
-        route = "simple"
-    else:
+    if force_complex or weak_retrieval or ambiguous or relation_trigger:
         reasons = []
         if force_complex:
             reasons.append("complex cue")
@@ -78,4 +79,11 @@ def decide_route(
             reasons.append("simple confidence gate not met")
         reason = ", ".join(reasons)
         route = "complex"
+    else:
+        route = "simple"
+        reason = (
+            "high-confidence one-document first pass"
+            if retrieval_score >= simple_threshold
+            else "bounded one-document route; no strong complex evidence"
+        )
     return RouteDecision(route, retrieval_score, reason, features)

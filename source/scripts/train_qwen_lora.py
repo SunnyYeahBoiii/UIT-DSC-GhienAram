@@ -18,19 +18,34 @@ sys.path.insert(0, str(PROJECT / "src"))
 
 from legalqa.config import load_config, require_local_model  # noqa: E402
 from legalqa.data import load_qa  # noqa: E402
+from legalqa.fingerprint import sha256_file  # noqa: E402
 from legalqa.prompts import SYSTEM_PROMPT  # noqa: E402
 
 
 class ChatDataset(torch.utils.data.Dataset):
-    def __init__(self, rows, tokenizer, max_length, evidence_by_id=None, max_target_tokens=900):
+    def __init__(
+        self,
+        rows,
+        tokenizer,
+        max_length,
+        evidence_by_id=None,
+        max_target_tokens=900,
+        max_evidence_chars=5000,
+        require_evidence=True,
+    ):
         self.items = []
+        self.skipped_without_evidence = 0
         evidence_by_id = evidence_by_id or {}
         for row in rows:
             evidence = evidence_by_id.get(row.question_id)
+            if require_evidence and not evidence:
+                self.skipped_without_evidence += 1
+                continue
             if evidence:
                 user = (
-                    f"CÂU HỎI:\n{row.question}\n\nCĂN CỨ PHÁP LÝ:\n{evidence[:7000]}\n\n"
-                    "Hãy trả lời bằng tiếng Việt, chỉ dựa trên căn cứ; giữ chính xác điều khoản, điều kiện và con số."
+                    f"CÂU HỎI:\n{row.question}\n\nCĂN CỨ PHÁP LÝ:\n{evidence[:max_evidence_chars]}\n\n"
+                    "Viết duy nhất câu trả lời cuối cùng bằng tiếng Việt, chỉ dựa trên căn cứ; "
+                    "giữ chính xác điều khoản, điều kiện, ngoại lệ và con số. Không nhắc tới hệ thống truy hồi."
                 )
             else:
                 user = (
@@ -48,7 +63,11 @@ class ChatDataset(torch.utils.data.Dataset):
             full_ids_untrimmed = tokenizer(full, add_special_tokens=False)["input_ids"]
             answer_ids = full_ids_untrimmed[len(prompt_ids) :][:max_target_tokens]
             prompt_budget = max(1, max_length - len(answer_ids))
-            prompt_ids = prompt_ids[-prompt_budget:]
+            if len(prompt_ids) > prompt_budget:
+                # Preserve both system/question at the head and evidence/output
+                # instructions at the tail instead of silently dropping the query.
+                head = max(1, prompt_budget // 3)
+                prompt_ids = prompt_ids[:head] + prompt_ids[-(prompt_budget - head) :]
             full_ids = prompt_ids + answer_ids
             labels = [-100] * len(prompt_ids) + answer_ids
             if labels and all(label == -100 for label in labels):
@@ -88,6 +107,15 @@ def main():
     parser.add_argument("--max-length", type=int, default=3072)
     parser.add_argument("--max-target-tokens", type=int, default=900)
     parser.add_argument("--pairs", default=None, help="retrieval_pairs.jsonl để SFT có căn cứ corpus")
+    parser.add_argument("--dev-pairs", default=None)
+    parser.add_argument("--train-file", default=None)
+    parser.add_argument("--dev-file", default=None)
+    parser.add_argument("--max-evidence-chars", type=int, default=5000)
+    parser.add_argument(
+        "--require-evidence",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--max-train-samples", type=int, default=None)
@@ -178,9 +206,12 @@ def main():
     model.print_trainable_parameters()
 
     data_dir = Path(config["paths"]["artifacts"]) / "data"
-    evidence_by_id = {}
-    if args.pairs:
-        with Path(args.pairs).open("r", encoding="utf-8") as handle:
+
+    def load_evidence(path_value):
+        evidence_by_id = {}
+        if not path_value:
+            return evidence_by_id
+        with Path(path_value).open("r", encoding="utf-8") as handle:
             for line in handle:
                 if line.strip():
                     item = json.loads(line)
@@ -188,16 +219,45 @@ def main():
                     evidence_by_id[str(item["question_id"])] = "\n\n".join(
                         f"[CĂN CỨ {index}]\n{text}" for index, text in enumerate(evidence_items, 1)
                     )
-    train_rows = load_qa(data_dir / "train.json", True)
+        return evidence_by_id
+
+    evidence_by_id = load_evidence(args.pairs)
+    dev_evidence_by_id = load_evidence(args.dev_pairs)
+    train_file = Path(args.train_file) if args.train_file else data_dir / "train.json"
+    dev_file = Path(args.dev_file) if args.dev_file else data_dir / "dev.json"
+    train_rows = load_qa(train_file, True)
     if args.max_train_samples:
         train_rows = train_rows[: args.max_train_samples]
-    train = ChatDataset(train_rows, tokenizer, args.max_length, evidence_by_id, args.max_target_tokens)
-    dev = ChatDataset(load_qa(data_dir / "dev.json", True), tokenizer, args.max_length, evidence_by_id, args.max_target_tokens)
-    pairs_size = Path(args.pairs).stat().st_size if args.pairs else None
+    train = ChatDataset(
+        train_rows,
+        tokenizer,
+        args.max_length,
+        evidence_by_id,
+        args.max_target_tokens,
+        args.max_evidence_chars,
+        args.require_evidence,
+    )
+    dev_rows = load_qa(dev_file, True) if dev_file.is_file() else []
+    dev = ChatDataset(
+        dev_rows,
+        tokenizer,
+        args.max_length,
+        dev_evidence_by_id,
+        args.max_target_tokens,
+        args.max_evidence_chars,
+        args.require_evidence,
+    )
+    if not train:
+        raise RuntimeError(
+            "QLoRA không có sample hợp lệ; kiểm tra --train-file/--pairs/--require-evidence."
+        )
     run_signature = {
         "train": len(train),
         "dev": len(dev),
-        "pairs_size": pairs_size,
+        "train_sha256": sha256_file(train_file),
+        "dev_sha256": sha256_file(dev_file) if dev_file.is_file() else None,
+        "pairs_sha256": sha256_file(args.pairs) if args.pairs else None,
+        "dev_pairs_sha256": sha256_file(args.dev_pairs) if args.dev_pairs else None,
         "epochs": args.epochs,
         "learning_rate": args.learning_rate,
         "batch_size": args.batch_size,
@@ -206,6 +266,8 @@ def main():
         "max_target_tokens": args.max_target_tokens,
         "lora_r": args.lora_r,
         "load_in_4bit": args.load_in_4bit,
+        "max_evidence_chars": args.max_evidence_chars,
+        "require_evidence": args.require_evidence,
     }
     if resume_checkpoint:
         previous_signature_path = Path(resume_checkpoint).parent / "resume_signature.json"
@@ -232,7 +294,7 @@ def main():
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
-        eval_strategy="epoch",
+        eval_strategy="epoch" if len(dev) else "no",
         save_strategy="steps",
         save_steps=args.checkpoint_steps,
         logging_steps=5,
@@ -250,7 +312,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train,
-        eval_dataset=dev,
+        eval_dataset=dev if len(dev) else None,
         data_collator=CausalCollator(tokenizer),
     )
     trainer.train(resume_from_checkpoint=resume_checkpoint)
@@ -263,6 +325,8 @@ def main():
                 "dev": len(dev),
                 "global_step": trainer.state.global_step,
                 "resumed_from": str(resume_checkpoint) if resume_checkpoint else None,
+                "skipped_train_without_evidence": train.skipped_without_evidence,
+                "skipped_dev_without_evidence": dev.skipped_without_evidence,
             },
             ensure_ascii=False,
             indent=2,

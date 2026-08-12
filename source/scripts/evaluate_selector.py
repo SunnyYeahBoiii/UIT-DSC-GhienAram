@@ -26,6 +26,7 @@ POSITIVE = (
     "legal_semantic", "length_prior", "fluency",
 )
 NEGATIVE = ("unsupported", "duplicate", "fragment_ratio")
+SELECTION_WEIGHTS_SCHEMA = "selector-weights-v2-graph-gate"
 
 
 def template_key(question: str) -> str:
@@ -103,8 +104,22 @@ def candidate_score(candidate: dict[str, Any], weights: dict[str, Any]) -> float
     return score
 
 
-def pick(row: dict[str, Any], weights: dict[str, Any]) -> dict[str, Any]:
-    candidates = [candidate for candidate in row["candidates"] if not candidate["source"].startswith("bartpho")]
+def pick(
+    row: dict[str, Any],
+    weights: dict[str, Any],
+    memory_threshold: float | None = None,
+) -> dict[str, Any]:
+    candidates = [
+        candidate
+        for candidate in row["candidates"]
+        if not candidate["source"].startswith("bartpho")
+        and not (
+            memory_threshold is not None
+            and candidate["source"] == "train-memory"
+            and float(candidate.get("details", {}).get("memory_similarity", 0.0))
+            < memory_threshold
+        )
+    ]
     ranked = sorted(candidates, key=lambda item: (-candidate_score(item, weights), item["source"]))
     qwen = next(
         (
@@ -119,12 +134,14 @@ def pick(row: dict[str, Any], weights: dict[str, Any]) -> dict[str, Any]:
     return ranked[0]
 
 
-def aggregate(ids, trace, metrics, weights=None) -> dict[str, Any]:
+def aggregate(
+    ids, trace, metrics, weights=None, memory_threshold: float | None = None
+) -> dict[str, Any]:
     rows = []
     sources = Counter()
     for question_id in ids:
         row = trace[question_id]
-        candidate = pick(row, weights) if weights is not None else next(
+        candidate = pick(row, weights, memory_threshold) if weights is not None else next(
             item for item in row["candidates"] if item["source"] == row["selected"]
         )
         score = metrics[(question_id, candidate["source"])]
@@ -155,6 +172,7 @@ def sampled_weights(base: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     candidate["source_priors"] = {
         "qwen3.5-2b": rng.uniform(-0.02, 0.14),
         "extractive": rng.uniform(-0.10, 0.04),
+        "train-memory": rng.uniform(-0.08, 0.10),
     }
     return candidate
 
@@ -191,6 +209,9 @@ def main() -> None:
         )
     config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     base_weights = config["selection"]
+    base_memory_threshold = float(
+        config.get("retrieval", {}).get("train_memory_candidate_threshold", 0.86)
+    )
     ids = sorted(trace)
     metrics = {}
     oracle_rows = []
@@ -213,21 +234,51 @@ def main() -> None:
     rng = random.Random(args.seed)
     tune_ids, holdout_ids = grouped_tune_holdout(ids, trace, args.seed)
     best_weights = copy.deepcopy(base_weights)
-    best_report = aggregate(tune_ids, trace, metrics, best_weights)
+    best_report = aggregate(
+        tune_ids, trace, metrics, best_weights, base_memory_threshold
+    )
     best_objective = best_report["meteor_exact_probe"] + 0.10 * best_report["rouge_l_f1"]
     for _ in range(max(0, args.trials)):
         candidate_weights = sampled_weights(base_weights, rng)
-        report = aggregate(tune_ids, trace, metrics, candidate_weights)
+        report = aggregate(
+            tune_ids, trace, metrics, candidate_weights, base_memory_threshold
+        )
         objective = report["meteor_exact_probe"] + 0.10 * report["rouge_l_f1"]
         if objective > best_objective:
             best_objective = objective
             best_weights = candidate_weights
             best_report = report
 
+    threshold_candidates = sorted(
+        {
+            base_memory_threshold,
+            *(
+                round(value / 100, 2)
+                for value in range(max(50, round(base_memory_threshold * 100)), 97, 2)
+            ),
+        }
+    )
+    threshold_reports = []
+    best_memory_threshold = base_memory_threshold
+    best_threshold_objective = -1.0
+    for threshold in threshold_candidates:
+        candidate_report = aggregate(
+            tune_ids, trace, metrics, best_weights, threshold
+        )
+        objective = candidate_report["meteor_exact_probe"] + 0.10 * candidate_report["rouge_l_f1"]
+        threshold_reports.append({"threshold": threshold, **candidate_report})
+        if objective > best_threshold_objective:
+            best_threshold_objective = objective
+            best_memory_threshold = threshold
+    best_report = aggregate(
+        tune_ids, trace, metrics, best_weights, best_memory_threshold
+    )
     selected_original = aggregate(ids, trace, metrics)
-    base = aggregate(ids, trace, metrics, base_weights)
-    tuned_all = aggregate(ids, trace, metrics, best_weights)
-    tuned_holdout = aggregate(holdout_ids, trace, metrics, best_weights)
+    base = aggregate(ids, trace, metrics, base_weights, base_memory_threshold)
+    tuned_all = aggregate(ids, trace, metrics, best_weights, best_memory_threshold)
+    tuned_holdout = aggregate(
+        holdout_ids, trace, metrics, best_weights, best_memory_threshold
+    )
     report = {
         "count": len(ids),
         "selected_from_trace": selected_original,
@@ -254,6 +305,11 @@ def main() -> None:
             "holdout": tuned_holdout,
             "all": tuned_all,
             "best_selection": best_weights,
+            "memory_candidate_threshold": {
+                "base": base_memory_threshold,
+                "best_on_tune": best_memory_threshold,
+                "sweep": threshold_reports,
+            },
         },
         "note": "METEOR probe uses exact Vietnamese token matching; Codabench remains authoritative.",
     }
@@ -262,7 +318,17 @@ def main() -> None:
         output = Path(args.weights_output)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(
-            yaml.safe_dump({"selection": best_weights}, allow_unicode=True, sort_keys=False),
+            yaml.safe_dump(
+                {
+                    "schema": SELECTION_WEIGHTS_SCHEMA,
+                    "selection": best_weights,
+                    "retrieval": {
+                        "train_memory_candidate_threshold": best_memory_threshold
+                    },
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
             encoding="utf-8",
         )
     print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -1,0 +1,73 @@
+seed: 20260806
+
+paths:
+  # run_end_to_end.py auto-discovers and overwrites these paths under /kaggle/input.
+  warmup: null
+  corpus: null
+  artifacts: "/kaggle/working/legalqa_artifacts"
+  models:
+    generator: null
+    embedding: null
+    reranker: null
+    bartpho: null
+    verifier: null
+    generator_adapter: null
+
+runtime:
+  offline: true
+  local_files_only: true
+  trust_remote_code: true
+  device: "auto"
+  dtype: "float16"
+  batch_size: 8
+  reranker_max_length: 768
+  unload_after_stage: true
+
+corpus:
+  id_fields: ["id", "document_id", "doc_id", "law_id"]
+  title_fields: ["name", "title", "document_name"]
+  text_fields: ["passage", "text", "content", "body", "document"]
+  max_chunk_chars: 4200
+  overlap_chars: 350
+  min_chunk_chars: 120
+  skip_empty: true
+
+retrieval:
+  bm25_top_k: 90
+  dense_top_k: 60
+  fused_top_k: 30
+  rerank_top_k: 16
+  evidence_top_k: 5
+  rrf_k: 60
+  bm25_weight: 1.0
+  dense_weight: 1.10
+  reranker_weight: 0.72
+  citation_boost: 0.12
+
+generation:
+  qwen_enabled: true
+  bartpho_enabled: false
+  extractive_enabled: true
+  max_context_chars: 18000
+  max_new_tokens: 850
+  bartpho_num_beams: 1
+  do_sample: false
+  temperature: 0.7
+  top_p: 0.9
+  repetition_penalty: 1.03
+  min_answer_words: 70
+  target_answer_words: 330
+  max_answer_words: 700
+
+selection:
+  evidence_support: 0.34
+  query_coverage: 0.14
+  legal_citations: 0.18
+  numeric_faithfulness: 0.15
+  legal_semantic: 0.12
+  length_prior: 0.07
+  unsupported_penalty: 0.28
+  duplicate_penalty: 0.08
+
+split:
+  dev_ratio: 0.02

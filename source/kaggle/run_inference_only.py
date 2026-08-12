@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -20,10 +22,12 @@ sys.path.insert(0, str(PROJECT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from legalqa.budget import count_system_budget  # noqa: E402
+from legalqa.answer_style import build_answer_style_profile  # noqa: E402
 from legalqa.config import load_config  # noqa: E402
 from legalqa.data import load_qa, write_json  # noqa: E402
 from legalqa.dense_store import ensure_global_dense_index  # noqa: E402
 from legalqa.fingerprint import (  # noqa: E402
+    adapter_fingerprint,
     checkpoint_fingerprint,
     corpus_content_fingerprint,
     sha256_file,
@@ -41,6 +45,7 @@ from legalqa.sqlite_retrieval import retrieve_sqlite_batch  # noqa: E402
 from legalqa.sqlite_store import build_sqlite_store  # noqa: E402
 from legalqa.sqlite_store import SQLiteLegalStore  # noqa: E402
 from legalqa.submission import create_submission  # noqa: E402
+from legalqa.train_memory import ensure_train_memory_index  # noqa: E402
 from run_end_to_end import (  # noqa: E402
     find_corpus,
     find_model,
@@ -51,8 +56,32 @@ from run_end_to_end import (  # noqa: E402
 )
 
 
-CACHE_SCHEMA_VERSION = "inference-only-v3-global-graph"
+CACHE_SCHEMA_VERSION = "inference-v5-graph-gate-train-memory-qlora"
+SELECTION_WEIGHTS_SCHEMA = "selector-weights-v2-graph-gate"
 RUNTIME_MODEL_ROLES = ("generator", "embedding", "reranker", "verifier")
+
+
+def find_generator_adapter(root: Path, explicit: str | None = None) -> Path | None:
+    value = explicit or os.environ.get("LEGALQA_GENERATOR_ADAPTER_DIR")
+    if value:
+        candidate = Path(value)
+        if not (candidate / "adapter_config.json").is_file():
+            raise FileNotFoundError(f"Qwen adapter không có adapter_config.json: {candidate}")
+        return candidate
+    candidates = sorted({path.parent for path in root.rglob("adapter_config.json")})
+    # Completed adapter roots are preferred over Trainer checkpoint children.
+    completed = [path for path in candidates if (path / "training_complete.json").is_file()]
+    preferred = completed or [
+        path for path in candidates if not path.name.startswith("checkpoint-")
+    ]
+    if not preferred:
+        return None
+    if len(preferred) > 1:
+        raise RuntimeError(
+            f"Có nhiều Qwen LoRA adapter: {preferred}. Chỉ attach một bản hoặc dùng "
+            "--generator-adapter/LEGALQA_GENERATOR_ADAPTER_DIR."
+        )
+    return preferred[0]
 
 
 def smoke_inference_models(config: dict) -> dict:
@@ -116,6 +145,21 @@ def main() -> None:
         default=None,
         help="Optional question JSON for selector/dev evaluation; default is public-official.json",
     )
+    parser.add_argument(
+        "--train-file",
+        default=None,
+        help="Official train.json, or selector_train.json when evaluating grouped dev",
+    )
+    parser.add_argument(
+        "--generator-adapter",
+        default=None,
+        help="Optional completed Qwen LoRA adapter directory",
+    )
+    parser.add_argument(
+        "--selection-weights",
+        default=None,
+        help="Optional YAML produced by evaluate_selector.py",
+    )
     parser.add_argument("--working", default="/kaggle/working/legalqa_inference")
     parser.add_argument("--submission-output", default="/kaggle/working/submission.zip")
     parser.add_argument(
@@ -152,6 +196,17 @@ def main() -> None:
         help="Optional completed dense index attached as a read-only Kaggle Dataset",
     )
     parser.add_argument("--force-dense-index", action="store_true")
+    parser.add_argument(
+        "--train-memory-dir",
+        default="/kaggle/working/legalqa_dense_index/train_memory",
+    )
+    parser.add_argument("--train-memory-input", default=None)
+    parser.add_argument("--force-train-memory", action="store_true")
+    parser.add_argument(
+        "--train-memory",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument(
         "--dense-index-only",
         action="store_true",
@@ -212,14 +267,20 @@ def main() -> None:
     if not public_path.is_file():
         raise FileNotFoundError(f"Không tìm thấy --questions-file: {public_path}")
     data_root = official_public_path.parent
+    official_train_path = data_root / "train.json"
+    train_path = Path(args.train_file) if args.train_file else official_train_path
+    if not train_path.is_file():
+        raise FileNotFoundError(f"Không tìm thấy official/selector train file: {train_path}")
+    train_records = load_qa(train_path, require_answers=True)
     sibling_corpus = data_root / "selected-contexts"
     corpus_path = sibling_corpus if sibling_corpus.is_dir() else find_corpus(data_root)
 
     discovered = {role: find_model(input_root, role) for role in RUNTIME_MODEL_ROLES}
+    generator_adapter = find_generator_adapter(input_root, args.generator_adapter)
     missing = sorted(role for role in RUNTIME_MODEL_ROLES if discovered[role] is None)
     if missing:
         raise FileNotFoundError(
-            f"Inference v2 cần 4 checkpoint local (không dùng BARTpho); đang thiếu: {missing}. "
+            f"Inference v9 cần 4 checkpoint local (không dùng BARTpho); đang thiếu: {missing}. "
             "Attach Dataset checkpoint đã được BTC duyệt."
         )
 
@@ -242,6 +303,7 @@ def main() -> None:
     print("[Fingerprint] hashing public questions and official corpus", flush=True)
     input_identity = {
         "questions_sha256": sha256_file(public_path),
+        "train_sha256": sha256_file(train_path),
         "corpus_sha256": corpus_content_fingerprint(corpus_path),
     }
     print("[Fingerprint] identifying four local checkpoints", flush=True)
@@ -249,6 +311,9 @@ def main() -> None:
         role: checkpoint_fingerprint(path)
         for role, path in discovered.items()
     }
+    model_identity["generator_adapter"] = (
+        adapter_fingerprint(generator_adapter) if generator_adapter else None
+    )
 
     config = load_config(args.config)
     config["paths"]["warmup"] = None
@@ -256,7 +321,33 @@ def main() -> None:
     for role, path in discovered.items():
         config["paths"]["models"][role] = str(path)
     config["paths"]["models"]["bartpho"] = None
-    config["paths"]["models"]["generator_adapter"] = None
+    config["paths"]["models"]["generator_adapter"] = (
+        str(generator_adapter) if generator_adapter else None
+    )
+    style_profile = build_answer_style_profile(train_records)
+    config["generation"]["answer_style_profile"] = style_profile
+    config["retrieval"]["train_memory_enabled"] = bool(args.train_memory)
+    if args.selection_weights:
+        selection_payload = yaml.safe_load(
+            Path(args.selection_weights).read_text(encoding="utf-8")
+        )
+        if not isinstance(selection_payload, dict):
+            raise ValueError("--selection-weights phải chứa YAML Object.")
+        if selection_payload.get("schema") != SELECTION_WEIGHTS_SCHEMA:
+            raise ValueError(
+                "Selector weights thuộc pipeline cũ hoặc thiếu schema. Hãy chạy lại "
+                "notebook v9.1 selector calibration; expected "
+                f"schema={SELECTION_WEIGHTS_SCHEMA!r}."
+            )
+        selection_override = selection_payload.get("selection", selection_payload)
+        if not isinstance(selection_override, dict):
+            raise ValueError("--selection-weights phải chứa YAML Object/selection Object.")
+        config["selection"].update(selection_override)
+        retrieval_override = selection_payload.get("retrieval")
+        if retrieval_override is not None:
+            if not isinstance(retrieval_override, dict):
+                raise ValueError("retrieval trong tuning YAML phải là Object.")
+            config["retrieval"].update(retrieval_override)
     config["runtime"].update(
         device=args.device,
         dtype="float16",
@@ -268,6 +359,8 @@ def main() -> None:
         unload_after_stage=True,
         embedding_identity=model_identity["embedding"],
         corpus_identity=input_identity["corpus_sha256"],
+        train_identity=input_identity["train_sha256"],
+        train_path=str(train_path),
     )
     config["retrieval"].update(
         bm25_top_k=args.bm25_top_k,
@@ -289,11 +382,16 @@ def main() -> None:
         complex_max_new_tokens=args.max_new_tokens,
         do_sample=False,
     )
+    runtime_fingerprint = {
+        key: value
+        for key, value in config["runtime"].items()
+        if not key.endswith(("_path", "_dir", "_root", "_output"))
+    }
     fingerprint_payload = {
         "cache_schema": CACHE_SCHEMA_VERSION,
         "inputs": input_identity,
         "models": model_identity,
-        "runtime": config["runtime"],
+        "runtime": runtime_fingerprint,
         "corpus": config["corpus"],
         "retrieval": config["retrieval"],
         "routing": config.get("routing", {}),
@@ -319,8 +417,38 @@ def main() -> None:
             ) from exc
         if resolved_dense.exists():
             shutil.rmtree(resolved_dense)
+    nested_memory = dense_index_dir / "train_memory"
+    train_memory_dir = Path(
+        args.train_memory_input
+        or (
+            nested_memory
+            if (
+                args.dense_index_input
+                and not args.train_file
+                and (nested_memory / "manifest.json").is_file()
+            )
+            else args.train_memory_dir
+        )
+    )
+    if args.train_memory_input and not (train_memory_dir / "manifest.json").is_file():
+        raise FileNotFoundError(
+            f"--train-memory-input không chứa manifest.json: {train_memory_dir}"
+        )
+    if args.force_train_memory:
+        resolved_memory = train_memory_dir.resolve()
+        resolved_working = Path("/kaggle/working").resolve()
+        try:
+            resolved_memory.relative_to(resolved_working)
+        except ValueError as exc:
+            raise RuntimeError(
+                "--force-train-memory chỉ được xóa index dưới /kaggle/working."
+            ) from exc
+        if resolved_memory.exists():
+            shutil.rmtree(resolved_memory)
     config["runtime"]["dense_index_dir"] = str(dense_index_dir)
+    config["runtime"]["train_memory_dir"] = str(train_memory_dir)
     config["paths"]["artifacts"] = str(working / "artifacts" / run_fingerprint)
+    write_json(working / "answer_style_profile.json", style_profile)
     restored_recovery = None
     if args.resume_bundle:
         restored_recovery = restore_recovery_bundle(
@@ -361,12 +489,20 @@ def main() -> None:
 
     if args.dense_index_only:
         encoder = None
+        memory_report = {"enabled": False}
         try:
             encoder = DenseEncoder(config)
             with SQLiteLegalStore(database, readonly=True) as store:
                 dense_report = ensure_global_dense_index(
                     config, store, encoder, config["runtime"]["dense_index_dir"]
                 )
+                if args.train_memory:
+                    memory_report = ensure_train_memory_index(
+                        config,
+                        encoder,
+                        train_path,
+                        config["runtime"]["train_memory_dir"],
+                    )
         finally:
             unload_model(encoder, "global embedding index-only")
         manifest = {
@@ -376,6 +512,7 @@ def main() -> None:
             "inputs": {
                 "questions": str(public_path),
                 "official_public": str(official_public_path),
+                "train": str(train_path),
                 "corpus": str(corpus_path),
                 **input_identity,
             },
@@ -383,6 +520,8 @@ def main() -> None:
             "model_identity": model_identity,
             "index": index_report,
             "global_dense_index": dense_report,
+            "train_memory_index": memory_report,
+            "answer_style_profile": str((working / "answer_style_profile.json").resolve()),
             "budget": budget_report,
             "timing_minutes": {"total": (time.time() - started) / 60},
         }
@@ -390,13 +529,13 @@ def main() -> None:
         print(json.dumps(manifest, ensure_ascii=False, indent=2), flush=True)
         print(
             "\nDENSE INDEX HOÀN TẤT. Save Version, tạo Kaggle Dataset từ "
-            f"{config['runtime']['dense_index_dir']}, rồi attach vào phiên inference.",
+            f"{config['runtime']['dense_index_dir']} (gồm train_memory), rồi attach vào phiên inference.",
             flush=True,
         )
         return
 
     questions = load_qa(public_path, require_answers=False)
-    retrieval_cache = working / "cache" / run_fingerprint / "public_retrieval.v3.jsonl"
+    retrieval_cache = working / "cache" / run_fingerprint / "retrieval.v5.jsonl"
     retrieval_started = time.time()
     evidence = retrieve_sqlite_batch(
         config,
@@ -424,6 +563,7 @@ def main() -> None:
         "inputs": {
             "questions": str(public_path),
             "official_public": str(official_public_path),
+            "train": str(train_path),
             "corpus": str(corpus_path),
             **input_identity,
         },
@@ -435,6 +575,8 @@ def main() -> None:
         "generation_config": config["generation"],
         "index": index_report,
         "global_dense_index": getattr(evidence, "index_report", {}),
+        "train_memory_index": getattr(evidence, "memory_report", {}),
+        "answer_style_profile": str((working / "answer_style_profile.json").resolve()),
         "budget": budget_report,
         "generation": generation_report,
         "submission": submission_report,

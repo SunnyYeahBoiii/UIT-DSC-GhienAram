@@ -25,6 +25,7 @@ runtime:
   reranker_max_length: 512
   unload_after_stage: true
   dense_index_dir: "/kaggle/working/legalqa_dense_index"
+  train_memory_dir: "/kaggle/working/legalqa_dense_index/train_memory"
 
 corpus:
   id_fields: ["id", "document_id", "doc_id", "law_id"]
@@ -43,7 +44,10 @@ retrieval:
   rerank_top_k: 24
   evidence_top_k: 5
   simple_evidence_top_k: 4
-  complex_evidence_top_k: 8
+  complex_evidence_top_k: 6
+  complex_max_documents: 4
+  complex_diversity_bonus: 0.04
+  complex_min_score_ratio: 0.42
   trace_fused_top_k: 48
   trace_rerank_top_k: 24
   trace_lexical_top_k: 40
@@ -57,18 +61,32 @@ retrieval:
   generic_number_boost: 0.01
   graph_base_score: 0.03
   graph_relation_weight: 0.16
+  graph_min_reranker: 0.12
+  graph_relative_reranker: 0.30
+  graph_temporal_threshold_discount: 0.60
+  graph_min_lexical_without_reranker: 2.0
   obsolete_document_penalty: 0.36
+  train_memory_enabled: true
+  train_memory_top_k: 4
+  train_memory_build_block: 128
+  train_memory_checkpoint_every: 512
+  train_memory_fewshot_examples: 2
+  train_memory_fewshot_threshold: 0.70
+  train_memory_fewshot_chars: 3200
+  train_memory_candidate_enabled: true
+  train_memory_candidate_threshold: 0.86
   dense_build_block: 256
   dense_checkpoint_every: 4096
   dense_search_block: 8192
 
 routing:
-  simple_confidence_threshold: 0.72
-  simple_min_reranker: 0.72
-  complex_below_confidence: 0.46
-  complex_max_margin: 0.08
-  max_iterations: 3
-  max_new_docs_per_iteration: 4
+  simple_confidence_threshold: 0.68
+  simple_min_reranker: 0.68
+  complex_below_confidence: 0.30
+  complex_max_margin: 0.02
+  complex_max_document_concentration: 0.40
+  max_iterations: 2
+  max_new_docs_per_iteration: 3
   graph_chunks_per_document: 2
 
 generation:
@@ -83,11 +101,17 @@ generation:
   temperature: 0.7
   top_p: 0.9
   repetition_penalty: 1.03
-  min_answer_words: 60
-  target_answer_words: 340
-  simple_target_answer_words: 280
-  complex_target_answer_words: 460
-  max_answer_words: 850
+  min_answer_words: 35
+  target_answer_words: 180
+  simple_target_answer_words: 140
+  complex_target_answer_words: 260
+  max_answer_words: 700
+  style_min_group_size: 20
+  style_floor_words: 35
+  style_ceiling_words: 700
+  tokens_per_vietnamese_word: 1.65
+  compact_generated_answers: true
+  hard_trim_generated_answers: false
 
 selection:
   evidence_support: 0.18
@@ -106,6 +130,7 @@ selection:
   source_priors:
     qwen3.5-2b: 0.08
     extractive: -0.03
+    train-memory: 0.00
 
 split:
   dev_ratio: 0.02

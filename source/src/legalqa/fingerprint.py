@@ -71,3 +71,32 @@ def checkpoint_fingerprint(path: str | Path) -> str:
             digest.update(sha256_file(item).encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def adapter_fingerprint(path: str | Path) -> str:
+    """Content identity for a PEFT adapter without requiring base config.json."""
+    root = Path(path)
+    if not (root / "adapter_config.json").is_file():
+        raise FileNotFoundError(f"Adapter không có adapter_config.json: {root}")
+    files = sorted(
+        (
+            item
+            for item in root.iterdir()
+            if item.is_file()
+            and (
+                item.name.startswith("adapter_")
+                or item.name.startswith("tokenizer")
+                or item.suffix.lower() in {".json", ".model", ".jinja"}
+            )
+        ),
+        key=lambda item: item.name,
+    )
+    digest = hashlib.sha256()
+    for item in files:
+        digest.update(item.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(item.stat().st_size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(sha256_file(item).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()

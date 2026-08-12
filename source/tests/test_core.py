@@ -5,22 +5,29 @@ import zipfile
 from pathlib import Path
 
 from legalqa.bm25 import BM25Index
+from legalqa.answer_style import build_answer_style_profile, generation_plan
 from legalqa.chunking import chunk_documents
 from legalqa.data import Chunk, Document, QARecord, deterministic_split, write_json
 from legalqa.dense_store import ensure_global_dense_index, search_global_dense_index
-from legalqa.generation import Candidate
-from legalqa.fingerprint import checkpoint_fingerprint, corpus_content_fingerprint
+from legalqa.generation import Candidate, make_train_memory_candidate
+from legalqa.fingerprint import adapter_fingerprint, checkpoint_fingerprint, corpus_content_fingerprint
 from legalqa.index import build_index
 from legalqa.metrics import meteor_exact, rouge_l_f1
 from legalqa.legal_graph import temporal_relation_adjustment
 from legalqa.pipeline import _append_candidate, _load_candidate_cache, run_pipeline
+from legalqa.prompts import qwen_user_prompt
 from legalqa.retrieval import Evidence, deduplicate_and_merge_evidence
 from legalqa.routing import decide_route
 from legalqa.submission import create_submission
-from legalqa.sqlite_retrieval import load_retrieval_cache, retrieve_sqlite_batch
+from legalqa.sqlite_retrieval import (
+    _filter_graph_candidates,
+    load_retrieval_cache,
+    retrieve_sqlite_batch,
+)
 from legalqa.sqlite_store import SQLiteLegalStore, build_sqlite_store, prepare_sqlite_weak_pairs
 from legalqa.verifier import score_candidates
 from legalqa.text import document_numbers
+from legalqa.train_memory import ensure_train_memory_index, search_train_memory
 
 
 def minimal_config(tmp_path: Path) -> dict:
@@ -339,6 +346,79 @@ def test_router_and_adjacent_chunk_merge(tmp_path):
     assert "Nội dung tiếp theo" in merged[0].chunk.text
 
 
+def test_router_does_not_use_common_relations_as_complex_signal(tmp_path):
+    config = minimal_config(tmp_path)
+    config["routing"] = {
+        "simple_confidence_threshold": 0.68,
+        "complex_below_confidence": 0.30,
+        "complex_max_margin": 0.02,
+        "complex_max_document_concentration": 0.40,
+    }
+    evidence = [
+        Evidence(Chunk("a", "doc-a", "Luật A", "", "Quy định chính.", {}), 0.80, 2.0, 0.8, 0.95),
+        Evidence(Chunk("b", "doc-b", "Luật B", "", "Quy định khác.", {}), 0.70, 1.5, 0.7, 0.90),
+        Evidence(Chunk("c", "doc-c", "Luật C", "", "Quy định tham khảo.", {}), 0.60, 1.0, 0.6, 0.80),
+    ]
+    route = decide_route("Quyền này được quy định như thế nào?", evidence, 50, config)
+    assert route.route == "simple"
+    assert "no strong complex evidence" in route.reason or "high-confidence" in route.reason
+
+
+def test_graph_gate_rejects_irrelevant_relation_and_stops_noise(tmp_path):
+    config = minimal_config(tmp_path)["retrieval"]
+    config.update(
+        graph_min_reranker=0.12,
+        graph_relative_reranker=0.30,
+        graph_temporal_threshold_discount=0.60,
+        graph_min_lexical_without_reranker=2.0,
+    )
+    initial = [
+        Evidence(Chunk("i", "main", "Luật", "", "Nội dung chính.", {}), 0.9, reranker_score=0.8)
+    ]
+    relevant = Evidence(
+        Chunk("g1", "new", "Văn bản sửa đổi", "", "Nội dung liên quan.", {}),
+        0.3,
+        bm25_score=1.0,
+        reranker_score=0.72,
+        stage="graph_1",
+    )
+    noise = Evidence(
+        Chunk("g2", "noise", "Văn bản khác", "", "Nội dung không liên quan.", {}),
+        0.3,
+        bm25_score=1.0,
+        reranker_score=0.05,
+        stage="graph_1",
+    )
+    accepted, gate = _filter_graph_candidates(
+        "Quy định này áp dụng thế nào?",
+        {"complex_cue": 0.0},
+        initial,
+        [relevant, noise],
+        config,
+        reranker_available=True,
+    )
+    assert accepted == [relevant]
+    assert gate["reranker_threshold"] == 0.24
+
+
+def test_complex_evidence_diversity_never_forces_weak_documents():
+    evidence = [
+        Evidence(Chunk("a1", "a", "A", "", "Quy định A1.", {}), 1.0),
+        Evidence(Chunk("a2", "a", "A", "", "Quy định A2.", {}), 0.9),
+        Evidence(Chunk("b1", "b", "B", "", "Quy định B.", {}), 0.15),
+        Evidence(Chunk("c1", "c", "C", "", "Quy định C.", {}), 0.10),
+    ]
+    selected = deduplicate_and_merge_evidence(
+        evidence,
+        4,
+        prefer_document_diversity=True,
+        max_documents=2,
+        diversity_bonus=0.04,
+        minimum_score_ratio=0.42,
+    )
+    assert [item.chunk.chunk_id for item in selected] == ["a1", "a2"]
+
+
 def test_selector_hard_rejects_bartpho_and_prefers_fluent_qwen(tmp_path):
     config = minimal_config(tmp_path)
     config["selection"].update(
@@ -407,3 +487,133 @@ def test_restartable_global_dense_index_and_exact_search(tmp_path):
         np.array([[1.0, 0.0]], dtype=np.float32), dense_dir, 1, device="cpu", block_size=1
     )
     assert results[0][0][0] == expected_rowid
+
+
+def test_answer_style_profile_drives_dynamic_generation_plan(tmp_path):
+    records = [
+        QARecord(str(index), "Người lao động có quyền gì?", " ".join(["quyền"] * count))
+        for index, count in enumerate((40, 60, 80, 100, 120), 1)
+    ]
+    profile = build_answer_style_profile(records)
+    config = minimal_config(tmp_path)
+    config["generation"].update(
+        answer_style_profile=profile,
+        style_min_group_size=2,
+        style_floor_words=20,
+        style_ceiling_words=200,
+        tokens_per_vietnamese_word=1.5,
+        simple_max_new_tokens=300,
+        complex_max_new_tokens=400,
+    )
+    simple = generation_plan("Người lao động có quyền gì?", "simple", config)
+    complex_plan = generation_plan("Người lao động có quyền gì?", "complex", config)
+    assert simple["learned_from_train"] is True
+    assert 60 <= simple["target_words"] <= 100
+    assert complex_plan["target_words"] >= simple["target_words"]
+    assert complex_plan["max_new_tokens"] >= simple["max_new_tokens"]
+
+
+def test_restartable_train_memory_and_adapter_fingerprint(tmp_path):
+    import numpy as np
+
+    train = tmp_path / "train.json"
+    write_json(
+        train,
+        {
+            "a": {"question": "Người lao động được nghỉ phép thế nào?", "answer": "Được nghỉ phép."},
+            "b": {"question": "Phương tiện phải bảo đảm gì?", "answer": "Phải bảo đảm an toàn."},
+        },
+    )
+    config = minimal_config(tmp_path)
+    config["retrieval"].update(train_memory_build_block=1, train_memory_checkpoint_every=1)
+    config["runtime"]["embedding_identity"] = "fake-embedding"
+
+    class FakeEncoder:
+        def encode(self, texts):
+            return np.stack(
+                [
+                    np.array([1.0, 0.0] if "lao động" in text else [0.0, 1.0], dtype=np.float32)
+                    for text in texts
+                ]
+            )
+
+    memory_dir = tmp_path / "memory"
+    first = ensure_train_memory_index(config, FakeEncoder(), train, memory_dir)
+    second = ensure_train_memory_index(config, FakeEncoder(), train, memory_dir)
+    neighbors = search_train_memory(
+        np.array([[1.0, 0.0]], dtype=np.float32),
+        memory_dir,
+        1,
+        device="cpu",
+    )
+    assert first["count"] == 2 and second["reused"] is True
+    assert neighbors[0][0]["question_id"] == "a"
+
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text('{"r": 8}', encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_bytes(b"adapter-weights")
+    assert adapter_fingerprint(adapter) == adapter_fingerprint(adapter)
+
+
+def test_train_memory_candidate_and_fewshot_prompt_are_gated(tmp_path):
+    config = minimal_config(tmp_path)
+    config["retrieval"].update(
+        train_memory_candidate_threshold=0.86,
+        train_memory_fewshot_threshold=0.70,
+        train_memory_fewshot_examples=2,
+        train_memory_fewshot_chars=2000,
+    )
+    config["generation"].update(
+        simple_max_new_tokens=200,
+        complex_max_new_tokens=300,
+        style_floor_words=20,
+        style_ceiling_words=200,
+        tokens_per_vietnamese_word=1.5,
+    )
+    evidence = [
+        Evidence(Chunk("c", "d", "Điều 1. Người lao động được nghỉ phép.", "Luật", "Điều 1", {}), 0.9)
+    ]
+    diagnostics = {
+        "route": {"route": "simple"},
+        "train_memory": [
+            {
+                "question_id": "t1",
+                "question": "Người lao động nghỉ phép thế nào?",
+                "answer": "Theo Điều 1, người lao động được nghỉ phép.",
+                "similarity": 0.91,
+            }
+        ],
+    }
+    candidate = make_train_memory_candidate(
+        "Người lao động được nghỉ thế nào?", evidence, config, diagnostics
+    )
+    assert candidate and candidate.source == "train-memory"
+    prompt = qwen_user_prompt(
+        "Người lao động được nghỉ thế nào?", evidence, config, diagnostics
+    )
+    assert "VÍ DỤ VĂN PHONG" in prompt
+    diagnostics["train_memory"][0]["similarity"] = 0.60
+    assert make_train_memory_candidate("Câu hỏi", evidence, config, diagnostics) is None
+
+
+def test_generated_answer_compaction_removes_loops_and_stops_on_sentence_boundary():
+    from legalqa.generation import compact_generated_answer
+
+    repeated = (
+        "Theo Điều 1, người lao động được nghỉ phép mười ngày. "
+        "Theo Điều 1, người lao động được nghỉ phép mười ngày. "
+        "Ngoài ra, người sử dụng lao động phải thông báo lịch nghỉ cho người lao động. "
+        "Quy định bổ sung này có rất nhiều từ và không nên được thêm khi đã vượt giới hạn."
+    )
+    answer, report = compact_generated_answer(repeated, maximum_words=25, hard_trim=True)
+    assert answer.count("Theo Điều 1") == 1
+    assert report["duplicate_sentences_removed"] == 1
+    assert report["compaction_applied"] is True
+    assert answer.endswith(".")
+
+    untrimmed, untrimmed_report = compact_generated_answer(
+        repeated, maximum_words=25, hard_trim=False
+    )
+    assert "Quy định bổ sung" in untrimmed
+    assert untrimmed_report["duplicate_sentences_removed"] == 1

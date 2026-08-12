@@ -10,7 +10,12 @@ from typing import Any
 import numpy as np
 
 from .data import load_qa, write_json
-from .generation import Candidate, extractive_candidate, make_qwen_candidate
+from .generation import (
+    Candidate,
+    extractive_candidate,
+    make_qwen_candidate,
+    make_train_memory_candidate,
+)
 from .index import LegalIndex
 from .models import (
     CrossEncoderReranker,
@@ -188,6 +193,17 @@ def generate_from_evidence(
                     retrieval_diagnostics.get(item.question_id),
                 )
             )
+
+    if config.get("retrieval", {}).get("train_memory_candidate_enabled", True):
+        for item in questions:
+            candidate = make_train_memory_candidate(
+                item.question,
+                evidence_by_id[item.question_id],
+                config,
+                retrieval_diagnostics.get(item.question_id),
+            )
+            if candidate is not None:
+                candidates_by_id[item.question_id].append(candidate)
 
     if config["generation"].get("qwen_enabled", True) and model_paths.get("generator"):
         cache_path = candidate_cache_dir / "qwen.jsonl"

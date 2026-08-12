@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "uit-legalqa-3p88b"
-version = "0.8.0"
+version = "0.9.1"
 description = "Offline Vietnamese LegalQA pipeline for UIT Data Science Challenge 2026"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -4,6 +4,7 @@ from collections import Counter
 import re
 from typing import Any
 
+from .answer_style import generation_plan
 from .generation import Candidate
 from .retrieval import Evidence, retrieval_confidence
 from .text import citations, length_prior, numbers, overlap_ratio, split_sentences, words
@@ -59,7 +60,9 @@ def score_candidates(
         retrieval_score, _ = retrieval_confidence(evidence)
     retrieval_score = max(0.0, min(1.0, retrieval_score))
     evidence_trust = 0.30 + 0.70 * retrieval_score
-    source_priors = weights.get("source_priors", {"qwen3.5-2b": 0.08, "extractive": -0.04})
+    source_priors = weights.get(
+        "source_priors", {"qwen3.5-2b": 0.08, "extractive": -0.04, "train-memory": 0.0}
+    )
 
     for candidate in candidates:
         generation_details = dict(candidate.details)
@@ -79,17 +82,12 @@ def score_candidates(
         unsupported = 0.5 * (1 - citation_precision) + 0.5 * (1 - numeric_precision)
         word_count = len(words(candidate.answer))
         route = str(generation_details.get("route") or route_payload.get("route", "simple"))
-        route_target = int(
-            generation.get(
-                "complex_target_answer_words" if route == "complex" else "simple_target_answer_words",
-                generation["target_answer_words"],
-            )
-        )
+        plan = generation_plan(question, route, config)
         length_score = length_prior(
             word_count,
-            route_target,
-            int(generation["min_answer_words"]),
-            int(generation["max_answer_words"]),
+            int(plan["target_words"]),
+            int(plan["minimum_words"]),
+            int(plan["maximum_words"]),
         )
         duplicate = _duplicate_ratio(candidate.answer)
         precomputed_semantic = generation_details.get("_precomputed_legal_semantic")

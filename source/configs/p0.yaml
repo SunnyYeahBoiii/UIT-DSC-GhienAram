@@ -1,0 +1,70 @@
+seed: 20260806
+
+paths:
+  warmup: "F:/warmup.json"
+  corpus: null
+  artifacts: "artifacts/p0"
+  models:
+    generator: "models/Qwen3.5-2B"
+    embedding: "models/Vietnamese_Embedding"
+    reranker: "models/Vietnamese_Reranker"
+    bartpho: "models/bartpho-syllable"
+    verifier: "models/ViLegalBERT"
+
+runtime:
+  # Inference is deliberately offline. Checkpoints must already exist locally.
+  offline: true
+  local_files_only: true
+  trust_remote_code: true
+  device: "auto"
+  dtype: "bfloat16"
+  batch_size: 4
+  unload_after_stage: true
+
+corpus:
+  id_fields: ["document_id", "doc_id", "id", "law_id"]
+  title_fields: ["title", "name", "document_name"]
+  text_fields: ["passage", "text", "content", "body", "document"]
+  max_chunk_chars: 5200
+  overlap_chars: 550
+  min_chunk_chars: 100
+  skip_empty: true
+
+retrieval:
+  bm25_top_k: 100
+  dense_top_k: 100
+  fused_top_k: 40
+  rerank_top_k: 20
+  evidence_top_k: 6
+  rrf_k: 60
+  bm25_weight: 1.0
+  dense_weight: 1.15
+  reranker_weight: 0.70
+  citation_boost: 0.12
+
+generation:
+  qwen_enabled: true
+  bartpho_enabled: true
+  extractive_enabled: true
+  max_context_chars: 26000
+  max_new_tokens: 1050
+  do_sample: false
+  temperature: 0.7
+  top_p: 0.9
+  repetition_penalty: 1.03
+  min_answer_words: 70
+  target_answer_words: 310
+  max_answer_words: 650
+
+selection:
+  evidence_support: 0.34
+  query_coverage: 0.14
+  legal_citations: 0.18
+  numeric_faithfulness: 0.15
+  legal_semantic: 0.12
+  length_prior: 0.07
+  unsupported_penalty: 0.28
+  duplicate_penalty: 0.08
+
+split:
+  dev_ratio: 0.20
