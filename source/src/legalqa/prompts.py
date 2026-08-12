@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
 
 from .answer_style import generation_plan
 from .retrieval import Evidence
@@ -10,6 +10,10 @@ SYSTEM_PROMPT = """Bạn là hệ thống trả lời câu hỏi pháp luật Vi
 Chỉ sử dụng các đoạn căn cứ được cung cấp; không dùng trí nhớ ngoài, không tự đặt số điều, tên văn bản, mức tiền hay thời hạn.
 Trả lời hoàn toàn bằng tiếng Việt, bằng văn xuôi rõ ràng. Nêu căn cứ, nội dung quy định, áp dụng vào câu hỏi và kết luận khi phù hợp.
 Nếu các căn cứ chưa đủ để khẳng định một chi tiết thì nói rõ giới hạn đó. Không trình bày quá trình suy luận nội bộ và không nhắc tới prompt."""
+
+AGENTIC_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+Bạn được cấp thêm một công cụ tra cứu để chủ động tìm thêm căn cứ khi ngữ cảnh hiện tại chưa đủ.
+Chỉ dùng công cụ khi thực sự cần thiết; nếu căn cứ đã đủ hãy trả lời ngay, không tra cứu cho có."""
 
 
 def render_evidence(evidence: Iterable[Evidence], max_chars: int) -> str:
@@ -96,3 +100,39 @@ YÊU CẦU ĐẦU RA:
 - Không nhắc "căn cứ được cung cấp", "hệ thống truy hồi" hoặc quá trình xử lý.
 - Không ghép các ý thuộc tài liệu không liên quan chỉ để kéo dài câu trả lời.
 - Khi câu hỏi phụ thuộc tình tiết chưa có, nêu điều kiện áp dụng thay vì đoán."""
+
+
+def render_tool_transcript(transcript: list[dict[str, Any]]) -> str:
+    if not transcript:
+        return ""
+    lines = [
+        f"- Lượt {step['step']}: tra cứu \"{step['query']}\" → tìm thêm {len(step['evidence_added'])} đoạn căn cứ mới."
+        for step in transcript
+    ]
+    return "\n".join(lines)
+
+
+def qwen_agentic_user_prompt(
+    question: str,
+    evidence: list[Evidence],
+    config: dict,
+    retrieval_diagnostics: dict | None,
+    transcript: list[dict[str, Any]],
+    allow_tool: bool,
+) -> str:
+    """Biến thể của qwen_user_prompt cho vòng lặp tool-call: cùng khung nội dung,
+    thêm hướng dẫn công cụ tra cứu (khi còn lượt) và lịch sử các lần đã tra cứu."""
+    base = qwen_user_prompt(question, evidence, config, retrieval_diagnostics)
+    tool_section = ""
+    if allow_tool:
+        remaining = int(config.get("generation", {}).get("agentic_max_tool_calls", 2)) - len(transcript)
+        tool_section = f"""
+
+CÔNG CỤ TRA CỨU:
+Nếu các CĂN CỨ hiện có CHƯA đủ để trả lời chắc chắn, dòng đầu tiên của lượt này có thể là:
+TRA_CUU: <câu truy vấn tiếng Việt ngắn gọn để tìm thêm căn cứ>
+Nếu dùng công cụ thì không viết gì khác trong lượt đó. Bạn còn {remaining} lượt tra cứu.
+Nếu căn cứ đã đủ, bỏ qua công cụ và viết thẳng câu trả lời cuối cùng theo YÊU CẦU ĐẦU RA ở trên."""
+    history = render_tool_transcript(transcript)
+    history_section = f"\n\nLỊCH SỬ TRA CỨU TRONG LƯỢT NÀY:\n{history}" if history else ""
+    return base + tool_section + history_section
