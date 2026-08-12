@@ -1,0 +1,111 @@
+seed: 20260806
+
+paths:
+  warmup: null
+  corpus: null
+  artifacts: "/kaggle/working/legalqa_inference"
+  models:
+    generator: null
+    embedding: null
+    reranker: null
+    bartpho: null
+    verifier: null
+    generator_adapter: null
+
+runtime:
+  offline: true
+  local_files_only: true
+  trust_remote_code: true
+  device: "cuda:0"
+  dtype: "float16"
+  batch_size: 1
+  embedding_batch_size: 2
+  reranker_batch_size: 1
+  verifier_batch_size: 4
+  reranker_max_length: 512
+  unload_after_stage: true
+  dense_index_dir: "/kaggle/working/legalqa_dense_index"
+
+corpus:
+  id_fields: ["id", "document_id", "doc_id", "law_id"]
+  title_fields: ["name", "title", "document_name"]
+  text_fields: ["passage", "text", "content", "body", "document"]
+  max_chunk_chars: 4200
+  overlap_chars: 350
+  min_chunk_chars: 120
+  skip_empty: true
+
+retrieval:
+  global_dense_enabled: true
+  bm25_top_k: 140
+  dense_top_k: 70
+  fused_top_k: 48
+  rerank_top_k: 24
+  evidence_top_k: 5
+  simple_evidence_top_k: 4
+  complex_evidence_top_k: 8
+  trace_fused_top_k: 48
+  trace_rerank_top_k: 24
+  trace_lexical_top_k: 40
+  trace_dense_top_k: 40
+  rrf_k: 60
+  bm25_weight: 1.0
+  dense_weight: 1.10
+  reranker_weight: 0.72
+  exact_document_boost: 0.34
+  exact_article_boost: 0.20
+  generic_number_boost: 0.01
+  graph_base_score: 0.03
+  graph_relation_weight: 0.16
+  obsolete_document_penalty: 0.36
+  dense_build_block: 256
+  dense_checkpoint_every: 4096
+  dense_search_block: 8192
+
+routing:
+  simple_confidence_threshold: 0.72
+  simple_min_reranker: 0.72
+  complex_below_confidence: 0.46
+  complex_max_margin: 0.08
+  max_iterations: 3
+  max_new_docs_per_iteration: 4
+  graph_chunks_per_document: 2
+
+generation:
+  qwen_enabled: true
+  bartpho_enabled: false
+  extractive_enabled: true
+  max_context_chars: 18000
+  max_new_tokens: 900
+  simple_max_new_tokens: 512
+  complex_max_new_tokens: 900
+  do_sample: false
+  temperature: 0.7
+  top_p: 0.9
+  repetition_penalty: 1.03
+  min_answer_words: 60
+  target_answer_words: 340
+  simple_target_answer_words: 280
+  complex_target_answer_words: 460
+  max_answer_words: 850
+
+selection:
+  evidence_support: 0.18
+  query_coverage: 0.16
+  legal_citations: 0.12
+  numeric_faithfulness: 0.12
+  legal_semantic: 0.03
+  length_prior: 0.04
+  fluency: 0.22
+  unsupported_penalty: 0.25
+  duplicate_penalty: 0.08
+  fragment_penalty: 0.16
+  truncation_penalty: 0.22
+  retrieval_risk_penalty: 0.10
+  qwen_preference_margin: 0.06
+  source_priors:
+    qwen3.5-2b: 0.08
+    extractive: -0.03
+
+split:
+  dev_ratio: 0.02

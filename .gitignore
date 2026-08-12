@@ -1,0 +1,9 @@
+# Dữ liệu cuộc thi và checksum — không push lên git
+/data/
+/checksums/
+
+# Wheel binary vendored, không phải source code
+/source/wheelhouse/
+
+# macOS
+.DS_Store
