@@ -17,9 +17,9 @@
   `outputs/legalqa_3p88b_kaggle_source_v9_1_graph_gate_final.zip`
 - SHA-256 snapshot nền:
   `27BB291A7BABEB3093B92681C19721EACD356A0A022F02CF666B3C1C29A69CDC`
-- 80 file chung giữa snapshot và `source_v9/` khớp SHA-256.
+- 80 file chung giữa snapshot và `source/` khớp SHA-256.
 - Sáu file source/tiện ích mới được liệt kê trong README gốc của bundle.
-- Tổng số file trong `source_v9/`: 86
+- Tổng số file trong `source/`: 86
 - Tổng dung lượng: 85.664.366 byte
 
 ## Dữ liệu
