@@ -32,6 +32,7 @@ corpus:
 
 retrieval:
   bm25_top_k: 100
+  agentic_bm25_top_k: 60
   dense_top_k: 100
   fused_top_k: 40
   rerank_top_k: 20
@@ -52,7 +53,6 @@ generation:
   agentic_enabled: false
   agentic_max_tool_calls: 2
   agentic_evidence_per_call: 3
-  agentic_bm25_top_k: 60
   max_context_chars: 26000
   max_new_tokens: 1050
   do_sample: false

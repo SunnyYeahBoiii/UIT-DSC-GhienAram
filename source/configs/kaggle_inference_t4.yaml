@@ -39,6 +39,7 @@ corpus:
 retrieval:
   global_dense_enabled: true
   bm25_top_k: 140
+  agentic_bm25_top_k: 60
   dense_top_k: 70
   fused_top_k: 48
   rerank_top_k: 24
@@ -94,13 +95,13 @@ generation:
   bartpho_enabled: false
   extractive_enabled: true
   # Vòng lặp tool-call: model có thể tự phát truy vấn "TRA_CUU: ..." để BM25
-  # (SQLite FTS5) tra thêm căn cứ giữa các lượt sinh. Mặc định tắt để không
-  # đổi hành vi baseline; bật thử bằng true (tốn thêm tối đa
-  # agentic_max_tool_calls lượt sinh/câu hỏi).
+  # (SQLite FTS5) tra thêm căn cứ giữa các lượt sinh. Chỉ chạy cho câu hỏi
+  # route="complex" (pipeline.py tự lọc theo retrieval_diagnostics) nên chi
+  # phí thêm (tối đa agentic_max_tool_calls lượt sinh/câu) chỉ phát sinh trên
+  # phần câu hỏi thật sự cần thêm bằng chứng, không nhân đôi toàn bộ batch.
   agentic_enabled: true
   agentic_max_tool_calls: 2
   agentic_evidence_per_call: 3
-  agentic_bm25_top_k: 60
   max_context_chars: 18000
   max_new_tokens: 900
   simple_max_new_tokens: 512
@@ -137,6 +138,7 @@ selection:
   qwen_preference_margin: 0.06
   source_priors:
     qwen3.5-2b: 0.08
+    qwen3.5-2b-agentic: 0.08
     extractive: -0.03
     train-memory: 0.00
 

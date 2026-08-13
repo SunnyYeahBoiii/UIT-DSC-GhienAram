@@ -171,6 +171,7 @@ def sampled_weights(base: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     candidate["qwen_preference_margin"] = rng.choice((0.0, 0.02, 0.04, 0.06, 0.08))
     candidate["source_priors"] = {
         "qwen3.5-2b": rng.uniform(-0.02, 0.14),
+        "qwen3.5-2b-agentic": rng.uniform(-0.02, 0.14),
         "extractive": rng.uniform(-0.10, 0.04),
         "train-memory": rng.uniform(-0.08, 0.10),
     }

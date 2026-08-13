@@ -679,6 +679,41 @@ def test_agentic_candidate_issues_tool_call_then_answers(tmp_path):
     assert candidate.details["evidence_added_total"] == 1
 
 
+def test_agentic_candidate_skips_search_fn_on_repeated_query(tmp_path):
+    # Model phát lại đúng truy vấn cũ (bí chiến lược sau khi lượt đầu không
+    # tìm thấy gì mới): không được gọi search_fn lần hai cho cùng truy vấn,
+    # tốn thêm một lượt BM25 vô ích trong khi kết quả chắc chắn giống hệt.
+    config = minimal_config(tmp_path)
+    config["generation"].update({"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 3})
+    seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls < 3:
+                # Không phân biệt hoa/thường và dấu — lặp cùng truy vấn.
+                return GenerationResult("TRA_CUU: Mức Phạt Chậm Đóng", 12, True, False)
+            return GenerationResult("Không tìm thấy căn cứ phù hợp hơn.", 8, True, False)
+
+    search_calls: list[str] = []
+
+    def fake_search(query: str) -> list[Evidence]:
+        search_calls.append(query)
+        return []
+
+    generator = FakeGenerator()
+    candidate = make_qwen_agentic_candidate(
+        generator, "Mức phạt chậm đóng bảo hiểm là bao nhiêu?", seed_evidence, config, fake_search,
+    )
+
+    assert generator.calls == 3
+    assert len(search_calls) == 1
+    assert candidate.details["tool_calls_used"] == 2
+
+
 def test_agentic_candidate_skips_tool_section_when_search_fn_missing(tmp_path):
     config = minimal_config(tmp_path)
     seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {}), 0.9)]
@@ -780,6 +815,42 @@ def test_merge_tool_evidence_lets_verifier_see_tool_retrieved_citations(tmp_path
     # Gọi lại lần 2 (mô phỏng cache-hit ở lượt chạy sau) không được thêm trùng.
     _merge_tool_evidence(evidence_by_id, "q1", tool_evidence)
     assert len(evidence_by_id["q1"]) == 2
+
+
+def test_tool_evidence_only_boosts_agentic_candidate_not_other_sources(tmp_path):
+    # tool_evidence_by_id là dict riêng (không phải evidence_by_id dùng chung
+    # cho mọi candidate). Nếu extra_evidence_by_source rò rỉ sang candidate
+    # khác, qwen thường sẽ ăn ké citation_precision của căn cứ nó chưa từng
+    # tra cứu -> chọn nhầm answer chỉ vì đứng cạnh agentic trong cùng câu hỏi.
+    config = minimal_config(tmp_path)
+    seed_chunk = Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {})
+    tool_chunk_text = "Điều 2. Mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày."
+    evidence_by_id = {"q1": [Evidence(seed_chunk, 0.9)]}
+    tool_evidence_by_id: dict[str, list[Evidence]] = {"q1": []}
+    question = "Mức phạt chậm đóng bảo hiểm xã hội là bao nhiêu?"
+    answer_text = "Theo Điều 2, mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày."
+    tool_evidence = [{
+        "chunk_id": "c2", "doc_id": "d1", "title": "Luật", "heading": "Điều 2",
+        "text": tool_chunk_text, "score": 0.8, "bm25_score": 0.8,
+    }]
+    _merge_tool_evidence(tool_evidence_by_id, "q1", tool_evidence)
+
+    candidates = [
+        Candidate("qwen3.5-2b", answer_text),
+        Candidate("qwen3.5-2b-agentic", answer_text),
+    ]
+    ranked = score_candidates(
+        question,
+        evidence_by_id["q1"],
+        candidates,
+        config,
+        extra_evidence_by_source={"qwen3.5-2b-agentic": tool_evidence_by_id["q1"]},
+    )
+    by_source = {candidate.source: candidate for candidate in ranked}
+    assert by_source["qwen3.5-2b-agentic"].details["citation_precision"] == 1.0
+    assert by_source["qwen3.5-2b"].details["citation_precision"] == 0.0
+    # evidence_by_id (dùng cho semantic/trace) không được đổi bởi merge.
+    assert len(evidence_by_id["q1"]) == 1
 
 
 def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):

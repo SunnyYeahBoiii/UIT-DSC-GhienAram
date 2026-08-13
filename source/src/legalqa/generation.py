@@ -239,6 +239,7 @@ def make_qwen_agentic_candidate(
 
     current_evidence = list(evidence)
     seen_chunk_ids = {item.chunk.chunk_id for item in current_evidence}
+    seen_queries: set[str] = set()
     tool_evidence_pool: list[Evidence] = []
     transcript: list[dict[str, Any]] = []
     answer = ""
@@ -281,10 +282,19 @@ def make_qwen_agentic_candidate(
             break
         if not query:
             raise RuntimeError("Qwen (agentic) phát TRA_CUU nhưng không kèm truy vấn.")
-        new_evidence = search_fn(query)
-        added = [item for item in new_evidence if item.chunk.chunk_id not in seen_chunk_ids][:evidence_per_call]
-        for item in added:
-            seen_chunk_ids.add(item.chunk.chunk_id)
+        normalized_query = _strip_diacritics(query).strip().lower()
+        # Model lặp lại đúng truy vấn đã tra (thường do bí chiến lược sau khi
+        # lượt trước không tìm thấy gì mới): bỏ qua search_fn thay vì tốn thêm
+        # một lượt BM25 vô ích — seen_chunk_ids đã lọc trùng theo chunk nên kết
+        # quả sẽ giống hệt lượt trước, added luôn rỗng.
+        if normalized_query in seen_queries:
+            added: list[Evidence] = []
+        else:
+            seen_queries.add(normalized_query)
+            new_evidence = search_fn(query)
+            added = [item for item in new_evidence if item.chunk.chunk_id not in seen_chunk_ids][:evidence_per_call]
+            for item in added:
+                seen_chunk_ids.add(item.chunk.chunk_id)
         # Chèn căn cứ mới lên đầu danh sách: model chỉ tra cứu thêm khi thấy
         # thiếu, nên phần vừa tìm được cần ưu tiên ngân sách ký tự của
         # render_evidence hơn căn cứ ban đầu — nếu nối vào cuối, ngân sách

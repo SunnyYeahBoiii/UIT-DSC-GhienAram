@@ -44,7 +44,16 @@ def score_candidates(
     config: dict[str, Any],
     semantic_encoder=None,
     retrieval_diagnostics: dict[str, Any] | None = None,
+    extra_evidence_by_source: dict[str, list[Evidence]] | None = None,
 ) -> list[Candidate]:
+    """extra_evidence_by_source: căn cứ bổ sung chỉ áp dụng cho candidate có
+    source khớp key (vd. tool evidence của agentic) — không được lẫn vào
+    `evidence_content`/`evidence_citations`/`evidence_numbers` dùng chung cho
+    mọi candidate, nếu không candidate khác (qwen thường, extractive,
+    train-memory) sẽ ăn ké điểm evidence_support/citation/numeric của căn cứ
+    mà chính nó chưa từng thấy.
+    """
+    extra_evidence_by_source = extra_evidence_by_source or {}
     evidence_text = "\n".join(item.chunk.text for item in evidence)
     evidence_content = words(evidence_text, remove_stopwords=True)
     evidence_citations = citations(evidence_text)
@@ -61,7 +70,8 @@ def score_candidates(
     retrieval_score = max(0.0, min(1.0, retrieval_score))
     evidence_trust = 0.30 + 0.70 * retrieval_score
     source_priors = weights.get(
-        "source_priors", {"qwen3.5-2b": 0.08, "extractive": -0.04, "train-memory": 0.0}
+        "source_priors",
+        {"qwen3.5-2b": 0.08, "qwen3.5-2b-agentic": 0.08, "extractive": -0.04, "train-memory": 0.0},
     )
 
     for candidate in candidates:
@@ -69,14 +79,24 @@ def score_candidates(
         answer_content = words(candidate.answer, remove_stopwords=True)
         answer_citations = citations(candidate.answer)
         answer_numbers = numbers(candidate.answer)
-        evidence_support = overlap_ratio(answer_content, evidence_content)
+        extra_evidence = extra_evidence_by_source.get(candidate.source)
+        if extra_evidence:
+            extra_text = "\n".join(item.chunk.text for item in extra_evidence)
+            candidate_evidence_content = evidence_content + words(extra_text, remove_stopwords=True)
+            candidate_evidence_citations = evidence_citations | citations(extra_text)
+            candidate_evidence_numbers = evidence_numbers | numbers(extra_text)
+        else:
+            candidate_evidence_content = evidence_content
+            candidate_evidence_citations = evidence_citations
+            candidate_evidence_numbers = evidence_numbers
+        evidence_support = overlap_ratio(answer_content, candidate_evidence_content)
         query_coverage = overlap_ratio(query_content, answer_content)
         citation_precision = (
-            len(answer_citations & evidence_citations) / len(answer_citations)
+            len(answer_citations & candidate_evidence_citations) / len(answer_citations)
             if answer_citations else 0.45
         )
         numeric_precision = (
-            len(answer_numbers & evidence_numbers) / len(answer_numbers)
+            len(answer_numbers & candidate_evidence_numbers) / len(answer_numbers)
             if answer_numbers else 1.0
         )
         unsupported = 0.5 * (1 - citation_precision) + 0.5 * (1 - numeric_precision)
