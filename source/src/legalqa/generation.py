@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -7,8 +8,8 @@ from typing import Any, Callable
 
 from .answer_style import generation_plan
 from .prompts import AGENTIC_SYSTEM_PROMPT, SYSTEM_PROMPT, qwen_agentic_user_prompt, qwen_user_prompt
-from .retrieval import Evidence
-from .text import citations, legal_tokens, normalize_text, numbers, split_sentences, words
+from .retrieval import Evidence, retrieval_confidence
+from .text import citations, document_numbers, legal_tokens, normalize_text, numbers, split_sentences, words
 
 
 @dataclass
@@ -194,11 +195,17 @@ def make_qwen_candidate(
     )
 
 
-_TOOL_CALL_MARKER = re.compile(r"^\s*tra[_\s]*cuu\s*[:：]", re.IGNORECASE)
+_TOOL_CALL_MARKER = re.compile(
+    r"^\s*(?:(?:[-*•>]\s*)|(?:\d+[.)]\s*))?`{0,3}\s*"
+    r"tra[_\s]*cuu\s*[:：]",
+    re.IGNORECASE,
+)
 
 
 def _strip_diacritics(text: str) -> str:
-    decomposed = unicodedata.normalize("NFD", text)
+    decomposed = unicodedata.normalize(
+        "NFD", text.replace("Đ", "D").replace("đ", "d")
+    )
     return "".join(character for character in decomposed if unicodedata.category(character) != "Mn")
 
 
@@ -211,11 +218,58 @@ def parse_agentic_step(raw_text: str) -> tuple[str | None, str | None]:
     nguyên dấu để BM25 tra cứu đúng.
     Trả về (query, None) nếu là tool call, hoặc (None, answer) nếu là câu trả lời.
     """
-    first_line, _, _ = raw_text.strip().partition("\n")
-    if _TOOL_CALL_MARKER.match(_strip_diacritics(first_line)):
-        query = re.split(r"[:：]", first_line, maxsplit=1)[-1].strip()
-        return query, None
+    lines = raw_text.strip().splitlines()
+    # Small models sometimes wrap the command in a Markdown fence/bullet or
+    # emit one short preface. Search only the first three non-empty lines so a
+    # literal marker mentioned later in a genuine answer is not executed.
+    inspected = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("```") and "tra" not in stripped.casefold():
+            continue
+        inspected += 1
+        if _TOOL_CALL_MARKER.match(_strip_diacritics(stripped)):
+            query = re.split(r"[:：]", stripped, maxsplit=1)[-1].strip(" `")
+            if not query:
+                for continuation in lines[index + 1 :]:
+                    continuation = continuation.strip()
+                    if continuation and not continuation.startswith("```"):
+                        query = continuation.strip(" `")
+                        break
+            return query, None
+        if inspected >= 3:
+            break
     return None, clean_answer(raw_text)
+
+
+def _normalized_agent_query(query: str) -> str:
+    return " ".join(legal_tokens(_strip_diacritics(normalize_text(query))))
+
+
+def _call_agentic_search(
+    search_fn: Callable[..., list[Evidence]],
+    query: str,
+    question: str,
+    current_evidence: list[Evidence],
+) -> list[Evidence]:
+    """Call the v9.2 search protocol while keeping one-argument test hooks valid."""
+    try:
+        signature = inspect.signature(search_fn)
+        positional = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        variadic = any(
+            parameter.kind == inspect.Parameter.VAR_POSITIONAL
+            for parameter in signature.parameters.values()
+        )
+    except (TypeError, ValueError):
+        positional, variadic = [], True
+    if variadic or len(positional) >= 3:
+        return search_fn(query, question, current_evidence)
+    return search_fn(query)
 
 
 def make_qwen_agentic_candidate(
@@ -223,7 +277,7 @@ def make_qwen_agentic_candidate(
     question: str,
     evidence: list[Evidence],
     config: dict,
-    search_fn: Callable[[str], list[Evidence]] | None,
+    search_fn: Callable[..., list[Evidence]] | None,
     retrieval_diagnostics: dict | None = None,
 ) -> Candidate:
     """Biến thể agentic của make_qwen_candidate: model có thể tự phát ra
@@ -241,13 +295,15 @@ def make_qwen_agentic_candidate(
     seen_chunk_ids = {item.chunk.chunk_id for item in current_evidence}
     tool_evidence_pool: list[Evidence] = []
     transcript: list[dict[str, Any]] = []
+    seen_queries: set[str] = set()
+    force_final_answer = False
     answer = ""
     generated_tokens = 0
     truncated = False
     terminated_by_eos = True
 
     for step in range(max_tool_calls + 1):
-        allow_tool = search_fn is not None and step < max_tool_calls
+        allow_tool = search_fn is not None and step < max_tool_calls and not force_final_answer
         prompt = qwen_agentic_user_prompt(
             question, current_evidence, config, retrieval_diagnostics, transcript, allow_tool,
         )
@@ -281,7 +337,25 @@ def make_qwen_agentic_candidate(
             break
         if not query:
             raise RuntimeError("Qwen (agentic) phát TRA_CUU nhưng không kèm truy vấn.")
-        new_evidence = search_fn(query)
+        query = query[: max(32, int(generation_cfg.get("agentic_max_query_chars", 240)))].strip()
+        normalized_query = _normalized_agent_query(query)
+        if not normalized_query:
+            raise RuntimeError("Qwen (agentic) phát truy vấn không có token hợp lệ.")
+        if normalized_query in seen_queries:
+            transcript.append(
+                {
+                    "step": step + 1,
+                    "query": query,
+                    "evidence_added": [],
+                    "repeated_query": True,
+                }
+            )
+            # Do not waste the remaining budget on the same search forever.
+            # The next pass is forced to produce an answer without tool access.
+            force_final_answer = True
+            continue
+        seen_queries.add(normalized_query)
+        new_evidence = _call_agentic_search(search_fn, query, question, current_evidence)
         added = [item for item in new_evidence if item.chunk.chunk_id not in seen_chunk_ids][:evidence_per_call]
         for item in added:
             seen_chunk_ids.add(item.chunk.chunk_id)
@@ -293,7 +367,13 @@ def make_qwen_agentic_candidate(
         current_evidence = added + current_evidence
         tool_evidence_pool.extend(added)
         transcript.append(
-            {"step": step + 1, "query": query, "evidence_added": [item.chunk.chunk_id for item in added]}
+            {
+                "step": step + 1,
+                "query": query,
+                "evidence_added": [item.chunk.chunk_id for item in added],
+                "result_count": len(new_evidence),
+                "relation_hits": sum(bool(item.relation_type) for item in added),
+            }
         )
 
     if not answer:
@@ -310,6 +390,33 @@ def make_qwen_agentic_candidate(
             int(plan["maximum_words"]),
             hard_trim=bool(generation_cfg.get("hard_trim_generated_answers", False)),
         )
+    initial_confidence_value = (retrieval_diagnostics or {}).get("route", {}).get(
+        "confidence"
+    )
+    if initial_confidence_value is None:
+        initial_confidence, _ = retrieval_confidence(evidence)
+    else:
+        initial_confidence = float(initial_confidence_value)
+    if tool_evidence_pool:
+        tool_text = "\n".join(item.chunk.text for item in tool_evidence_pool)
+        query_terms = set(legal_tokens(question))
+        evidence_terms = set(legal_tokens(tool_text))
+        lexical_coverage = len(query_terms & evidence_terms) / max(1, len(query_terms))
+        exact_legal = float(
+            bool(citations(question) & citations(tool_text))
+            or bool(document_numbers(question) & document_numbers(tool_text))
+        )
+        quality = max(0.0, min(1.0, max(item.score for item in tool_evidence_pool)))
+        tool_confidence = min(
+            1.0,
+            0.50 * initial_confidence
+            + 0.30 * lexical_coverage
+            + 0.12 * quality
+            + 0.08 * exact_legal,
+        )
+        agentic_confidence = max(initial_confidence, tool_confidence)
+    else:
+        agentic_confidence = initial_confidence
     return Candidate(
         "qwen3.5-2b-agentic",
         answer,
@@ -324,11 +431,10 @@ def make_qwen_agentic_candidate(
             "tool_calls": transcript,
             "tool_calls_used": len(transcript),
             "evidence_added_total": len(tool_evidence_pool),
-            # Bản sao serializable của các Evidence tra cứu thêm — pipeline dùng
-            # để hợp nhất vào evidence_by_id trước khi verifier chấm điểm, tránh
-            # phạt answer vì trích dẫn căn cứ mà verifier "chưa thấy" (đến từ
-            # tool-call chứ không phải retrieval ban đầu). Lưu dạng dict để sống
-            # sót qua candidate cache JSONL, không phụ thuộc lại vào index gốc.
+            "tool_retrieval_confidence": agentic_confidence,
+            # Bản sao serializable để verifier dựng evidence RIÊNG cho candidate
+            # agentic. Không bao giờ gộp vào evidence chung của Qwen thường,
+            # extractive hoặc train-memory.
             "tool_evidence": [
                 {
                     "chunk_id": item.chunk.chunk_id,
@@ -338,6 +444,9 @@ def make_qwen_agentic_candidate(
                     "text": item.chunk.text,
                     "score": item.score,
                     "bm25_score": item.bm25_score,
+                    "stage": item.stage,
+                    "relation_type": item.relation_type,
+                    "relation_path": item.relation_path,
                 }
                 for item in tool_evidence_pool
             ],

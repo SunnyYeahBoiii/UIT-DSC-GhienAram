@@ -1,4 +1,4 @@
-# LegalQA v9.1 — graph-gated retrieval, train memory và evidence-grounded QLoRA
+# LegalQA v9.2 — graph-gated retrieval, train memory và gated Agentic Search
 
 ## 0. Sửa lỗi từ public trace v8
 

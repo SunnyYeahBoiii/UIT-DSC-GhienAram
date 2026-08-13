@@ -11,7 +11,7 @@ from .data import Chunk, QARecord
 from .dense_store import ensure_global_dense_index, search_global_dense_index
 from .legal_graph import asks_for_current_law, temporal_relation_adjustment
 from .models import CrossEncoderReranker, DenseEncoder, sigmoid, unload_model
-from .retrieval import Evidence, deduplicate_and_merge_evidence
+from .retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
 from .routing import decide_route
 from .sqlite_store import SQLiteHit, SQLiteLegalStore
 from .text import citations, document_numbers, numbers
@@ -184,7 +184,7 @@ def _filter_graph_candidates(
 @contextmanager
 def sqlite_bm25_search_fn(
     config: dict[str, Any], database_path: str | Path
-) -> Iterator[Callable[[str], list[Evidence]]]:
+) -> Iterator[Callable[[str, str | None, list[Evidence] | None], list[Evidence]]]:
     """Hàm tra cứu nhẹ cho vòng lặp tool-call agentic, tương đương
     HybridRetriever.retrieve_bm25_only nhưng cho backend SQLite (Kaggle).
 
@@ -198,12 +198,86 @@ def sqlite_bm25_search_fn(
     cfg = config["retrieval"]
     top_k = int(cfg.get("agentic_bm25_top_k", cfg.get("bm25_top_k", 100)))
     with SQLiteLegalStore(database_path, readonly=True) as store:
-        def search(query: str) -> list[Evidence]:
+        def search(
+            query: str,
+            question: str | None = None,
+            current_evidence: list[Evidence] | None = None,
+        ) -> list[Evidence]:
+            current = current_evidence or []
+            original_question = question or query
             hits = store.search_chunks(query, top_k=top_k)
-            return [
+            candidates = [
                 Evidence(chunk=hit.chunk, score=hit.lexical_score, bm25_score=hit.lexical_score, stage="tool_call")
                 for hit in hits
             ]
+
+            # One bounded relation hop from both the current evidence and the
+            # strongest tool hits.  This is the CPU replacement for the GPU
+            # reranker during generation and lets replacement/amendment/
+            # reference relations compete with plain lexical matches.
+            seed_documents = list(
+                dict.fromkeys(
+                    [item.chunk.doc_id for item in current]
+                    + [hit.chunk.doc_id for hit in hits[:3]]
+                )
+            )
+            relation_limit = max(0, int(cfg.get("agentic_graph_documents", 3)))
+            relation_chunks = max(1, int(cfg.get("agentic_graph_chunks_per_document", 1)))
+            if seed_documents and relation_limit:
+                edges = store.relation_edges(seed_documents)
+                ranked_edges = sorted(
+                    edges,
+                    key=lambda edge: (
+                        -(edge.confidence + temporal_relation_adjustment(edge, original_question)),
+                        edge.relation_type,
+                        edge.neighbor_doc_id,
+                    ),
+                )
+                chosen_edges = []
+                seen_documents = set(seed_documents)
+                for edge in ranked_edges:
+                    if edge.neighbor_doc_id in seen_documents:
+                        continue
+                    chosen_edges.append(edge)
+                    seen_documents.add(edge.neighbor_doc_id)
+                    if len(chosen_edges) >= relation_limit:
+                        break
+                edge_by_document = {edge.neighbor_doc_id: edge for edge in chosen_edges}
+                relation_hits = store.rank_chunks_in_documents(
+                    f"{original_question}\n{query}",
+                    list(edge_by_document),
+                    top_per_document=relation_chunks,
+                )
+                for hit in relation_hits:
+                    edge = edge_by_document[hit.chunk.doc_id]
+                    candidates.append(
+                        Evidence(
+                            chunk=hit.chunk,
+                            score=hit.lexical_score,
+                            bm25_score=hit.lexical_score,
+                            stage="tool_relation",
+                            relation_type=edge.relation_type,
+                            relation_path=[
+                                edge.source_doc_id,
+                                edge.relation_type,
+                                edge.target_doc_id,
+                            ],
+                        )
+                    )
+
+            obsolete = (
+                store.obsolete_documents(list(dict.fromkeys(item.chunk.doc_id for item in candidates)))
+                if asks_for_current_law(original_question)
+                else set()
+            )
+            return rank_agentic_evidence(
+                original_question,
+                query,
+                current,
+                candidates,
+                config,
+                obsolete_documents=obsolete,
+            )
 
         yield search
 

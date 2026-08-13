@@ -19,6 +19,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 
 from legalqa.data import load_qa, read_json, write_json  # noqa: E402
 from legalqa.metrics import meteor_exact, rouge_l_f1  # noqa: E402
+from legalqa.selector_schema import SELECTION_WEIGHTS_SCHEMA  # noqa: E402
 
 
 POSITIVE = (
@@ -26,9 +27,6 @@ POSITIVE = (
     "legal_semantic", "length_prior", "fluency",
 )
 NEGATIVE = ("unsupported", "duplicate", "fragment_ratio")
-SELECTION_WEIGHTS_SCHEMA = "selector-weights-v2-graph-gate"
-
-
 def template_key(question: str) -> str:
     """Group near-duplicate legal question templates without using answers."""
     normalized = re.sub(r"\d+(?:[./-]\d+)*", "<num>", question.casefold())
@@ -81,6 +79,10 @@ def metric(candidate: dict[str, Any], reference: str) -> tuple[float, float]:
 
 def candidate_score(candidate: dict[str, Any], weights: dict[str, Any]) -> float:
     details = candidate.get("details", {})
+    source_priors = weights.get("source_priors", {})
+    source_prior = source_priors.get(candidate["source"])
+    if source_prior is None and candidate["source"] == "qwen3.5-2b-agentic":
+        source_prior = source_priors.get("qwen3.5-2b", 0.0)
     trust = float(details.get("evidence_trust", 1.0))
     retrieval = float(details.get("retrieval_confidence", 1.0))
     unsupported = float(details.get("unsupported", 0.0))
@@ -92,7 +94,7 @@ def candidate_score(candidate: dict[str, Any], weights: dict[str, Any]) -> float
         + float(weights["legal_semantic"]) * float(details.get("legal_semantic", 0.0))
         + float(weights["length_prior"]) * float(details.get("length_prior", 0.0))
         + float(weights.get("fluency", 0.0)) * float(details.get("fluency", 0.0))
-        + float(weights.get("source_priors", {}).get(candidate["source"], 0.0))
+        + float(source_prior or 0.0)
         - float(weights["unsupported_penalty"]) * unsupported
         - float(weights["duplicate_penalty"]) * float(details.get("duplicate", 0.0))
         - float(weights.get("fragment_penalty", 0.0)) * float(details.get("fragment_ratio", 0.0))
@@ -171,6 +173,7 @@ def sampled_weights(base: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     candidate["qwen_preference_margin"] = rng.choice((0.0, 0.02, 0.04, 0.06, 0.08))
     candidate["source_priors"] = {
         "qwen3.5-2b": rng.uniform(-0.02, 0.14),
+        "qwen3.5-2b-agentic": rng.uniform(-0.02, 0.14),
         "extractive": rng.uniform(-0.10, 0.04),
         "train-memory": rng.uniform(-0.08, 0.10),
     }

@@ -8,7 +8,7 @@ import numpy as np
 from .data import Chunk
 from .index import LegalIndex
 from .models import CrossEncoderReranker, DenseEncoder, sigmoid
-from .text import citations, numbers
+from .text import citations, document_numbers, legal_tokens, numbers
 
 
 @dataclass
@@ -21,6 +21,82 @@ class Evidence:
     stage: str = "initial"
     relation_type: str = ""
     relation_path: list[str] = field(default_factory=list)
+
+
+def rank_agentic_evidence(
+    question: str,
+    query: str,
+    current_evidence: list[Evidence],
+    candidates: list[Evidence],
+    config: dict[str, Any],
+    *,
+    obsolete_documents: set[str] | None = None,
+) -> list[Evidence]:
+    """Rerank tool-call hits with legal, temporal and relation-aware signals.
+
+    This stage intentionally stays CPU-only: the GPU reranker has already been
+    unloaded before Qwen starts.  Raw BM25 is normalized per tool call, then
+    combined with query overlap, exact document/article matches and graph
+    relation metadata.  Weak tail hits and obsolete documents are gated out.
+    """
+    if not candidates:
+        return []
+    cfg = config.get("retrieval", {})
+    combined_query = f"{question}\n{query}"
+    query_tokens = set(legal_tokens(combined_query))
+    query_documents = document_numbers(combined_query)
+    query_citations = citations(combined_query)
+    seed_documents = {item.chunk.doc_id for item in current_evidence}
+    obsolete = obsolete_documents or set()
+    maximum_bm25 = max((max(0.0, item.bm25_score) for item in candidates), default=0.0)
+
+    rescored: list[Evidence] = []
+    for item in candidates:
+        searchable = f"{item.chunk.title}\n{item.chunk.heading}\n{item.chunk.text}"
+        item_tokens = set(legal_tokens(searchable))
+        overlap = len(query_tokens & item_tokens) / max(1, len(query_tokens))
+        exact_document = len(query_documents & document_numbers(searchable))
+        exact_article = len(query_citations & citations(searchable))
+        bm25_signal = max(0.0, item.bm25_score) / maximum_bm25 if maximum_bm25 else 0.0
+        relation_signal = float(bool(item.relation_type))
+        referenced_by_seed = float(
+            bool(item.relation_path)
+            and any(document in seed_documents for document in item.relation_path)
+        )
+        score = (
+            float(cfg.get("agentic_bm25_weight", 0.46)) * bm25_signal
+            + float(cfg.get("agentic_overlap_weight", 0.34)) * overlap
+            + float(cfg.get("agentic_exact_document_boost", 0.45)) * exact_document
+            + float(cfg.get("agentic_exact_article_boost", 0.30)) * exact_article
+            + float(cfg.get("agentic_relation_boost", 0.18)) * relation_signal
+            + float(cfg.get("agentic_reference_document_boost", 0.16)) * referenced_by_seed
+        )
+        if item.chunk.doc_id in obsolete:
+            score -= float(cfg.get("agentic_obsolete_penalty", 0.45))
+        rescored.append(
+            Evidence(
+                chunk=item.chunk,
+                score=score,
+                bm25_score=item.bm25_score,
+                dense_score=item.dense_score,
+                reranker_score=item.reranker_score,
+                stage=item.stage,
+                relation_type=item.relation_type,
+                relation_path=list(item.relation_path),
+            )
+        )
+
+    best_by_chunk: dict[str, Evidence] = {}
+    for item in rescored:
+        previous = best_by_chunk.get(item.chunk.chunk_id)
+        if previous is None or item.score > previous.score:
+            best_by_chunk[item.chunk.chunk_id] = item
+    ordered = sorted(best_by_chunk.values(), key=lambda item: (-item.score, item.chunk.chunk_id))
+    top_score = max((item.score for item in ordered), default=0.0)
+    absolute_floor = float(cfg.get("agentic_min_relevance", 0.16))
+    relative_floor = top_score * float(cfg.get("agentic_min_score_ratio", 0.35))
+    accepted = [item for item in ordered if item.score >= max(absolute_floor, relative_floor)]
+    return accepted[: max(1, int(cfg.get("agentic_return_top_k", 12)))]
 
 
 def _rrf_add(scores: dict[int, float], ranking: list[tuple[int, float]], weight: float, k: int) -> None:
@@ -193,8 +269,14 @@ class HybridRetriever:
         self.dense_encoder = dense_encoder
         self.reranker = reranker
 
-    def retrieve_bm25_only(self, query: str, top_k: int | None = None) -> list[Evidence]:
-        """Tra cứu nhẹ chỉ dùng BM25, không cần dense_encoder/reranker còn sống.
+    def retrieve_bm25_only(
+        self,
+        query: str,
+        question: str | None = None,
+        current_evidence: list[Evidence] | None = None,
+        top_k: int | None = None,
+    ) -> list[Evidence]:
+        """Tra cứu CPU-only và legal-rerank, không cần model GPU còn sống.
 
         Dùng cho vòng lặp tool-call của model sinh: model có thể tự phát ra
         truy vấn giữa lúc generate, sau khi dense/reranker đã được unload để
@@ -203,10 +285,17 @@ class HybridRetriever:
         cfg = self.config["retrieval"]
         limit = int(top_k if top_k is not None else cfg.get("agentic_bm25_top_k", cfg["bm25_top_k"]))
         results = self.index.bm25.search(query, limit)
-        return [
+        candidates = [
             Evidence(chunk=self.index.chunks[chunk_index], score=score, bm25_score=score, stage="tool_call")
             for chunk_index, score in results
         ]
+        return rank_agentic_evidence(
+            question or query,
+            query,
+            current_evidence or [],
+            candidates,
+            self.config,
+        )
 
     def retrieve(self, question: str) -> list[Evidence]:
         cfg = self.config["retrieval"]

@@ -1,42 +1,20 @@
-# Nguồn và thống kê bundle
+# Nguồn phiên bản
 
-## Source v8
+Repository hiện tại chứa duy nhất cây `source/` phiên bản `0.9.2`.
 
-- Phiên bản package: `0.8.0`
-- Nguồn cục bộ:
-  `outputs/legalqa_3p88b_kaggle_source_v8_global_graph.zip`
-- SHA-256 archive:
-  `2BF8F4946F52A5D980C4D1BCA51A5AD83AF54CFBDCBCF080B8A627A18BD56E5B`
-- Số file: 62
-- Dung lượng file sau giải nén: 85.526.199 byte
+## Lịch sử
 
-## Source v9
+- Nền v9.1: graph-gated retrieval, train memory và evidence-grounded QLoRA.
+- Commit Agentic ban đầu: `9aa0eded09d96542669fb34d42ac57fd42dd77cd`.
+- v9.2: gated Agentic Search, candidate-specific evidence, selector schema v3,
+  legal-reranked tool retrieval và Kaggle wheelhouse đầy đủ.
 
-- Phiên bản package: `0.9.1`
-- Snapshot nền:
-  `outputs/legalqa_3p88b_kaggle_source_v9_1_graph_gate_final.zip`
-- SHA-256 snapshot nền:
-  `27BB291A7BABEB3093B92681C19721EACD356A0A022F02CF666B3C1C29A69CDC`
-- 80 file chung giữa snapshot và `source_v9/` khớp SHA-256.
-- Sáu file source/tiện ích mới được liệt kê trong README gốc của bundle.
-- Tổng số file trong `source_v9/`: 86
-- Tổng dung lượng: 85.664.366 byte
+## Gói Kaggle v9.2
 
-## Dữ liệu
+Gói phát hành được tạo từ nguyên trạng cây `source/` sau khi chạy
+unit test, compile, parse notebook/config và kiểm tra ZIP. Tên file, SHA-256
+và kích thước được cung cấp cùng artifact bên ngoài repository để
+không tạo metadata checksum tự tham chiếu.
 
-- `train.json`: 7.000 câu hỏi.
-- `public-official.json`: 1.000 câu hỏi.
-- `warmup.json`: 500 câu hỏi.
-- `selected-contexts/`: 8.532 văn bản JSON.
-- Tất cả 8.532 văn bản đã được parse JSON thành công.
-- Tổng số file dữ liệu (không tính `data/README.md`): 8.536.
-- Tổng dung lượng file dữ liệu (không tính `data/README.md`): 506.293.192 byte.
-- SHA-256 archive dữ liệu chính thức gốc `dsc2026-task2-data.zip`:
-  `3672609ED74F3BC71A24116CEF38C30709418CAF303231F558B183D3269DF4BB`.
-- SHA-256 `warmup.json`:
-  `B824E4F18BD9181C021498A28E402B7374D6D559F2FF28CAA4120A9D932F82C5`.
-- SHA-256 tài liệu overview:
-  `ADD8AE1E232A9F339C92EE6FF8D4FC1085D9C9A5DFC2D1B1042EF2C979F9524E`.
-
-Đường dẫn nguồn cục bộ chỉ dùng để truy vết trên máy đóng gói và không phải là
-đường dẫn runtime bắt buộc của source.
+Checkpoint mô hình, adapter QLoRA, dense index, dữ liệu chính thức và
+submission không nằm trong repository hay gói source này.

@@ -44,28 +44,43 @@ def score_candidates(
     config: dict[str, Any],
     semantic_encoder=None,
     retrieval_diagnostics: dict[str, Any] | None = None,
+    candidate_evidence_by_source: dict[str, list[Evidence]] | None = None,
 ) -> list[Candidate]:
-    evidence_text = "\n".join(item.chunk.text for item in evidence)
-    evidence_content = words(evidence_text, remove_stopwords=True)
-    evidence_citations = citations(evidence_text)
-    evidence_numbers = numbers(evidence_text)
     query_content = words(question, remove_stopwords=True)
     weights = config["selection"]
     generation = config["generation"]
     diagnostics = retrieval_diagnostics or {}
     route_payload = diagnostics.get("route", {})
     if "confidence" in route_payload:
-        retrieval_score = float(route_payload["confidence"])
+        base_retrieval_score = float(route_payload["confidence"])
     else:
-        retrieval_score, _ = retrieval_confidence(evidence)
-    retrieval_score = max(0.0, min(1.0, retrieval_score))
-    evidence_trust = 0.30 + 0.70 * retrieval_score
+        base_retrieval_score, _ = retrieval_confidence(evidence)
+    base_retrieval_score = max(0.0, min(1.0, base_retrieval_score))
     source_priors = weights.get(
-        "source_priors", {"qwen3.5-2b": 0.08, "extractive": -0.04, "train-memory": 0.0}
+        "source_priors",
+        {
+            "qwen3.5-2b": 0.08,
+            "qwen3.5-2b-agentic": 0.08,
+            "extractive": -0.04,
+            "train-memory": 0.0,
+        },
     )
 
     for candidate in candidates:
         generation_details = dict(candidate.details)
+        active_evidence = (candidate_evidence_by_source or {}).get(candidate.source, evidence)
+        evidence_text = "\n".join(item.chunk.text for item in active_evidence)
+        evidence_content = words(evidence_text, remove_stopwords=True)
+        evidence_citations = citations(evidence_text)
+        evidence_numbers = numbers(evidence_text)
+        retrieval_score = base_retrieval_score
+        if candidate.source == "qwen3.5-2b-agentic":
+            retrieval_score = max(
+                retrieval_score,
+                float(generation_details.get("tool_retrieval_confidence", retrieval_score)),
+            )
+        retrieval_score = max(0.0, min(1.0, retrieval_score))
+        evidence_trust = 0.30 + 0.70 * retrieval_score
         answer_content = words(candidate.answer, remove_stopwords=True)
         answer_citations = citations(candidate.answer)
         answer_numbers = numbers(candidate.answer)
@@ -100,7 +115,12 @@ def score_candidates(
         )
         fluency, fragment_ratio = _fluency_score(candidate.answer)
         truncated = float(bool(generation_details.get("truncated", False)))
-        source_prior = float(source_priors.get(candidate.source, 0.0))
+        fallback_prior = (
+            source_priors.get("qwen3.5-2b", 0.0)
+            if candidate.source == "qwen3.5-2b-agentic"
+            else 0.0
+        )
+        source_prior = float(source_priors.get(candidate.source, fallback_prior))
         source_rejected = candidate.source.startswith("bartpho")
         score = (
             float(weights["evidence_support"]) * evidence_support * evidence_trust

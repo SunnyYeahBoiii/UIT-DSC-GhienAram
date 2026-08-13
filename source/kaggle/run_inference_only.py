@@ -41,6 +41,7 @@ from legalqa.models import (  # noqa: E402
 )
 from legalqa.pipeline import generate_from_evidence  # noqa: E402
 from legalqa.recovery import RecoveryManager, restore_recovery_bundle  # noqa: E402
+from legalqa.selector_schema import SELECTION_WEIGHTS_SCHEMA  # noqa: E402
 from legalqa.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
 from legalqa.sqlite_store import build_sqlite_store  # noqa: E402
 from legalqa.sqlite_store import SQLiteLegalStore  # noqa: E402
@@ -56,8 +57,7 @@ from run_end_to_end import (  # noqa: E402
 )
 
 
-CACHE_SCHEMA_VERSION = "inference-v5-graph-gate-train-memory-qlora"
-SELECTION_WEIGHTS_SCHEMA = "selector-weights-v2-graph-gate"
+CACHE_SCHEMA_VERSION = "inference-v7-agentic-error-isolation"
 RUNTIME_MODEL_ROLES = ("generator", "embedding", "reranker", "verifier")
 
 
@@ -336,7 +336,7 @@ def main() -> None:
         if selection_payload.get("schema") != SELECTION_WEIGHTS_SCHEMA:
             raise ValueError(
                 "Selector weights thuộc pipeline cũ hoặc thiếu schema. Hãy chạy lại "
-                "notebook v9.1 selector calibration; expected "
+                "notebook v9.2 selector calibration; expected "
                 f"schema={SELECTION_WEIGHTS_SCHEMA!r}."
             )
         selection_override = selection_payload.get("selection", selection_payload)
@@ -535,7 +535,7 @@ def main() -> None:
         return
 
     questions = load_qa(public_path, require_answers=False)
-    retrieval_cache = working / "cache" / run_fingerprint / "retrieval.v5.jsonl"
+    retrieval_cache = working / "cache" / run_fingerprint / "retrieval.v7.jsonl"
     retrieval_started = time.time()
     evidence = retrieve_sqlite_batch(
         config,

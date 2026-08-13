@@ -38,6 +38,58 @@ def _find_dense(root: Path) -> Path:
     return candidates[0]
 
 
+def _validate_split_adapter(path: Path) -> Path:
+    required = (
+        path / "adapter_config.json",
+        path / "adapter_model.safetensors",
+        path / "training_complete.json",
+        path / "qlora_scope.json",
+    )
+    missing = [str(item) for item in required if not item.is_file()]
+    if missing:
+        raise FileNotFoundError(f"QLoRA split adapter chưa hoàn tất: {missing}")
+    scope = json.loads((path / "qlora_scope.json").read_text(encoding="utf-8"))
+    if scope.get("train_scope") != "split":
+        raise RuntimeError(
+            f"Selector calibration bắt buộc dùng adapter scope='split', nhận {scope!r}: {path}"
+        )
+    complete = json.loads(
+        (path / "training_complete.json").read_text(encoding="utf-8")
+    )
+    if int(complete.get("global_step", 0)) <= 0:
+        raise RuntimeError(f"Adapter split không có global_step hoàn tất: {path}")
+    return path
+
+
+def _find_split_adapter(root: Path, explicit: str | None = None) -> Path:
+    if explicit:
+        return _validate_split_adapter(Path(explicit))
+    candidates = sorted(
+        {
+            path.parent
+            for path in root.rglob("qlora_scope.json")
+            if (path.parent / "training_complete.json").is_file()
+            and (path.parent / "adapter_config.json").is_file()
+        }
+    )
+    valid = []
+    for candidate in candidates:
+        try:
+            scope = json.loads(
+                (candidate / "qlora_scope.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            continue
+        if scope.get("train_scope") == "split":
+            valid.append(candidate)
+    if len(valid) != 1:
+        raise RuntimeError(
+            "Cần đúng một completed QLoRA adapter scope='split' cho calibration; "
+            f"tìm thấy: {valid}"
+        )
+    return _validate_split_adapter(valid[0])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run leakage-safe grouped-dev inference and candidate-oracle selector tuning"
@@ -45,8 +97,17 @@ def main() -> None:
     parser.add_argument("--input-root", default="/kaggle/input")
     parser.add_argument("--split-dir", default=None)
     parser.add_argument("--dense-index-input", default=None)
-    parser.add_argument("--generator-adapter", default=None)
+    parser.add_argument(
+        "--generator-adapter",
+        default=None,
+        help="Completed QLoRA adapter with qlora_scope train_scope='split'; auto-discovered if omitted",
+    )
     parser.add_argument("--working", default="/kaggle/working/legalqa_selector_calibration")
+    parser.add_argument(
+        "--resume-bundle",
+        default=None,
+        help="Optional selector_recovery_latest.zip from an earlier identical calibration run",
+    )
     parser.add_argument("--trials", type=int, default=3000)
     args = parser.parse_args()
     input_root = Path(args.input_root)
@@ -65,6 +126,7 @@ def main() -> None:
         if args.dense_index_input
         else _find_dense(input_root)
     )
+    generator_adapter = _find_split_adapter(input_root, args.generator_adapter)
     working = Path(args.working)
     working.mkdir(parents=True, exist_ok=True)
     predictions_zip = working / "selector_dev_predictions.zip"
@@ -91,9 +153,11 @@ def main() -> None:
         str(working / "selector_recovery_latest.zip"),
         "--checkpoint-every",
         "25",
+        "--generator-adapter",
+        str(generator_adapter),
     ]
-    if args.generator_adapter:
-        command.extend(["--generator-adapter", args.generator_adapter])
+    if args.resume_bundle:
+        command.extend(["--resume-bundle", args.resume_bundle])
     print(" ".join(command), flush=True)
     subprocess.run(command, check=True)
 

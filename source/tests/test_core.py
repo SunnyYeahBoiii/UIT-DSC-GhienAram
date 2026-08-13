@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -17,13 +18,22 @@ from legalqa.fingerprint import adapter_fingerprint, checkpoint_fingerprint, cor
 from legalqa.index import build_index
 from legalqa.metrics import meteor_exact, rouge_l_f1
 from legalqa.legal_graph import temporal_relation_adjustment
-from legalqa.pipeline import _append_candidate, _load_candidate_cache, _merge_tool_evidence, run_pipeline
+from legalqa.pipeline import (
+    _append_candidate,
+    _candidate_evidence,
+    _load_candidate_cache,
+    _should_run_agentic,
+    generate_from_evidence,
+    run_pipeline,
+)
 from legalqa.prompts import qwen_user_prompt
-from legalqa.retrieval import Evidence, deduplicate_and_merge_evidence
+from legalqa.retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
 from legalqa.routing import decide_route
+from legalqa.selector_schema import SELECTION_WEIGHTS_SCHEMA
 from legalqa.submission import create_submission
 from legalqa.sqlite_retrieval import (
     _filter_graph_candidates,
+    RetrievalBatch,
     load_retrieval_cache,
     retrieve_sqlite_batch,
     sqlite_bm25_search_fn,
@@ -105,6 +115,57 @@ def test_metrics_identity():
     text = "Theo Điều 1, người lao động có quyền nghỉ phép."
     assert rouge_l_f1(text, text) == 1.0
     assert meteor_exact(text, text) > 0.99
+
+
+def test_selector_schema_is_shared_by_calibration_and_inference():
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    for name, relative in (
+        ("selector_eval_contract", "scripts/evaluate_selector.py"),
+        ("selector_inference_contract", "kaggle/run_inference_only.py"),
+    ):
+        spec = importlib.util.spec_from_file_location(name, project / relative)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        assert module.SELECTION_WEIGHTS_SCHEMA == SELECTION_WEIGHTS_SCHEMA
+
+
+def test_selector_calibration_requires_completed_split_adapter(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle/run_selector_calibration.py"
+    spec = importlib.util.spec_from_file_location("selector_adapter_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    (adapter / "training_complete.json").write_text(
+        json.dumps({"global_step": 207}), encoding="utf-8"
+    )
+    (adapter / "qlora_scope.json").write_text(
+        json.dumps({"train_scope": "split"}), encoding="utf-8"
+    )
+    assert module._find_split_adapter(tmp_path) == adapter
+    (adapter / "qlora_scope.json").write_text(
+        json.dumps({"train_scope": "full"}), encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError):
+        module._find_split_adapter(tmp_path)
+
+
+def test_selector_calibration_exposes_resume_bundle_flag():
+    source = (
+        Path(__file__).resolve().parents[1] / "kaggle/run_selector_calibration.py"
+    ).read_text(encoding="utf-8")
+    assert '"--resume-bundle"' in source
+    assert 'command.extend(["--resume-bundle", args.resume_bundle])' in source
 
 
 def test_sparse_pipeline_and_submission(tmp_path):
@@ -643,6 +704,17 @@ def test_parse_agentic_step_detects_tool_call_and_final_answer():
     assert empty_query == ""
     assert empty_answer is None
 
+    fenced_query, fenced_answer = parse_agentic_step(
+        "```text\n- TRA_CỨU:\nĐiều kiện hưởng trợ cấp\n```"
+    )
+    assert fenced_query == "Điều kiện hưởng trợ cấp"
+    assert fenced_answer is None
+
+    prefaced_query, _ = parse_agentic_step(
+        "Cần tìm thêm căn cứ.\nTRA_CUU: văn bản thay thế hiện hành"
+    )
+    assert prefaced_query == "văn bản thay thế hiện hành"
+
 
 def test_agentic_candidate_issues_tool_call_then_answers(tmp_path):
     config = minimal_config(tmp_path)
@@ -754,15 +826,71 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
     assert "Mức phạt là 0,03%" in second_prompt
 
 
-def test_merge_tool_evidence_lets_verifier_see_tool_retrieved_citations(tmp_path):
-    # Không hợp nhất: verifier chấm answer agentic dựa trên evidence_by_id
-    # seed-only, nên "Điều 2"/"0,03%" (chỉ có trong đoạn tra cứu thêm) bị coi
-    # là trích dẫn không có căn cứ -> phạt oan chính vì tool-call đã hoạt động
-    # đúng. Sau khi hợp nhất, verifier phải thấy đủ căn cứ.
+def test_agentic_candidate_blocks_repeated_query_and_forces_final_answer(tmp_path):
+    config = minimal_config(tmp_path)
+    config["generation"].update({"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 1})
+    seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls <= 2:
+                return GenerationResult("TRA_CUU: mức phạt chậm đóng", 5, True, False)
+            assert "CÔNG CỤ TRA CỨU" not in user
+            return GenerationResult("Theo Điều 1, áp dụng quy định đã nêu.", 10, True, False)
+
+    search_calls: list[str] = []
+
+    def fake_search(query: str) -> list[Evidence]:
+        search_calls.append(query)
+        return []
+
+    candidate = make_qwen_agentic_candidate(
+        FakeGenerator(), "Mức phạt là bao nhiêu?", seed_evidence, config, fake_search
+    )
+    assert search_calls == ["mức phạt chậm đóng"]
+    assert candidate.details["tool_calls_used"] == 2
+    assert candidate.details["tool_calls"][1]["repeated_query"] is True
+
+
+def test_agentic_query_dedup_normalizes_vietnamese_d_stroke(tmp_path):
+    config = minimal_config(tmp_path)
+    config["generation"].update({"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 1})
+    seed = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            outputs = (
+                "TRA_CUU: Điều kiện áp dụng",
+                "TRA_CUU: dieu kien ap dung",
+                "Theo Điều 1, quy định được áp dụng.",
+            )
+            return GenerationResult(outputs[self.calls - 1], 6, True, False)
+
+    calls: list[str] = []
+    candidate = make_qwen_agentic_candidate(
+        FakeGenerator(),
+        "Điều kiện áp dụng là gì?",
+        seed,
+        config,
+        lambda query: calls.append(query) or [],
+    )
+    assert calls == ["Điều kiện áp dụng"]
+    assert candidate.details["tool_calls"][1]["repeated_query"] is True
+
+
+def test_tool_evidence_is_candidate_specific_and_cannot_credit_base_qwen(tmp_path):
     config = minimal_config(tmp_path)
     seed_chunk = Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {})
     tool_chunk_text = "Điều 2. Mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày."
-    evidence_by_id = {"q1": [Evidence(seed_chunk, 0.9)]}
+    seed_evidence = [Evidence(seed_chunk, 0.9)]
     question = "Mức phạt chậm đóng bảo hiểm xã hội là bao nhiêu?"
     answer_text = "Theo Điều 2, mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày."
     tool_evidence = [{
@@ -770,16 +898,165 @@ def test_merge_tool_evidence_lets_verifier_see_tool_retrieved_citations(tmp_path
         "text": tool_chunk_text, "score": 0.8, "bm25_score": 0.8,
     }]
 
-    before = score_candidates(question, evidence_by_id["q1"], [Candidate("qwen3.5-2b-agentic", answer_text)], config)[0]
-    assert before.details["citation_precision"] == 0.0
+    base = Candidate("qwen3.5-2b", answer_text)
+    agentic = Candidate("qwen3.5-2b-agentic", answer_text, details={"tool_evidence": tool_evidence})
+    base_evidence = _candidate_evidence(seed_evidence, base)
+    agentic_evidence = _candidate_evidence(seed_evidence, agentic)
+    assert len(seed_evidence) == 1
+    assert len(base_evidence) == 1
+    assert len(agentic_evidence) == 2
+    ranked = score_candidates(
+        question,
+        seed_evidence,
+        [base, agentic],
+        config,
+        candidate_evidence_by_source={
+            base.source: base_evidence,
+            agentic.source: agentic_evidence,
+        },
+    )
+    scored = {candidate.source: candidate for candidate in ranked}
+    assert scored["qwen3.5-2b"].details["citation_precision"] == 0.0
+    assert scored["qwen3.5-2b-agentic"].details["citation_precision"] == 1.0
 
-    _merge_tool_evidence(evidence_by_id, "q1", tool_evidence)
-    after = score_candidates(question, evidence_by_id["q1"], [Candidate("qwen3.5-2b-agentic", answer_text)], config)[0]
-    assert after.details["citation_precision"] == 1.0
 
-    # Gọi lại lần 2 (mô phỏng cache-hit ở lượt chạy sau) không được thêm trùng.
-    _merge_tool_evidence(evidence_by_id, "q1", tool_evidence)
-    assert len(evidence_by_id["q1"]) == 2
+def test_agentic_prior_falls_back_to_base_qwen_prior(tmp_path):
+    config = minimal_config(tmp_path)
+    config["selection"]["source_priors"] = {"qwen3.5-2b": 0.08}
+    evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+    candidates = [
+        Candidate("qwen3.5-2b", "Theo Điều 1, nội dung được áp dụng."),
+        Candidate("qwen3.5-2b-agentic", "Theo Điều 1, nội dung được áp dụng."),
+    ]
+    ranked = score_candidates("Nội dung áp dụng thế nào?", evidence, candidates, config)
+    scores = {candidate.source: candidate.score for candidate in ranked}
+    assert scores["qwen3.5-2b"] == pytest.approx(scores["qwen3.5-2b-agentic"])
+
+
+def test_agentic_gate_skips_simple_confident_and_keeps_complex(tmp_path):
+    config = minimal_config(tmp_path)
+    config["generation"].update(
+        agentic_routes=["complex"],
+        agentic_confidence_below=0.45,
+        agentic_on_legal_cues=True,
+    )
+    evidence = [Evidence(Chunk("c1", "d1", "Quy định.", "Luật", "Điều 1", {}), 0.9)]
+    simple = {"route": {"route": "simple", "confidence": 0.82, "features": {}}}
+    complex_case = {"route": {"route": "complex", "confidence": 0.72, "features": {}}}
+    assert _should_run_agentic("Quy định này là gì?", evidence, simple, config)[0] is False
+    assert _should_run_agentic("Văn bản nào thay thế quy định này?", evidence, complex_case, config)[0] is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("TRA_CUU không hợp lệ"),
+        ValueError("tool query lỗi"),
+        sqlite3.OperationalError("FTS search lỗi"),
+        TypeError("tool metadata sai kiểu"),
+        KeyError("relation_type"),
+    ],
+)
+def test_agentic_nonfatal_errors_do_not_abort_or_skip_remaining_questions(
+    tmp_path, monkeypatch, error
+):
+    config = minimal_config(tmp_path)
+    config["paths"]["models"]["generator"] = "fake-model"
+    config["generation"].update(
+        qwen_enabled=False,
+        agentic_enabled=True,
+        agentic_routes=["complex"],
+        agentic_warn_after_nonfatal_errors=3,
+    )
+    questions = [QARecord(f"q{i}", f"Văn bản nào thay thế quy định số {i}?", None) for i in range(4)]
+    seed = Evidence(Chunk("c1", "d1", "Điều 1. Nội dung pháp luật.", "Luật", "Điều 1", {}), 0.9)
+    evidence = RetrievalBatch(
+        {item.question_id: [seed] for item in questions},
+        {
+            item.question_id: {"route": {"route": "complex", "confidence": 0.7, "features": {}}}
+            for item in questions
+        },
+    )
+
+    monkeypatch.setattr("legalqa.pipeline.QwenTextGenerator", lambda config: object())
+
+    def fail_agentic(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("legalqa.pipeline.make_qwen_agentic_candidate", fail_agentic)
+    output = tmp_path / "predictions.json"
+    result = generate_from_evidence(
+        config,
+        questions,
+        evidence,
+        output,
+        agentic_search_fn=lambda query: [],
+    )
+    assert result["questions"] == 4
+    assert result["generation_errors"] == 4
+    assert result["agentic"]["failed"] == 4
+    assert output.is_file()
+    cache = Path(config["paths"]["artifacts"]) / "candidate_cache" / "qwen_agentic.jsonl"
+    assert not cache.exists()  # transient/nonfatal failures must remain retryable
+
+
+def test_agentic_fatal_cuda_error_still_aborts_for_safe_resume(tmp_path, monkeypatch):
+    config = minimal_config(tmp_path)
+    config["paths"]["models"]["generator"] = "fake-model"
+    config["generation"].update(
+        qwen_enabled=False,
+        agentic_enabled=True,
+        agentic_routes=["complex"],
+    )
+    question = QARecord("q1", "Văn bản nào thay thế quy định này?", None)
+    seed = Evidence(
+        Chunk("c1", "d1", "Điều 1. Nội dung pháp luật.", "Luật", "Điều 1", {}),
+        0.9,
+    )
+    evidence = RetrievalBatch(
+        {question.question_id: [seed]},
+        {
+            question.question_id: {
+                "route": {"route": "complex", "confidence": 0.7, "features": {}}
+            }
+        },
+    )
+    monkeypatch.setattr("legalqa.pipeline.QwenTextGenerator", lambda config: object())
+
+    def fail_agentic(*args, **kwargs):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr("legalqa.pipeline.make_qwen_agentic_candidate", fail_agentic)
+    with pytest.raises(RuntimeError, match="GPU nghiêm trọng"):
+        generate_from_evidence(
+            config,
+            [question],
+            evidence,
+            tmp_path / "predictions.json",
+            agentic_search_fn=lambda query: [],
+        )
+
+
+def test_agentic_legal_rerank_prefers_exact_citation_and_rejects_weak_tail(tmp_path):
+    config = minimal_config(tmp_path)
+    candidates = [
+        Evidence(Chunk("weak", "d1", "Nội dung chung.", "Luật", "", {}), 9.0, bm25_score=9.0),
+        Evidence(
+            Chunk("exact", "d2", "Điều 7 quy định mức phạt.", "Nghị định 12/2024/NĐ-CP", "Điều 7", {}),
+            5.0,
+            bm25_score=5.0,
+            relation_type="REPLACES",
+            relation_path=["d1", "REPLACES", "d2"],
+        ),
+    ]
+    ranked = rank_agentic_evidence(
+        "Theo Điều 7 Nghị định 12/2024/NĐ-CP, mức phạt là bao nhiêu?",
+        "Điều 7 mức phạt",
+        [],
+        candidates,
+        config,
+    )
+    assert ranked[0].chunk.chunk_id == "exact"
 
 
 def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):
@@ -809,4 +1086,6 @@ def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):
         assert results
         assert results[0].chunk.doc_id == "d1"
         assert results[0].stage == "tool_call"
-        assert results[0].bm25_score == results[0].score
+        assert results[0].bm25_score > 0
+        assert results[0].score > 0
+        assert results[0].score != results[0].bm25_score  # legal-reranked, not raw BM25

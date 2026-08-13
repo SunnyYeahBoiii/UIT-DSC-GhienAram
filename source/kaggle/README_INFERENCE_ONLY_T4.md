@@ -1,10 +1,21 @@
-# Kaggle T4 — LegalQA v9.1
+# Kaggle T4 — LegalQA v9.2
 
 ## Inputs bắt buộc
 
 Attach Dataset official chứa `train.json`, `public-official.json`, `selected-contexts/`; Dataset source v9; Dataset bốn base checkpoint đã được BTC duyệt. Internet tắt, GPU bật.
 
-Tên Dataset không bị hard-code. Notebook tìm file/manifest theo nội dung và sẽ dừng nếu phát hiện nhiều source, nhiều dense index, nhiều completed adapter, nhiều tuned weights hoặc nhiều recovery ZIP. Recovery v8/v9 cũ không được tái sử dụng vì cache schema v9.1 đã đổi sang graph-gated retrieval.
+Tên Dataset không bị hard-code. Notebook tìm file/manifest theo nội dung và sẽ dừng nếu phát hiện nhiều source, nhiều dense index, nhiều completed adapter, nhiều tuned weights hoặc nhiều recovery ZIP. Recovery v8/v9.1 cũ không được tái sử dụng vì cache namespace v9.2 đã đổi theo Agentic gate/legal-rerank và candidate-specific evidence.
+
+Agentic Qwen mặc định chỉ chạy cho route Complex, retrieval confidence dưới
+`0.45`, hoặc câu có tín hiệu dẫn chiếu/thay thế/hiệu lực. Lỗi tool-call không
+nghiêm trọng chỉ loại candidate của đúng câu đó và không tắt Agentic ở các câu
+còn lại. Vì selector nay có
+candidate và prior Agentic riêng, hãy calibration lại bằng v9.2 trước public
+inference; không tái dùng `tuned_selection.yaml` sinh từ Agentic cũ.
+
+Selector calibration ghi `/kaggle/working/legalqa_selector_calibration/selector_recovery_latest.zip`.
+Nếu session hết giờ, lưu ZIP đó thành Kaggle Dataset và attach ở session kế;
+notebook sẽ tự truyền đúng một recovery bundle khi `AUTO_RESUME=True`.
 
 ## Bốn notebook/run mode
 

@@ -1,4 +1,4 @@
-# UIT DSC 2026 Task 2 — LegalQA v9.1
+# UIT DSC 2026 Task 2 — LegalQA v9.2
 
 Pipeline offline cho Kaggle T4, chỉ dùng dữ liệu chính thức và các checkpoint mã nguồn mở đã được BTC phê duyệt. Tổng tham số runtime vẫn được runner kiểm tra phải nhỏ hơn 4B. BARTpho đã bị loại.
 
@@ -14,6 +14,11 @@ Pipeline offline cho Kaggle T4, chỉ dùng dữ liệu chính thức và các c
 - Mỗi graph hop được rerank và relevance-gate trước khi trở thành frontier của vòng sau; mặc định tối đa hai vòng, sáu evidence và bốn văn bản.
 - Document diversity dùng bonus nhỏ thay vì cưỡng ép kéo tài liệu điểm thấp vào evidence.
 - Style ceiling tăng lên 700 từ; mặc định chỉ xóa câu lặp, không hard-trim đáp án dài ở 520 từ.
+- Agentic Qwen được gate theo route/confidence/tín hiệu pháp lý, thay vì chạy
+  cho 100% câu hỏi. Tool-call tối đa hai vòng, chặn query lặp và lỗi không
+  nghiêm trọng không còn làm dừng toàn bộ inference.
+- Tool evidence được chấm riêng cho candidate Agentic; BM25 tool result được
+  legal-rerank bằng citation, quan hệ và hiệu lực văn bản trước khi vào prompt.
 
 ## Pipeline
 
@@ -27,6 +32,8 @@ Question
        -> 0–2 style examples for Qwen
        -> high-threshold memory candidate
   -> evidence-grounded Qwen base/QLoRA + extractive candidate
+       -> gated Agentic Qwen for complex/low-confidence questions only
+       -> BM25 tool call + citation/temporal/relation legal-rerank
   -> learned answer-length compaction
   -> ViLegalBERT + confidence-aware selector
   -> submission.zip
@@ -38,7 +45,7 @@ Chi tiết nằm trong [PIPELINE_V9.md](PIPELINE_V9.md). Hướng dẫn Kaggle n
 
 1. Import `kaggle/legalqa_dsc2026_inference_only_t4.ipynb`, đặt `DENSE_INDEX_ONLY=True`; lưu `/kaggle/working/legalqa_dense_index` thành Dataset. Thư mục này chứa cả global corpus dense index và official train-memory.
 2. Import `kaggle/legalqa_dsc2026_v9_qlora_t4.ipynb`, đặt `TRAIN_SCOPE='split'`; lưu toàn bộ `/kaggle/working/legalqa_qlora` để giữ checkpoint và adapter split.
-3. Attach dense index và completed split adapter; chạy `kaggle/legalqa_dsc2026_v9_selector_calibration_t4.ipynb`. Lưu `tuned_selection.yaml` cùng báo cáo candidate oracle.
+3. Attach dense index và completed split adapter; chạy `kaggle/legalqa_dsc2026_v9_selector_calibration_t4.ipynb` bằng source v9.2. Lưu `tuned_selection.yaml` cùng báo cáo candidate oracle. Không dùng trace/trọng số calibration từ Agentic cũ vì candidate evidence và prior đã thay đổi.
 4. Chạy lại notebook QLoRA với `TRAIN_SCOPE='full'`. Không attach state `split` làm state resume cho bước này; code cũng từ chối scope sai.
 5. Attach dense index, completed adapter `full` và đúng một `tuned_selection.yaml`; chạy notebook inference với `DENSE_INDEX_ONLY=False`.
 6. Nộp duy nhất `/kaggle/working/submission.zip`.
@@ -64,4 +71,4 @@ python -m compileall -q src scripts kaggle
 /kaggle/working/submission.zip
 ```
 
-Không có agent loop vô hạn. Graph retrieval tối đa hai vòng mặc định, có visited-set và dừng ngay khi vòng mới không còn chunk vượt relevance gate.
+Không có agent loop vô hạn. Graph retrieval và Agentic tool-call đều tối đa hai vòng mặc định, có visited/query-set và dừng ngay khi không còn evidence phù hợp.

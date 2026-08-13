@@ -39,6 +39,20 @@ corpus:
 retrieval:
   global_dense_enabled: true
   bm25_top_k: 140
+  # Raw FTS5 pool for each tool call; legal reranking below returns only top 12.
+  agentic_bm25_top_k: 60
+  agentic_return_top_k: 12
+  agentic_graph_documents: 3
+  agentic_graph_chunks_per_document: 1
+  agentic_bm25_weight: 0.46
+  agentic_overlap_weight: 0.34
+  agentic_exact_document_boost: 0.45
+  agentic_exact_article_boost: 0.30
+  agentic_relation_boost: 0.18
+  agentic_reference_document_boost: 0.16
+  agentic_obsolete_penalty: 0.45
+  agentic_min_relevance: 0.16
+  agentic_min_score_ratio: 0.35
   dense_top_k: 70
   fused_top_k: 48
   rerank_top_k: 24
@@ -93,14 +107,16 @@ generation:
   qwen_enabled: true
   bartpho_enabled: false
   extractive_enabled: true
-  # Vòng lặp tool-call: model có thể tự phát truy vấn "TRA_CUU: ..." để BM25
-  # (SQLite FTS5) tra thêm căn cứ giữa các lượt sinh. Mặc định tắt để không
-  # đổi hành vi baseline; bật thử bằng true (tốn thêm tối đa
-  # agentic_max_tool_calls lượt sinh/câu hỏi).
+  # Chỉ chạy Agentic Qwen cho Complex, retrieval yếu hoặc có tín hiệu pháp lý
+  # cần mở rộng; không chạy lượt sinh thứ hai cho toàn bộ câu hỏi.
   agentic_enabled: true
+  agentic_routes: ["complex"]
+  agentic_confidence_below: 0.45
+  agentic_on_legal_cues: true
   agentic_max_tool_calls: 2
   agentic_evidence_per_call: 3
-  agentic_bm25_top_k: 60
+  agentic_max_query_chars: 240
+  agentic_warn_after_nonfatal_errors: 3
   max_context_chars: 18000
   max_new_tokens: 900
   simple_max_new_tokens: 512
@@ -137,6 +153,7 @@ selection:
   qwen_preference_margin: 0.06
   source_priors:
     qwen3.5-2b: 0.08
+    qwen3.5-2b-agentic: 0.08
     extractive: -0.03
     train-memory: 0.00
 

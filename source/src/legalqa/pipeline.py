@@ -18,6 +18,7 @@ from .generation import (
     make_train_memory_candidate,
 )
 from .index import LegalIndex
+from .legal_graph import asks_for_current_law, has_complex_cue
 from .models import (
     CrossEncoderReranker,
     DenseEncoder,
@@ -25,8 +26,9 @@ from .models import (
     QwenTextGenerator,
     unload_model,
 )
-from .retrieval import Evidence, HybridRetriever
+from .retrieval import Evidence, HybridRetriever, retrieval_confidence
 from .recovery import RecoveryManager
+from .text import citations, document_numbers
 from .verifier import score_candidates
 
 
@@ -107,7 +109,7 @@ def _append_candidate(
         handle.flush()
 
 
-def _fatal_generation_error(error: RuntimeError) -> bool:
+def _fatal_generation_error(error: Exception) -> bool:
     message = str(error).lower()
     fatal_markers = (
         "out of memory",
@@ -124,47 +126,94 @@ def _fatal_generation_error(error: RuntimeError) -> bool:
     return any(marker in message for marker in fatal_markers)
 
 
-def _merge_tool_evidence(
-    evidence_by_id: dict[str, list[Evidence]],
-    question_id: str,
-    tool_evidence: list[dict[str, Any]],
-) -> None:
-    """Hợp nhất căn cứ do tool-call agentic tìm thêm vào evidence_by_id.
-
-    verifier.score_candidates chấm mọi candidate của một câu hỏi (kể cả
-    extractive/train-memory/qwen thường) dựa trên evidence_by_id[question_id];
-    nếu không hợp nhất, candidate agentic bị unsupported_penalty phạt oan vì
-    trích dẫn căn cứ mà nó tự tra cứu thêm chứ verifier "chưa thấy". Chạy cho
-    cả nhánh cache-hit lẫn vừa sinh mới vì scoring luôn chạy lại mỗi lần,
-    không phụ thuộc candidate cache.
-    """
-    if not tool_evidence:
-        return
-    existing_ids = {item.chunk.chunk_id for item in evidence_by_id[question_id]}
+def _tool_evidence_from_metadata(tool_evidence: list[dict[str, Any]]) -> list[Evidence]:
+    """Rebuild cached tool evidence without mutating the shared seed evidence."""
+    result: list[Evidence] = []
+    seen: set[str] = set()
     for entry in tool_evidence:
-        if entry["chunk_id"] in existing_ids:
+        if not isinstance(entry, dict):
             continue
-        evidence_by_id[question_id].append(
+        chunk_id = str(entry.get("chunk_id", "")).strip()
+        doc_id = str(entry.get("doc_id", "")).strip()
+        text = str(entry.get("text", "")).strip()
+        if not chunk_id or not doc_id or not text or chunk_id in seen:
+            continue
+        result.append(
             Evidence(
                 chunk=Chunk(
-                    chunk_id=entry["chunk_id"],
-                    doc_id=entry["doc_id"],
-                    text=entry["text"],
-                    title=entry.get("title", ""),
-                    heading=entry.get("heading", ""),
+                    chunk_id=chunk_id,
+                    doc_id=doc_id,
+                    text=text,
+                    title=str(entry.get("title", "")),
+                    heading=str(entry.get("heading", "")),
                 ),
-                # score=0.0 cố ý: score gốc của tool-call nằm trên thang
-                # lexical (~1-20+), khác thang RRF-fused (~0.02-1) của evidence
-                # thường. Nếu giữ nguyên, chunk này sẽ nghiễm nhiên thành phần
-                # tử "top" trong retrieval_confidence (reranker_score=0 kéo
-                # confidence tụt giả tạo) dù mục đích merge chỉ để verifier
-                # thấy được citation/numbers, không phải để xếp hạng.
-                score=0.0,
+                score=float(entry.get("score", 0.0)),
                 bm25_score=float(entry.get("bm25_score", 0.0)),
-                stage="tool_call",
+                stage=str(entry.get("stage", "tool_call")),
+                relation_type=str(entry.get("relation_type", "")),
+                relation_path=[str(value) for value in entry.get("relation_path", [])],
             )
         )
-        existing_ids.add(entry["chunk_id"])
+        seen.add(chunk_id)
+    return result
+
+
+def _candidate_evidence(seed_evidence: list[Evidence], candidate: Candidate) -> list[Evidence]:
+    """Return exactly the evidence visible to one candidate.
+
+    Only the agentic candidate may see its cached tool results.  This prevents
+    ordinary Qwen/extractive/memory candidates from receiving verifier credit
+    for evidence that they never saw while being generated.
+    """
+    if candidate.source != "qwen3.5-2b-agentic":
+        return list(seed_evidence)
+    tool_items = _tool_evidence_from_metadata(candidate.details.get("tool_evidence", []))
+    combined: list[Evidence] = []
+    seen: set[str] = set()
+    for item in [*tool_items, *seed_evidence]:
+        if item.chunk.chunk_id in seen:
+            continue
+        combined.append(item)
+        seen.add(item.chunk.chunk_id)
+    return combined
+
+
+def _should_run_agentic(
+    question: str,
+    evidence: list[Evidence],
+    diagnostics: dict[str, Any] | None,
+    config: dict[str, Any],
+) -> tuple[bool, str]:
+    """Gate expensive Agentic Qwen to questions likely to need more evidence."""
+    generation_cfg = config.get("generation", {})
+    route_payload = (diagnostics or {}).get("route", {})
+    route = str(route_payload.get("route", "simple"))
+    confidence = route_payload.get("confidence")
+    if confidence is None:
+        confidence, _ = retrieval_confidence(evidence)
+    confidence = float(confidence)
+    enabled_routes = {
+        str(value).casefold()
+        for value in generation_cfg.get("agentic_routes", ["complex"])
+    }
+    if route.casefold() in enabled_routes:
+        return True, f"route={route}"
+    threshold = float(generation_cfg.get("agentic_confidence_below", 0.45))
+    if confidence < threshold:
+        return True, f"retrieval_confidence={confidence:.3f}<{threshold:.3f}"
+    if bool(generation_cfg.get("agentic_on_legal_cues", True)):
+        features = route_payload.get("features", {})
+        explicit_citation = bool(
+            features.get("explicit_citation", 0.0)
+            or citations(question)
+            or document_numbers(question)
+        )
+        relation_signal = bool(features.get("discovered_relations", 0.0))
+        if has_complex_cue(question) or asks_for_current_law(question):
+            return True, "temporal/complex legal cue"
+        if explicit_citation and relation_signal:
+            return True, "explicit citation with relation signal"
+    return False, f"simple/high-confidence={confidence:.3f}"
 
 
 def _trace_evidence(items: list[Evidence]) -> list[dict[str, Any]]:
@@ -221,7 +270,7 @@ def generate_from_evidence(
     questions,
     evidence_by_id: dict[str, list[Evidence]],
     output_path: str | Path | None = None,
-    agentic_search_fn: Callable[[str], list[Evidence]] | None = None,
+    agentic_search_fn: Callable[..., list[Evidence]] | None = None,
 ) -> dict[str, Any]:
     """Generate and select answers from retrieval results, independent of index backend."""
     artifacts = Path(config["paths"]["artifacts"])
@@ -233,6 +282,9 @@ def generate_from_evidence(
 
     candidates_by_id: dict[str, list[Candidate]] = {item.question_id: [] for item in questions}
     errors: dict[str, list[str]] = {}
+    agentic_eligible_count = 0
+    agentic_generated_count = 0
+    agentic_failed_count = 0
     if config["generation"].get("extractive_enabled", True):
         for item in questions:
             candidates_by_id[item.question_id].append(
@@ -327,37 +379,55 @@ def generate_from_evidence(
             cache_path = candidate_cache_dir / "qwen_agentic.jsonl"
             cached = _load_candidate_cache(cache_path, include_metadata=True)
             base_namespace = run_namespace or model_paths.get("generator_adapter") or model_paths.get("generator")
-            # Gộp thêm 2 tham số điều khiển vòng lặp tool-call vào namespace: nếu
-            # đổi agentic_max_tool_calls/agentic_evidence_per_call để thử nghiệm,
-            # cache cũ (sinh với tham số khác) sẽ tự động bị bỏ qua thay vì trả về
-            # câu trả lời cũ một cách âm thầm.
+            agentic_options = {
+                key: value
+                for section in (config.get("generation", {}), config.get("retrieval", {}))
+                for key, value in section.items()
+                if key.startswith("agentic_")
+            }
+            options_hash = hashlib.sha256(
+                json.dumps(agentic_options, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:16]
             agentic_namespace = (
-                f"{base_namespace}::calls={config['generation'].get('agentic_max_tool_calls', 2)}"
-                f"::per_call={config['generation'].get('agentic_evidence_per_call', 3)}"
+                f"{base_namespace}::agentic-v3::{options_hash}"
+            )
+            eligible: list[tuple[Any, str]] = []
+            for item in questions:
+                allowed, reason = _should_run_agentic(
+                    item.question,
+                    evidence_by_id[item.question_id],
+                    retrieval_diagnostics.get(item.question_id),
+                    config,
+                )
+                if allowed:
+                    eligible.append((item, reason))
+            agentic_eligible_count = len(eligible)
+            print(
+                f"[Qwen-agentic] gate selected {agentic_eligible_count:,}/{len(questions):,} questions",
+                flush=True,
             )
             missing = [
-                item for item in questions
+                item for item, _ in eligible
                 if _candidate_key(item, evidence_by_id[item.question_id], "qwen-agentic", agentic_namespace) not in cached
             ]
-            completed = len(questions) - len(missing)
+            completed = len(eligible) - len(missing)
             generator = None
             consecutive_errors = 0
             try:
                 generator = QwenTextGenerator(config) if missing else None
-                for item in questions:
+                for item, gate_reason in eligible:
                     key = _candidate_key(
                         item, evidence_by_id[item.question_id], "qwen-agentic",
                         agentic_namespace,
                     )
                     if key in cached:
                         entry = cached[key]
+                        metadata = dict(entry.get("metadata", {}))
+                        metadata.setdefault("agentic_gate", gate_reason)
                         candidates_by_id[item.question_id].append(
-                            Candidate("qwen3.5-2b-agentic", entry["answer"], details=entry.get("metadata", {}))
+                            Candidate("qwen3.5-2b-agentic", entry["answer"], details=metadata)
                         )
-                        _merge_tool_evidence(
-                            evidence_by_id, item.question_id,
-                            entry.get("metadata", {}).get("tool_evidence", []),
-                        )
+                        agentic_generated_count += 1
                         continue
                     try:
                         candidate = make_qwen_agentic_candidate(
@@ -368,11 +438,8 @@ def generate_from_evidence(
                             agentic_search_fn,
                             retrieval_diagnostics.get(item.question_id),
                         )
+                        candidate.details["agentic_gate"] = gate_reason
                         candidates_by_id[item.question_id].append(candidate)
-                        _merge_tool_evidence(
-                            evidence_by_id, item.question_id,
-                            candidate.details.get("tool_evidence", []),
-                        )
                         _append_candidate(
                             cache_path,
                             key,
@@ -382,24 +449,49 @@ def generate_from_evidence(
                         )
                         cached[key] = {"answer": candidate.answer, "metadata": candidate.details}
                         completed += 1
+                        agentic_generated_count += 1
                         consecutive_errors = 0
                         if recovery:
-                            recovery.snapshot("qwen_agentic", completed, len(questions))
+                            recovery.snapshot("qwen_agentic", completed, len(eligible))
                         if completed % 25 == 0:
-                            print(f"[Qwen-agentic] generated {completed:,}/{len(questions):,}", flush=True)
-                    except RuntimeError as exc:
+                            print(f"[Qwen-agentic] processed {completed:,}/{len(eligible):,}", flush=True)
+                    except Exception as exc:
+                        # Agentic Search is an optional candidate branch. Any
+                        # question-local parser/search/model error must not
+                        # discard the already valid base/extractive/memory
+                        # candidates. BaseException subclasses (interrupts and
+                        # process exits) are deliberately not swallowed; fatal
+                        # CUDA failures are promoted below for safe resume.
                         errors.setdefault(item.question_id, []).append(f"Qwen-agentic: {exc}")
-                        consecutive_errors += 1
-                        if _fatal_generation_error(exc) or consecutive_errors >= 3:
+                        if _fatal_generation_error(exc):
                             raise RuntimeError(
-                                f"Qwen-agentic dừng tại question_id={item.question_id} sau "
-                                f"{consecutive_errors} lỗi liên tiếp; cache đã hoàn thành={completed}."
+                                f"Qwen-agentic gặp lỗi GPU nghiêm trọng tại question_id={item.question_id}; "
+                                f"cache đã hoàn thành={completed}."
                             ) from exc
+                        consecutive_errors += 1
+                        completed += 1
+                        agentic_failed_count += 1
+                        if recovery:
+                            recovery.snapshot("qwen_agentic", completed, len(eligible))
+                        warn_after = max(
+                            1,
+                            int(
+                                config.get("generation", {}).get(
+                                    "agentic_warn_after_nonfatal_errors", 3
+                                )
+                            ),
+                        )
+                        if consecutive_errors == warn_after:
+                            print(
+                                f"[Qwen-agentic] {consecutive_errors} lỗi không nghiêm trọng liên tiếp; "
+                                "tiếp tục các câu còn lại; mỗi câu lỗi vẫn dùng candidate base/extractive/memory.",
+                                flush=True,
+                            )
             finally:
                 if config["runtime"].get("unload_after_stage", True):
                     unload_model(generator, "Qwen-agentic")
                 if recovery:
-                    recovery.snapshot("qwen_agentic", completed, len(questions), force=True)
+                    recovery.snapshot("qwen_agentic", completed, len(eligible), force=True)
 
     semantic_encoder = None
     if model_paths.get("verifier") and float(config["selection"].get("legal_semantic", 0.0)) > 0:
@@ -407,13 +499,21 @@ def generate_from_evidence(
             semantic_encoder = LegalSemanticEncoder(config)
             semantic_entries = []
             evidence_texts = []
-            evidence_index: dict[str, int] = {}
+            evidence_index: dict[tuple[str, ...], int] = {}
+            candidate_evidence_keys: dict[int, tuple[str, ...]] = {}
             for item in questions:
-                evidence_text = "\n".join(evidence.chunk.text for evidence in evidence_by_id[item.question_id])
-                evidence_index[item.question_id] = len(evidence_texts)
-                evidence_texts.append(evidence_text)
                 for candidate in candidates_by_id[item.question_id]:
                     semantic_entries.append((item.question_id, candidate))
+                    active_evidence = _candidate_evidence(
+                        evidence_by_id[item.question_id], candidate
+                    )
+                    evidence_key = tuple(evidence.chunk.chunk_id for evidence in active_evidence)
+                    candidate_evidence_keys[id(candidate)] = evidence_key
+                    if evidence_key not in evidence_index:
+                        evidence_index[evidence_key] = len(evidence_texts)
+                        evidence_texts.append(
+                            "\n".join(evidence.chunk.text for evidence in active_evidence)
+                        )
             if semantic_entries:
                 print(
                     f"[ViLegalBERT] batching {len(semantic_entries):,} candidates and "
@@ -422,8 +522,9 @@ def generate_from_evidence(
                 )
                 answer_vectors = semantic_encoder.encode([candidate.answer for _, candidate in semantic_entries])
                 evidence_vectors = semantic_encoder.encode(evidence_texts)
-                for row, (question_id, candidate) in enumerate(semantic_entries):
-                    cosine = float(np.dot(answer_vectors[row], evidence_vectors[evidence_index[question_id]]))
+                for row, (_, candidate) in enumerate(semantic_entries):
+                    key = candidate_evidence_keys[id(candidate)]
+                    cosine = float(np.dot(answer_vectors[row], evidence_vectors[evidence_index[key]]))
                     candidate.details["_precomputed_legal_semantic"] = max(
                         0.0, min(1.0, (cosine + 1.0) / 2.0)
                     )
@@ -444,6 +545,12 @@ def generate_from_evidence(
             config,
             semantic_encoder,
             retrieval_diagnostics.get(item.question_id),
+            candidate_evidence_by_source={
+                candidate.source: _candidate_evidence(
+                    evidence_by_id[item.question_id], candidate
+                )
+                for candidate in candidates
+            },
         )
         winner = ranked[0]
         predictions[item.question_id] = {"answer": winner.answer}
@@ -453,6 +560,13 @@ def generate_from_evidence(
                 "question": item.question,
                 "selected": winner.source,
                 "evidence": _trace_evidence(evidence_by_id[item.question_id]),
+                "agentic_evidence": {
+                    candidate.source: _trace_evidence(
+                        _candidate_evidence(evidence_by_id[item.question_id], candidate)
+                    )
+                    for candidate in candidates
+                    if candidate.source == "qwen3.5-2b-agentic"
+                },
                 "retrieval": retrieval_diagnostics.get(item.question_id, {}),
                 "candidates": [asdict(candidate) for candidate in ranked],
                 "errors": errors.get(item.question_id, []),
@@ -486,6 +600,11 @@ def generate_from_evidence(
         "predictions": str(target.resolve()),
         "trace": str(trace_path.resolve()),
         "generation_errors": sum(len(value) for value in errors.values()),
+        "agentic": {
+            "eligible": agentic_eligible_count,
+            "generated_or_cached": agentic_generated_count,
+            "failed": agentic_failed_count,
+        },
         "selected_sources": selected_counts,
         "routes": route_counts,
         "qwen_truncated": truncated_qwen,
