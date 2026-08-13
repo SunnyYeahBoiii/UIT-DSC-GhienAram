@@ -50,6 +50,11 @@ Chi tiết nằm trong [PIPELINE_V9.md](PIPELINE_V9.md). Hướng dẫn Kaggle n
 5. Attach dense index, completed adapter `full` và đúng một `tuned_selection.yaml`; chạy notebook inference với `DENSE_INDEX_ONLY=False`.
 6. Nộp duy nhất `/kaggle/working/submission.zip`.
 
+Cả ba notebook v9.2 chỉ nhận source có `SOURCE_CONTRACT.json` khớp đầy
+đủ release, Agentic/cache/selector schema và 12 wheel offline. Vì vậy bản
+`legalqa_source` cũ nằm kèm trong Dataset QLoRA split/full sẽ bị loại thay
+vì có thể được chọn nhầm theo tên thư mục.
+
 Bạn có thể bỏ bước QLoRA và dùng Qwen base, nhưng candidate-oracle nên được chạy trước khi quyết định selector nào tốt hơn. Chỉ chấp nhận trọng số tuned nếu phần grouped holdout cải thiện, không chỉ phần tune.
 
 ## Kiểm thử

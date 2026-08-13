@@ -132,6 +132,36 @@ def test_selector_schema_is_shared_by_calibration_and_inference():
         assert module.SELECTION_WEIGHTS_SCHEMA == SELECTION_WEIGHTS_SCHEMA
 
 
+def test_source_contract_matches_runtime_and_notebooks():
+    project = Path(__file__).resolve().parents[1]
+    contract = json.loads((project / "SOURCE_CONTRACT.json").read_text(encoding="utf-8"))
+    assert contract == {
+        "schema": "legalqa-source-contract-v1",
+        "release": "0.9.2",
+        "agentic_namespace": "agentic-v3",
+        "cache_schema": "inference-v7-agentic-error-isolation",
+        "selector_schema": SELECTION_WEIGHTS_SCHEMA,
+        "offline_wheel_count": 12,
+    }
+    assert contract["agentic_namespace"] in (
+        project / "src" / "legalqa" / "pipeline.py"
+    ).read_text(encoding="utf-8")
+    assert contract["cache_schema"] in (
+        project / "kaggle" / "run_inference_only.py"
+    ).read_text(encoding="utf-8")
+    wheels = list((project / "wheelhouse").glob("*.whl"))
+    assert len(wheels) == contract["offline_wheel_count"]
+    assert all(wheel.stat().st_size >= 10_000 for wheel in wheels)
+    for notebook in (
+        "legalqa_dsc2026_v9_selector_calibration_t4.ipynb",
+        "legalqa_dsc2026_v9_qlora_t4.ipynb",
+        "legalqa_dsc2026_inference_only_t4.ipynb",
+    ):
+        source = (project / "kaggle" / notebook).read_text(encoding="utf-8")
+        assert "SOURCE_CONTRACT.json" in source
+        assert contract["selector_schema"] in source
+
+
 def test_selector_calibration_requires_completed_split_adapter(tmp_path):
     import importlib.util
 

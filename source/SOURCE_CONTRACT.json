@@ -1,0 +1,8 @@
+{
+  "schema": "legalqa-source-contract-v1",
+  "release": "0.9.2",
+  "agentic_namespace": "agentic-v3",
+  "cache_schema": "inference-v7-agentic-error-isolation",
+  "selector_schema": "selector-weights-v3-agentic-evidence",
+  "offline_wheel_count": 12
+}

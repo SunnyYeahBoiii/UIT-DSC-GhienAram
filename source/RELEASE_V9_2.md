@@ -23,7 +23,7 @@
 
 ## Verification
 
-- `python -m pytest -q`: 57 passed.
+- `python -m pytest -q`: 58 passed.
 - `python -m compileall -q src scripts kaggle`: passed.
 - All YAML/TOML and all notebook JSON/code cells parse and compile.
 - Wheelhouse contains all 12 pinned Hugging Face dependencies required by the
