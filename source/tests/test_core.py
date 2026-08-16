@@ -745,6 +745,10 @@ def test_parse_agentic_step_detects_tool_call_and_final_answer():
     )
     assert prefaced_query == "văn bản thay thế hiện hành"
 
+    # Model hay bọc nhãn lệnh trong markdown đậm (**TRA_CUU:**) — vẫn phải nhận.
+    bold_query, _ = parse_agentic_step("**TRA_CUU:** mức phạt chậm đóng")
+    assert bold_query == "mức phạt chậm đóng"
+
 
 def test_agentic_candidate_issues_tool_call_then_answers(tmp_path):
     config = minimal_config(tmp_path)
@@ -829,8 +833,8 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
     # tiếp -> tool-call trở thành vô ích một cách âm thầm. Test này khoá lại
     # hành vi: căn cứ mới phải được ưu tiên trước.
     config = minimal_config(tmp_path)
-    config["generation"]["max_context_chars"] = 260
-    long_seed = Chunk("s1", "d1", "X" * 200, "Luật", "Điều 1", {})
+    config["generation"]["max_context_chars"] = 500
+    long_seed = Chunk("s1", "d1", "X" * 600, "Luật", "Điều 1", {})
     extra_chunk = Chunk("s2", "d1", "Mức phạt là 0,03% mỗi ngày theo Điều 2.", "Luật", "Điều 2", {})
     seed_evidence = [Evidence(long_seed, 0.9)]
 
@@ -854,6 +858,89 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
 
     second_prompt = generator.prompts[1]
     assert "Mức phạt là 0,03%" in second_prompt
+    # Ngân sách context được tách đôi (agentic_tool_context_share): căn cứ
+    # ban đầu phải vẫn còn chỗ trong prompt lượt sau, không bị pool tool-call
+    # cộng dồn đẩy hết ra ngoài dù tổng đã vượt max_context_chars.
+    assert "X" * 40 in second_prompt
+
+
+def test_agentic_tool_evidence_caps_chunks_per_document(tmp_path):
+    # BM25 thô hay trả về nhiều window của cùng một văn bản ở đầu danh sách;
+    # nếu lấy nguyên top thì các slot của một lượt tra cứu chỉ chứa 1 văn bản.
+    # agentic_max_per_document=2 phải giữ slot cuối cho văn bản khác.
+    config = minimal_config(tmp_path)
+    config["generation"].update(
+        {"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 3, "agentic_max_per_document": 2}
+    )
+    seed_evidence = [Evidence(Chunk("c0", "d0", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls == 1:
+                return GenerationResult("TRA_CUU: mức phạt", 5, True, False)
+            return GenerationResult("Theo Điều 5, mức phạt là 0,03%.", 10, True, False)
+
+    hits = [
+        Evidence(Chunk(f"d1::s0001::w00{i}", "d1", f"Điều 2. Khoản {i}.", "Luật", "Điều 2", {}), 5.0 - i)
+        for i in range(3)
+    ] + [Evidence(Chunk("d2::s0001::w000", "d2", "Điều 5. Mức phạt.", "Nghị định", "Điều 5", {}), 1.5)]
+
+    candidate = make_qwen_agentic_candidate(
+        FakeGenerator(), "Mức phạt là bao nhiêu?", seed_evidence, config, lambda query: hits
+    )
+    # 2 window đầu của d1 được chọn và gộp thành 1 mục; window thứ 3 của d1 bị
+    # cap bỏ khỏi lựa chọn, slot cuối dành cho d2.
+    entries = candidate.details["tool_evidence"]
+    assert sorted(entry["doc_id"] for entry in entries) == ["d1", "d2"]
+    d1_text = next(entry["text"] for entry in entries if entry["doc_id"] == "d1")
+    assert "Khoản 0" in d1_text and "Khoản 1" in d1_text
+    assert "Khoản 2" not in d1_text
+
+
+def test_agentic_tool_evidence_merges_adjacent_windows(tmp_path):
+    # Hai window liền kề của cùng điều (w000/w001) chứa text chồng lấn
+    # (overlap_chars) — phải được gộp thành 1 mục căn cứ để đỡ lãng phí ngân
+    # sách ký tự; lượt tra cứu sau trả lại cùng chunk đó phải bị lọc là
+    # đã thấy (kể cả chunk gốc nằm trong merge).
+    config = minimal_config(tmp_path)
+    config["generation"].update(
+        {"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 3, "agentic_max_per_document": 2}
+    )
+    seed_evidence = [Evidence(Chunk("c0", "d0", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+    left = Chunk("d1::s0001::w000", "d1", "Điều 2. Người lao động nghỉ phép 12 ngày.", "Luật", "Điều 2", {})
+    right = Chunk(
+        "d1::s0001::w001", "d1",
+        "Điều 2. Người lao động nghỉ phép 12 ngày. Khi báo trước 30 ngày.",
+        "Luật", "Điều 2", {},
+    )
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls < 3:
+                return GenerationResult(f"TRA_CUU: truy vấn {self.calls}", 5, True, False)
+            return GenerationResult("Theo Điều 2, nghỉ phép 12 ngày.", 10, True, False)
+
+    def fake_search(query: str) -> list[Evidence]:
+        return [Evidence(left, 3.0), Evidence(right, 2.9)]
+
+    candidate = make_qwen_agentic_candidate(
+        FakeGenerator(), "Người lao động nghỉ mấy ngày?", seed_evidence, config, fake_search
+    )
+    # Lượt 1: 2 window gộp thành 1 mục; lượt 2: cùng 2 chunk đã đánh dấu thấy
+    # (kể cả chunk gốc nằm trong merge) -> không thêm gì nữa.
+    assert candidate.details["evidence_added_total"] == 1
+    assert len(candidate.details["tool_evidence"]) == 1
+    merged_text = candidate.details["tool_evidence"][0]["text"]
+    assert "báo trước 30 ngày" in merged_text
+    assert merged_text.count("nghỉ phép 12 ngày") == 1
 
 
 def test_agentic_candidate_blocks_repeated_query_and_forces_final_answer(tmp_path):
@@ -1119,3 +1206,35 @@ def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):
         assert results[0].bm25_score > 0
         assert results[0].score > 0
         assert results[0].score != results[0].bm25_score  # legal-reranked, not raw BM25
+
+
+def test_sqlite_tool_search_recovers_diacritic_less_query(tmp_path):
+    # Model 2B đôi lúc phát truy vấn không dấu ("muc phat cham dong") trong khi
+    # FTS5 index giữ nguyên dấu -> term không khớp, lượt tool-call trả về 0
+    # kết quả. Tool search phải khôi phục dấu từ vocab FTS và vẫn tìm thấy văn
+    # bản chứa "mức phạt chậm đóng bảo hiểm xã hội".
+    config = minimal_config(tmp_path)
+    corpus = tmp_path / "contexts"
+    corpus.mkdir()
+    (corpus / "doc.json").write_text(
+        json.dumps(
+            {
+                "id": "d1",
+                "title": "Luật",
+                "text": "Điều 2. Mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày.",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    database = tmp_path / "legal.sqlite"
+    build_sqlite_store(config, corpus, database)
+
+    with SQLiteLegalStore(database, readonly=True) as store:
+        assert store.search_chunks("muc phat cham dong bao hiem", top_k=10) == []
+
+    with sqlite_bm25_search_fn(config, database) as search_fn:
+        results = search_fn("muc phat cham dong bao hiem xa hoi")
+        assert results
+        assert results[0].chunk.doc_id == "d1"
+        assert results[0].stage == "tool_call"
