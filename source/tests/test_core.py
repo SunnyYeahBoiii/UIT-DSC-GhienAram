@@ -968,3 +968,35 @@ def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):
         assert results[0].chunk.doc_id == "d1"
         assert results[0].stage == "tool_call"
         assert results[0].bm25_score == results[0].score
+
+
+def test_sqlite_tool_search_recovers_diacritic_less_query(tmp_path):
+    # Model 2B đôi lúc phát truy vấn không dấu ("muc phat cham dong") trong khi
+    # FTS5 index giữ nguyên dấu -> term không khớp, lượt tool-call trả về 0
+    # kết quả. Tool search phải khôi phục dấu từ vocab FTS và vẫn tìm thấy văn
+    # bản chứa "mức phạt chậm đóng bảo hiểm xã hội".
+    config = minimal_config(tmp_path)
+    corpus = tmp_path / "contexts"
+    corpus.mkdir()
+    (corpus / "doc.json").write_text(
+        json.dumps(
+            {
+                "id": "d1",
+                "title": "Luật",
+                "text": "Điều 2. Mức phạt chậm đóng bảo hiểm xã hội là 0,03 phần trăm mỗi ngày.",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    database = tmp_path / "legal.sqlite"
+    build_sqlite_store(config, corpus, database)
+
+    with SQLiteLegalStore(database, readonly=True) as store:
+        assert store.search_chunks("muc phat cham dong bao hiem", top_k=10) == []
+
+    with sqlite_bm25_search_fn(config, database) as search_fn:
+        results = search_fn("muc phat cham dong bao hiem xa hoi")
+        assert results
+        assert results[0].chunk.doc_id == "d1"
+        assert results[0].stage == "tool_call"
