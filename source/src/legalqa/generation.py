@@ -239,8 +239,8 @@ def make_qwen_agentic_candidate(
     max_tool_calls = max(0, int(generation_cfg.get("agentic_max_tool_calls", 2)))
     evidence_per_call = max(1, int(generation_cfg.get("agentic_evidence_per_call", 3)))
 
-    current_evidence = list(evidence)
-    seen_chunk_ids = {item.chunk.chunk_id for item in current_evidence}
+    initial_evidence = list(evidence)
+    seen_chunk_ids = {item.chunk.chunk_id for item in initial_evidence}
     seen_queries: set[str] = set()
     tool_evidence_pool: list[Evidence] = []
     transcript: list[dict[str, Any]] = []
@@ -252,7 +252,8 @@ def make_qwen_agentic_candidate(
     for step in range(max_tool_calls + 1):
         allow_tool = search_fn is not None and step < max_tool_calls
         prompt = qwen_agentic_user_prompt(
-            question, current_evidence, config, retrieval_diagnostics, transcript, allow_tool,
+            question, initial_evidence, tool_evidence_pool, config,
+            retrieval_diagnostics, transcript, allow_tool,
         )
         result = generator.generate_with_metadata(
             AGENTIC_SYSTEM_PROMPT if allow_tool else SYSTEM_PROMPT,
@@ -297,12 +298,9 @@ def make_qwen_agentic_candidate(
             added = [item for item in new_evidence if item.chunk.chunk_id not in seen_chunk_ids][:evidence_per_call]
             for item in added:
                 seen_chunk_ids.add(item.chunk.chunk_id)
-        # Chèn căn cứ mới lên đầu danh sách: model chỉ tra cứu thêm khi thấy
-        # thiếu, nên phần vừa tìm được cần ưu tiên ngân sách ký tự của
-        # render_evidence hơn căn cứ ban đầu — nếu nối vào cuối, ngân sách
-        # (max_context_chars) thường đã bị các đoạn ban đầu dùng hết và căn cứ
-        # mới sẽ bị cắt bỏ hoàn toàn (xem prompts.render_evidence).
-        current_evidence = added + current_evidence
+        # Căn cứ mới được render trước (mới nhất trước) trong phần ngân sách ký
+        # tự riêng của prompt, căn cứ ban đầu luôn giữ phần ngân sách còn lại
+        # (agentic_tool_context_share, xem prompts._agentic_context).
         tool_evidence_pool.extend(added)
         transcript.append(
             {"step": step + 1, "query": query, "evidence_added": [item.chunk.chunk_id for item in added]}

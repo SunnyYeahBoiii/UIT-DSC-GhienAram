@@ -766,8 +766,8 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
     # tiếp -> tool-call trở thành vô ích một cách âm thầm. Test này khoá lại
     # hành vi: căn cứ mới phải được ưu tiên trước.
     config = minimal_config(tmp_path)
-    config["generation"]["max_context_chars"] = 260
-    long_seed = Chunk("s1", "d1", "X" * 200, "Luật", "Điều 1", {})
+    config["generation"]["max_context_chars"] = 500
+    long_seed = Chunk("s1", "d1", "X" * 600, "Luật", "Điều 1", {})
     extra_chunk = Chunk("s2", "d1", "Mức phạt là 0,03% mỗi ngày theo Điều 2.", "Luật", "Điều 2", {})
     seed_evidence = [Evidence(long_seed, 0.9)]
 
@@ -791,6 +791,10 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
 
     second_prompt = generator.prompts[1]
     assert "Mức phạt là 0,03%" in second_prompt
+    # Ngân sách context được tách đôi (agentic_tool_context_share): căn cứ
+    # ban đầu phải vẫn còn chỗ trong prompt lượt sau, không bị pool tool-call
+    # cộng dồn đẩy hết ra ngoài dù tổng đã vượt max_context_chars.
+    assert "X" * 40 in second_prompt
 
 
 def test_merge_tool_evidence_lets_verifier_see_tool_retrieved_citations(tmp_path):
