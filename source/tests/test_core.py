@@ -797,6 +797,85 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
     assert "X" * 40 in second_prompt
 
 
+def test_agentic_tool_evidence_caps_chunks_per_document(tmp_path):
+    # BM25 thô hay trả về nhiều window của cùng một văn bản ở đầu danh sách;
+    # nếu lấy nguyên top thì các slot của một lượt tra cứu chỉ chứa 1 văn bản.
+    # agentic_max_per_document=2 phải giữ slot cuối cho văn bản khác.
+    config = minimal_config(tmp_path)
+    config["generation"].update(
+        {"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 3, "agentic_max_per_document": 2}
+    )
+    seed_evidence = [Evidence(Chunk("c0", "d0", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls == 1:
+                return GenerationResult("TRA_CUU: mức phạt", 5, True, False)
+            return GenerationResult("Theo Điều 5, mức phạt là 0,03%.", 10, True, False)
+
+    hits = [
+        Evidence(Chunk(f"d1::s0001::w00{i}", "d1", f"Điều 2. Khoản {i}.", "Luật", "Điều 2", {}), 5.0 - i)
+        for i in range(3)
+    ] + [Evidence(Chunk("d2::s0001::w000", "d2", "Điều 5. Mức phạt.", "Nghị định", "Điều 5", {}), 1.5)]
+
+    candidate = make_qwen_agentic_candidate(
+        FakeGenerator(), "Mức phạt là bao nhiêu?", seed_evidence, config, lambda query: hits
+    )
+    # 2 window đầu của d1 được chọn và gộp thành 1 mục; window thứ 3 của d1 bị
+    # cap bỏ khỏi lựa chọn, slot cuối dành cho d2.
+    entries = candidate.details["tool_evidence"]
+    assert sorted(entry["doc_id"] for entry in entries) == ["d1", "d2"]
+    d1_text = next(entry["text"] for entry in entries if entry["doc_id"] == "d1")
+    assert "Khoản 0" in d1_text and "Khoản 1" in d1_text
+    assert "Khoản 2" not in d1_text
+
+
+def test_agentic_tool_evidence_merges_adjacent_windows(tmp_path):
+    # Hai window liền kề của cùng điều (w000/w001) chứa text chồng lấn
+    # (overlap_chars) — phải được gộp thành 1 mục căn cứ để đỡ lãng phí ngân
+    # sách ký tự; lượt tra cứu sau trả lại cùng chunk đó phải bị lọc là
+    # đã thấy (kể cả chunk gốc nằm trong merge).
+    config = minimal_config(tmp_path)
+    config["generation"].update(
+        {"agentic_max_tool_calls": 2, "agentic_evidence_per_call": 3, "agentic_max_per_document": 2}
+    )
+    seed_evidence = [Evidence(Chunk("c0", "d0", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+    left = Chunk("d1::s0001::w000", "d1", "Điều 2. Người lao động nghỉ phép 12 ngày.", "Luật", "Điều 2", {})
+    right = Chunk(
+        "d1::s0001::w001", "d1",
+        "Điều 2. Người lao động nghỉ phép 12 ngày. Khi báo trước 30 ngày.",
+        "Luật", "Điều 2", {},
+    )
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+            self.calls += 1
+            if self.calls < 3:
+                return GenerationResult(f"TRA_CUU: truy vấn {self.calls}", 5, True, False)
+            return GenerationResult("Theo Điều 2, nghỉ phép 12 ngày.", 10, True, False)
+
+    def fake_search(query: str) -> list[Evidence]:
+        return [Evidence(left, 3.0), Evidence(right, 2.9)]
+
+    candidate = make_qwen_agentic_candidate(
+        FakeGenerator(), "Người lao động nghỉ mấy ngày?", seed_evidence, config, fake_search
+    )
+    # Lượt 1: 2 window gộp thành 1 mục; lượt 2: cùng 2 chunk đã đánh dấu thấy
+    # (kể cả chunk gốc nằm trong merge) -> không thêm gì nữa.
+    assert candidate.details["evidence_added_total"] == 1
+    assert len(candidate.details["tool_evidence"]) == 1
+    merged_text = candidate.details["tool_evidence"][0]["text"]
+    assert "báo trước 30 ngày" in merged_text
+    assert merged_text.count("nghỉ phép 12 ngày") == 1
+
+
 def test_merge_tool_evidence_lets_verifier_see_tool_retrieved_citations(tmp_path):
     # Không hợp nhất: verifier chấm answer agentic dựa trên evidence_by_id
     # seed-only, nên "Điều 2"/"0,03%" (chỉ có trong đoạn tra cứu thêm) bị coi
