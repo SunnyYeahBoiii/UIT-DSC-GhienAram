@@ -208,12 +208,14 @@ def parse_agentic_step(raw_text: str) -> tuple[str | None, str | None]:
     Model được hướng dẫn mở đầu bằng "TRA_CUU: <truy vấn>" khi muốn tra cứu
     thêm; mọi output khác coi là câu trả lời cuối. So khớp marker trên bản đã
     bỏ dấu vì model 2B đôi lúc bỏ dấu tiếng Việt ở nhãn lệnh, còn truy vấn giữ
-    nguyên dấu để BM25 tra cứu đúng.
+    nguyên dấu để BM25 tra cứu đúng. Lược sẵn các ký tự trang trí markdown
+    (**TRA_CUU:**, "# TRA_CUU:", ...) ở đầu dòng vì model hay bọc nhãn lệnh.
     Trả về (query, None) nếu là tool call, hoặc (None, answer) nếu là câu trả lời.
     """
     first_line, _, _ = raw_text.strip().partition("\n")
+    first_line = re.sub(r"^[\s#>*_`\-]+", "", first_line)
     if _TOOL_CALL_MARKER.match(_strip_diacritics(first_line)):
-        query = re.split(r"[:：]", first_line, maxsplit=1)[-1].strip()
+        query = re.split(r"[:：]", first_line, maxsplit=1)[-1].strip().strip("*_`").strip()
         return query, None
     return None, clean_answer(raw_text)
 

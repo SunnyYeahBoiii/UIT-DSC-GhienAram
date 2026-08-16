@@ -632,6 +632,10 @@ def test_parse_agentic_step_detects_tool_call_and_final_answer():
     query_no_diacritics, _ = parse_agentic_step("tra cuu: thời hạn khiếu nại")
     assert query_no_diacritics == "thời hạn khiếu nại"
 
+    # Model hay bọc nhãn lệnh trong markdown (**TRA_CUU:**) — vẫn phải nhận.
+    query_markdown, _ = parse_agentic_step("**TRA_CUU:** mức phạt chậm đóng")
+    assert query_markdown == "mức phạt chậm đóng"
+
     query_none, answer_only = parse_agentic_step("Theo Điều 1, người lao động được nghỉ phép.")
     assert query_none is None
     assert answer_only == "Theo Điều 1, người lao động được nghỉ phép."
