@@ -367,13 +367,15 @@ def generate_from_evidence(
             cache_path = candidate_cache_dir / "qwen_agentic.jsonl"
             cached = _load_candidate_cache(cache_path, include_metadata=True)
             base_namespace = run_namespace or model_paths.get("generator_adapter") or model_paths.get("generator")
-            # Gộp thêm 2 tham số điều khiển vòng lặp tool-call vào namespace: nếu
-            # đổi agentic_max_tool_calls/agentic_evidence_per_call để thử nghiệm,
-            # cache cũ (sinh với tham số khác) sẽ tự động bị bỏ qua thay vì trả về
-            # câu trả lời cũ một cách âm thầm.
+            # Gộp thêm các tham số điều khiển vòng lặp tool-call vào namespace:
+            # nếu đổi agentic_max_tool_calls/agentic_evidence_per_call/... để
+            # thử nghiệm, cache cũ (sinh với tham số khác) sẽ tự động bị bỏ qua
+            # thay vì trả về câu trả lời cũ một cách âm thầm.
             agentic_namespace = (
                 f"{base_namespace}::calls={config['generation'].get('agentic_max_tool_calls', 2)}"
                 f"::per_call={config['generation'].get('agentic_evidence_per_call', 3)}"
+                f"::per_doc={config['generation'].get('agentic_max_per_document', 2)}"
+                f"::ctx_share={config['generation'].get('agentic_tool_context_share', 0.45)}"
             )
             missing = [
                 item for item in agentic_items

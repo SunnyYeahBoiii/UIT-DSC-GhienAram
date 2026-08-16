@@ -34,7 +34,7 @@ corpus:
 
 retrieval:
   bm25_top_k: 90
-  agentic_bm25_top_k: 60
+  agentic_bm25_top_k: 80
   dense_top_k: 60
   fused_top_k: 30
   rerank_top_k: 16
@@ -54,9 +54,11 @@ generation:
   # đổi hành vi baseline; bật thử bằng true (tốn thêm tối đa
   # agentic_max_tool_calls lượt sinh/câu hỏi).
   agentic_enabled: false
-  agentic_max_tool_calls: 2
-  agentic_evidence_per_call: 3
-  max_context_chars: 18000
+  agentic_max_tool_calls: 3
+  agentic_evidence_per_call: 4
+  agentic_max_per_document: 2
+  agentic_tool_context_share: 0.45
+  max_context_chars: 24000
   max_new_tokens: 850
   bartpho_num_beams: 1
   do_sample: false

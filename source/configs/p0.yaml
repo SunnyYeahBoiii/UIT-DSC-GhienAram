@@ -32,7 +32,7 @@ corpus:
 
 retrieval:
   bm25_top_k: 100
-  agentic_bm25_top_k: 60
+  agentic_bm25_top_k: 80
   dense_top_k: 100
   fused_top_k: 40
   rerank_top_k: 20
@@ -51,8 +51,10 @@ generation:
   # BM25 tra thêm căn cứ giữa các lượt sinh (agentic search). Mặc định tắt
   # để không đổi hành vi baseline hiện tại; bật thử bằng true.
   agentic_enabled: false
-  agentic_max_tool_calls: 2
-  agentic_evidence_per_call: 3
+  agentic_max_tool_calls: 3
+  agentic_evidence_per_call: 4
+  agentic_max_per_document: 2
+  agentic_tool_context_share: 0.45
   max_context_chars: 26000
   max_new_tokens: 1050
   do_sample: false
