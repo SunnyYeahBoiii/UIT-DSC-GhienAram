@@ -1,6 +1,8 @@
 # Nguồn phiên bản
 
-Repository hiện tại chứa duy nhất cây `source/` phiên bản `0.9.2`.
+Repository hiện tại chứa duy nhất cây source phiên bản `0.9.2` (`src/`, `scripts/`,
+`kaggle/`, `tests/`, `configs/`, `server/`, `wheelhouse/`, `docs/`, nằm trực
+tiếp ở root).
 
 ## Lịch sử
 
@@ -11,7 +13,7 @@ Repository hiện tại chứa duy nhất cây `source/` phiên bản `0.9.2`.
 
 ## Gói Kaggle v9.2
 
-Gói phát hành được tạo từ nguyên trạng cây `source/` sau khi chạy
+Gói phát hành được tạo từ nguyên trạng cây source sau khi chạy
 unit test, compile, parse notebook/config và kiểm tra ZIP. Tên file, SHA-256
 và kích thước được cung cấp cùng artifact bên ngoài repository để
 không tạo metadata checksum tự tham chiếu.

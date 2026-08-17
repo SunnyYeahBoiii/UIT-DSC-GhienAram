@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tái tạo wheelhouse/ (bị .gitignore loại khỏi repo vì là binary) trước khi
-# đóng gói source/ thành Kaggle Dataset. Phải chạy trên máy Linux x86_64,
+# đóng gói repo thành Kaggle Dataset. Phải chạy trên máy Linux x86_64,
 # Python 3.12 (khớp runtime Kaggle) — pip chọn wheel theo chính nền đang chạy,
 # nên chạy trên nền khác (macOS/Windows/Python khác) sẽ tải sai platform tag.
 set -euo pipefail
