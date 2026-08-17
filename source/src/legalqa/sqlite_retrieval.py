@@ -206,6 +206,18 @@ def sqlite_bm25_search_fn(
             current = current_evidence or []
             original_question = question or query
             hits = store.search_chunks(query, top_k=top_k)
+            if len(hits) < 3:
+                # Model 2B đôi lúc phát truy vấn không dấu ("muc phat cham dong")
+                # mà FTS5 giữ nguyên dấu không khớp -> 0 kết quả, lượt tool-call
+                # vô ích. Thử lại với truy vấn đã khôi phục dấu; kết quả gốc
+                # (nếu có) luôn đứng trước, kết quả fallback nối phía sau.
+                restored = store.restore_query_diacritics(query)
+                if restored != query:
+                    seen_rowids = {hit.rowid for hit in hits}
+                    for hit in store.search_chunks(restored, top_k=top_k):
+                        if hit.rowid not in seen_rowids:
+                            hits.append(hit)
+                            seen_rowids.add(hit.rowid)
             candidates = [
                 Evidence(chunk=hit.chunk, score=hit.lexical_score, bm25_score=hit.lexical_score, stage="tool_call")
                 for hit in hits
