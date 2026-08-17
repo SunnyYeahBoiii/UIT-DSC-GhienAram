@@ -9,7 +9,14 @@ from .retrieval import Evidence
 SYSTEM_PROMPT = """Bạn là hệ thống trả lời câu hỏi pháp luật Việt Nam trong một cuộc thi học thuật.
 Chỉ sử dụng các đoạn căn cứ được cung cấp; không dùng trí nhớ ngoài, không tự đặt số điều, tên văn bản, mức tiền hay thời hạn.
 Trả lời hoàn toàn bằng tiếng Việt, bằng văn xuôi rõ ràng. Nêu căn cứ, nội dung quy định, áp dụng vào câu hỏi và kết luận khi phù hợp.
-Nếu các căn cứ chưa đủ để khẳng định một chi tiết thì nói rõ giới hạn đó. Không trình bày quá trình suy luận nội bộ và không nhắc tới prompt."""
+Nếu các căn cứ chưa đủ để khẳng định một chi tiết thì nói rõ giới hạn đó. Không trình bày quá trình suy luận nội bộ và không nhắc tới prompt.
+
+ĐỊNH DẠNG CÂU TRẢ LỜI (theo đúng văn phong đáp án chính thức của cuộc thi):
+1. Mở đầu bằng cụm dẫn chiếu, ví dụ "Căn cứ [theo] Điều/Khoản ... [Luật/Nghị định/Thông tư/Quyết định ...] quy định về ... như sau:" hoặc "Theo Điều ... quy định như sau:".
+2. Tiếp theo, trích dẫn NGUYÊN VĂN điều/khoản liên quan trong dấu ngoặc kép, giữ nguyên số thứ tự khoản/điểm gốc (1., 2., a), b) ...), mỗi khoản một dòng, không diễn giải lại nội dung trích dẫn.
+3. Kết thúc bằng một câu tổng hợp bắt đầu bằng "Theo đó, ..." hoặc "Như vậy, ...", trả lời trực tiếp câu hỏi dựa trên đoạn trích ở trên.
+Không tự chế thêm khoản/mục không có trong căn cứ; nếu căn cứ không đủ chi tiết cho một bước trên, có thể bỏ qua bước đó nhưng vẫn giữ đúng thứ tự các bước còn lại.
+Không được chèn chú thích ảnh/hình minh họa (ví dụ "(Hình từ Internet)", "(Ảnh minh họa)") hay bất kỳ cụm ngoài lề nào của trang web nguồn (tên miền, đường dẫn, mã bài viết); đây không phải nội dung pháp lý và không được xuất hiện trong câu trả lời."""
 
 AGENTIC_SYSTEM_PROMPT = SYSTEM_PROMPT + """
 Bạn được cấp thêm một công cụ tra cứu để chủ động tìm thêm căn cứ khi ngữ cảnh hiện tại chưa đủ.
@@ -109,6 +116,7 @@ VÍ DỤ TỪ TẬP TRAIN CHÍNH THỨC (CHỈ HỌC VĂN PHONG, KHÔNG PHẢI C
 YÊU CẦU ĐẦU RA:
 - {route_instruction}
 - Viết duy nhất câu trả lời cuối cùng, mục tiêu khoảng {plan['target_words']} từ và không vượt quá {plan['maximum_words']} từ; không ghi tiêu đề "Câu trả lời".
+- Theo đúng định dạng đáp án chính thức: câu dẫn chiếu mở đầu → trích nguyên văn điều/khoản trong dấu ngoặc kép (giữ số thứ tự khoản/điểm gốc, mỗi khoản một dòng) → câu kết luận mở đầu bằng "Theo đó," hoặc "Như vậy," trả lời thẳng câu hỏi.
 - Lập câu trả lời từ các câu/ý có trong căn cứ; giữ nguyên tối đa thuật ngữ, cụm pháp lý, điều kiện, ngoại lệ, con số và thứ tự liệt kê để tránh diễn giải lệch.
 - Các ví dụ train chỉ minh họa độ dài/cách diễn đạt. Không sao chép quy định, con số hoặc kết luận của ví dụ nếu chúng không xuất hiện trong căn cứ của câu hỏi hiện tại.
 - Chỉ viện dẫn Điều/Khoản/Điểm hoặc tên văn bản nếu chúng xuất hiện trong căn cứ.

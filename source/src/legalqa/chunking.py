@@ -79,16 +79,19 @@ def chunk_documents(documents: Iterable[Document], config: dict) -> list[Chunk]:
                 int(cfg["min_chunk_chars"]),
             )
             for window_number, window in enumerate(windows):
-                prefix_parts = [part for part in (document.title, heading) if part]
-                prefix = " — ".join(prefix_parts)
-                text = f"{prefix}\n{window}" if prefix and prefix.lower() not in window[:300].lower() else window
+                # document.title/heading are stored as their own Chunk fields and
+                # already fed into retrieval's searchable string (retrieval.py) and
+                # the prompt evidence header (prompts.py). Do not also splice them
+                # into `text`: the official corpus stores titles as raw URL slugs
+                # (e.g. "thong-tu-17-2021-tt-bca-...-465663"), and an extractive
+                # candidate must never be able to pick that slug up as a sentence.
                 result.append(
                     Chunk(
                         chunk_id=f"{document.doc_id}::s{section_number:04d}::w{window_number:03d}",
                         doc_id=document.doc_id,
                         title=document.title,
                         heading=heading,
-                        text=normalize_text(text),
+                        text=normalize_text(window),
                         metadata={
                             **document.metadata,
                             "_section_index": section_number,

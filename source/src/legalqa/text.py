@@ -42,11 +42,39 @@ STOPWORDS = {
 }
 
 
+_SENTENCE_TERMINATORS = (".", "!", "?", ":", ";")
+
+
+def _dewrap(text: str) -> str:
+    """Rejoin hard line-wraps from the scraped corpus.
+
+    The official `selected-contexts` passages are stored with a newline (often
+    doubled, e.g. ``\\r\\n\\n``) after nearly every visually wrapped line, not
+    only at real sentence/paragraph boundaries (a PDF/HTML scrape artifact
+    present across the whole corpus, e.g. "B\u1ed8 LAO \u0110\u1ed8NG -\\n\\n TH\u01af\u01a0NG BINH V\u00c0
+    X\u00c3 H\u1ed8I"). A line that doesn't end a sentence is joined onto the next one;
+    a line that does is kept as its own line, which also lets downstream
+    paragraph/sentence splitters (`_window_text`, `split_sentences`) find real
+    boundaries instead of every wrapped line.
+    """
+    joined: list[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if joined and not joined[-1].endswith(_SENTENCE_TERMINATORS):
+            joined[-1] = f"{joined[-1]} {line}"
+        else:
+            joined.append(line)
+    return "\n".join(joined)
+
+
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFC", str(text)).replace("\ufeff", "")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+    text = _dewrap(text)
     return text.strip()
 
 
