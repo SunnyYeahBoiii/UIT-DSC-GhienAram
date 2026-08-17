@@ -4,6 +4,7 @@ from typing import Any, Iterable
 
 from .answer_style import generation_plan
 from .retrieval import Evidence
+from .text import strip_source_noise
 
 
 SYSTEM_PROMPT = """Bạn là hệ thống trả lời câu hỏi pháp luật Việt Nam trong một cuộc thi học thuật.
@@ -64,9 +65,10 @@ def render_train_memory_examples(
     for item in retrieval_diagnostics.get("train_memory", []):
         if len(sections) >= limit or float(item.get("similarity", 0.0)) < threshold:
             break
+        example_answer = strip_source_noise(str(item["answer"]), question=str(item["question"]))
         section = (
             f"[VÍ DỤ VĂN PHONG {len(sections) + 1} | độ gần {float(item['similarity']):.3f}]\n"
-            f"Hỏi: {item['question']}\nĐáp mẫu: {item['answer']}"
+            f"Hỏi: {item['question']}\nĐáp mẫu: {example_answer}"
         )
         if used + len(section) > char_limit:
             remaining = char_limit - used

@@ -19,6 +19,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 from legalqa.config import load_config, require_local_model  # noqa: E402
 from legalqa.data import load_qa  # noqa: E402
 from legalqa.fingerprint import sha256_file  # noqa: E402
+from legalqa.generation import clean_answer  # noqa: E402
 from legalqa.prompts import SYSTEM_PROMPT  # noqa: E402
 
 
@@ -56,7 +57,8 @@ class ChatDataset(torch.utils.data.Dataset):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ]
-            full_messages = prompt_messages + [{"role": "assistant", "content": row.answer}]
+            target_answer = clean_answer(row.answer, question=row.question)
+            full_messages = prompt_messages + [{"role": "assistant", "content": target_answer}]
             prompt = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
             full = tokenizer.apply_chat_template(full_messages, tokenize=False, add_generation_prompt=False)
             prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]

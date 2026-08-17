@@ -78,6 +78,22 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
+_IMAGE_CAPTION_RE = re.compile(
+    r"\(\s*(?:H\u00ecnh|\u1ea2nh)[^()]{0,60}?(?:Internet|minh\s*h[o\u1ecd]a)[^()]{0,20}\)",
+    re.IGNORECASE,
+)
+
+
+def strip_source_noise(text: str, question: str | None = None) -> str:
+    """B\u1ecf ch\u00fa th\u00edch \u1ea3nh crawl web (vd "(H\u00ecnh t\u1eeb Internet)") v\u00e0 c\u00e2u h\u1ecfi b\u1ecb
+    l\u1eb7p l\u1ea1i trong answer th\u00f4 c\u1ee7a train.json (artifact crawl HTML)."""
+    answer = _IMAGE_CAPTION_RE.sub("", text)
+    question = (question or "").strip()
+    if question:
+        answer = answer.replace(question, "")
+    return normalize_text(answer)
+
+
 def words(text: str, remove_stopwords: bool = False) -> list[str]:
     tokens = [token.lower() for token in WORD_RE.findall(normalize_text(text))]
     if remove_stopwords:

@@ -9,7 +9,16 @@ from typing import Any, Callable
 from .answer_style import generation_plan
 from .prompts import AGENTIC_SYSTEM_PROMPT, SYSTEM_PROMPT, qwen_agentic_user_prompt, qwen_user_prompt
 from .retrieval import Evidence, deduplicate_and_merge_evidence, retrieval_confidence
-from .text import citations, document_numbers, legal_tokens, normalize_text, numbers, split_sentences, words
+from .text import (
+    citations,
+    document_numbers,
+    legal_tokens,
+    normalize_text,
+    numbers,
+    split_sentences,
+    strip_source_noise,
+    words,
+)
 
 
 @dataclass
@@ -20,10 +29,11 @@ class Candidate:
     details: dict[str, Any] = field(default_factory=dict)
 
 
-def clean_answer(text: str) -> str:
+def clean_answer(text: str, question: str | None = None) -> str:
     answer = normalize_text(text)
     answer = re.sub(r"^(?:câu trả lời|trả lời)\s*[:：]\s*", "", answer, flags=re.IGNORECASE)
     answer = re.sub(r"(?:<\|im_end\|>|<\|endoftext\|>)", "", answer).strip()
+    answer = strip_source_noise(answer, question=question)
     return answer
 
 
@@ -513,7 +523,7 @@ def make_train_memory_candidate(
     )
     if similarity < threshold:
         return None
-    answer = clean_answer(str(nearest.get("answer", "")))
+    answer = clean_answer(str(nearest.get("answer", "")), question=str(nearest.get("question", "")))
     if not answer:
         return None
     route = diagnostics.get("route", {}).get("route", "simple")
