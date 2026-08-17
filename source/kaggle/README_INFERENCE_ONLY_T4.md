@@ -14,6 +14,11 @@ candidate và prior Agentic riêng, hãy calibration lại bằng v9.2 trước 
 inference; không tái dùng `tuned_selection.yaml` sinh từ Agentic cũ.
 
 Selector calibration ghi `/kaggle/working/legalqa_selector_calibration/selector_recovery_latest.zip`.
+
+Với inference recovery, `AUTO_RESUME=True` nhận cả file
+`legalqa_recovery_latest.zip` và thư mục cùng tên do Kaggle tự giải nén khi tạo
+Dataset. Không cần thêm cell đóng gói ZIP thủ công; notebook xác thực
+`recovery_state.json`, fingerprint và truyền trực tiếp ZIP/thư mục cho runner.
 Nếu session hết giờ, lưu ZIP đó thành Kaggle Dataset và attach ở session kế;
 notebook sẽ tự truyền đúng một recovery bundle khi `AUTO_RESUME=True`.
 
@@ -60,11 +65,18 @@ Chạy notebook QLoRA với `TRAIN_SCOPE='full'`. Không attach state split làm
 
 ```python
 DENSE_INDEX_ONLY = False
-TRAIN_MEMORY = True
+TRAIN_MEMORY = False  # Dùng False nếu Dataset dense hiện có chỉ global index
 AUTO_RESUME = True
 ```
 
 Notebook tự nhận adapter/weights. Nộp duy nhất `/kaggle/working/submission.zip`.
+Mode này bắt buộc adapter `full`, `tuned_selection.yaml` và completed
+global dense index. Train-memory chỉ bắt buộc khi `TRAIN_MEMORY=True`; giá trị
+này phải giữ nguyên khi resume vì nó thuộc run fingerprint. Thiếu artifact
+sẽ dừng trước khi tải model thay vì fallback. Giữ
+`MAX_RUNTIME_HOURS=11.5`. Nếu cell cuối in `PAUSED SAFELY`, Save
+Version, tạo Dataset từ `legalqa_recovery_latest.zip`, attach vào phiên kế tiếp
+và giữ `AUTO_RESUME=True`. Chỉ nộp khi cell cuối in `READY`.
 
 ## OOM an toàn
 
@@ -82,6 +94,8 @@ QLoRA đã batch 1, 4-bit và gradient checkpointing. Không tăng batch; có th
 ## Recovery
 
 - Inference ghi atomic `/kaggle/working/legalqa_recovery_latest.zip` định kỳ.
+- Inference tự dừng an toàn ở 11,5 giờ tại ranh giới câu hỏi và ghi manifest
+  `status=paused`; deadline không làm đổi run fingerprint nên ZIP resume được.
 - QLoRA dùng full Trainer checkpoint trong `/kaggle/working/legalqa_qlora/qwen-official-lora-{scope}/checkpoint-*`.
 - `/kaggle/working` không tự tồn tại qua session; phải Save Version/tạo Dataset trước khi session mất.
 - Recovery/adapters cũ khác fingerprint hoặc khác scope bị từ chối có chủ đích.

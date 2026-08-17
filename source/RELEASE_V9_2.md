@@ -11,6 +11,27 @@
 6. The 12-wheel offline Kaggle wheelhouse is included.
 7. Repository documentation describes only files actually present.
 8. Repeated queries are blocked; tool hits pass citation/temporal/relation reranking.
+9. Duplicate exported adapter directories are collapsed only when PEFT config
+   and adapter-weight SHA-256 match; distinct checkpoints remain a hard error.
+10. Public inference enforces `qlora_scope=full`; grouped-dev calibration
+    enforces `qlora_scope=split`, preventing accidental leakage/undertraining.
+11. Selector split IDs, answers, counts and train/dev disjointness are verified
+    before any expensive model inference begins.
+12. Identical source, dense-index, recovery and selector-weight aliases are
+    collapsed deterministically; conflicting content remains a hard error.
+13. Offline wheel discovery pins the exact 12 approved package versions.
+14. QLoRA resume copies the newest valid checkpoint and never ignores an
+    attached checkpoint merely because the working directory has metadata.
+15. Selector tuning falls back to baseline weights when primary-METEOR holdout
+    regresses; malformed, NaN or unsafe selector overrides are rejected.
+16. Final public inference fails fast when the full adapter, tuned selector, or
+    prebuilt dense/train-memory indexes are missing or structurally corrupt.
+17. Public inference pauses safely at 11.5 hours, snapshots candidate caches,
+    and exits successfully so Kaggle can persist the recovery ZIP.
+18. Runtime deadlines are excluded from the semantic run fingerprint, allowing
+    an identical next session to restore the checkpoint.
+19. Recovery extraction rejects traversal, duplicate targets, malformed state,
+    and unexpectedly large archives before writing files.
 
 ## Compatibility
 
@@ -23,7 +44,7 @@
 
 ## Verification
 
-- `python -m pytest -q`: 58 passed.
+- `python -m pytest -q`: 71 passed.
 - `python -m compileall -q src scripts kaggle`: passed.
 - All YAML/TOML and all notebook JSON/code cells parse and compile.
 - Wheelhouse contains all 12 pinned Hugging Face dependencies required by the

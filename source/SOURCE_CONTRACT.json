@@ -4,5 +4,10 @@
   "agentic_namespace": "agentic-v3",
   "cache_schema": "inference-v7-agentic-error-isolation",
   "selector_schema": "selector-weights-v3-agentic-evidence",
+  "adapter_alias_policy": "sha256-dedupe-v1",
+  "source_alias_policy": "sha256-dedupe-v1",
+  "qlora_recovery_schema": "legalqa-qlora-recovery-v1",
+  "inference_pause_schema": "inference-runtime-pause-v1",
+  "offline_wheel_profile": "hf-stack-2026-08-v1",
   "offline_wheel_count": 12
 }

@@ -9,7 +9,7 @@ Pipeline offline cho Kaggle T4, chỉ dùng dữ liệu chính thức và các c
 - Exact dense kNN trên câu hỏi official train; dùng tối đa hai đáp án gần nhất làm ví dụ **văn phong**, không coi chúng là căn cứ.
 - Candidate `train-memory` chỉ được mở khi cosine vượt ngưỡng cao; ngưỡng này được hiệu chỉnh trên grouped-dev.
 - Candidate oracle và selector tuning trên 300–500 câu dev, giữ toàn bộ câu có cùng template ở cùng một phía để giảm leakage.
-- QLoRA Qwen3.5-2B bằng official answer và evidence truy hồi từ corpus; checkpoint chứa model/optimizer/scheduler/RNG và tự resume đúng `train_scope`.
+- QLoRA Qwen3.5-2B bằng official answer và evidence truy hồi từ corpus; checkpoint chứa model/optimizer/scheduler/RNG, tự dừng an toàn trước hard limit 12 giờ, tạo recovery ZIP nguyên tử và tự resume đúng `train_scope`.
 - Router v9.1 chỉ mở Complex khi có complex cue, retrieval thực sự yếu hoặc nhiều văn bản gần hòa điểm; quan hệ phổ biến trong corpus không còn tự kích hoạt Complex.
 - Mỗi graph hop được rerank và relevance-gate trước khi trở thành frontier của vòng sau; mặc định tối đa hai vòng, sáu evidence và bốn văn bản.
 - Document diversity dùng bonus nhỏ thay vì cưỡng ép kéo tài liệu điểm thấp vào evidence.
@@ -44,18 +44,37 @@ Chi tiết nằm trong [PIPELINE_V9.md](PIPELINE_V9.md). Hướng dẫn Kaggle n
 ## Thứ tự chạy khuyến nghị
 
 1. Import `kaggle/legalqa_dsc2026_inference_only_t4.ipynb`, đặt `DENSE_INDEX_ONLY=True`; lưu `/kaggle/working/legalqa_dense_index` thành Dataset. Thư mục này chứa cả global corpus dense index và official train-memory.
-2. Import `kaggle/legalqa_dsc2026_v9_qlora_t4.ipynb`, đặt `TRAIN_SCOPE='split'`; lưu toàn bộ `/kaggle/working/legalqa_qlora` để giữ checkpoint và adapter split.
+2. Import `kaggle/legalqa_dsc2026_v9_qlora_t4.ipynb`, đặt `TRAIN_SCOPE='split'`. Nếu manifest báo `paused`, Save Version rồi tạo Dataset từ `/kaggle/working/qlora_recovery_latest.zip` và attach vào session sau; nếu báo `complete`, lưu adapter split.
 3. Attach dense index và completed split adapter; chạy `kaggle/legalqa_dsc2026_v9_selector_calibration_t4.ipynb` bằng source v9.2. Lưu `tuned_selection.yaml` cùng báo cáo candidate oracle. Không dùng trace/trọng số calibration từ Agentic cũ vì candidate evidence và prior đã thay đổi.
 4. Chạy lại notebook QLoRA với `TRAIN_SCOPE='full'`. Không attach state `split` làm state resume cho bước này; code cũng từ chối scope sai.
 5. Attach dense index, completed adapter `full` và đúng một `tuned_selection.yaml`; chạy notebook inference với `DENSE_INDEX_ONLY=False`.
 6. Nộp duy nhất `/kaggle/working/submission.zip`.
+
+Ở mode public cuối, notebook bật ba guard bắt buộc: adapter QLoRA `full`,
+`tuned_selection.yaml` và global dense index phải tồn tại, hoàn chỉnh và đúng
+cấu trúc. Train-memory chỉ bắt buộc khi `TRAIN_MEMORY=True`; phải giữ nguyên
+giá trị này giữa các session resume. Thiếu một artifact sẽ dừng trước khi tải model, không âm thầm
+dùng base Qwen/selector mặc định hoặc dựng lại index trong phiên inference.
+`MAX_RUNTIME_HOURS=11.5` khiến inference dừng tại ranh giới câu hỏi, ghi recovery
+ZIP và kết thúc notebook thành công trước giới hạn 12 giờ. Khi manifest báo
+`paused`, lưu ZIP thành Dataset và attach vào phiên kế tiếp; chỉ nộp khi manifest
+báo `complete`.
 
 Cả ba notebook v9.2 chỉ nhận source có `SOURCE_CONTRACT.json` khớp đầy
 đủ release, Agentic/cache/selector schema và 12 wheel offline. Vì vậy bản
 `legalqa_source` cũ nằm kèm trong Dataset QLoRA split/full sẽ bị loại thay
 vì có thể được chọn nhầm theo tên thư mục.
 
-Bạn có thể bỏ bước QLoRA và dùng Qwen base, nhưng candidate-oracle nên được chạy trước khi quyết định selector nào tốt hơn. Chỉ chấp nhận trọng số tuned nếu phần grouped holdout cải thiện, không chỉ phần tune.
+Runner public bắt buộc adapter có `qlora_scope.json` với `train_scope=full`;
+runner calibration bắt buộc `train_scope=split`. Các bản sao source, adapter,
+dense index, recovery và selector weights chỉ được tự gộp khi định danh nội dung
+trùng nhau; nội dung khác nhau vẫn dừng sớm. Wheelhouse cũng được kiểm đúng phiên
+bản, không chỉ đúng tên package.
+
+CLI vẫn cho phép thí nghiệm ablation bằng Qwen base, nhưng notebook public cuối
+cố ý yêu cầu adapter `full` để tránh nộp nhầm cấu hình yếu hơn. Calibration tự
+trả về trọng số baseline nếu METEOR trên grouped holdout không cải thiện, thay
+vì xuất một cấu hình tuned bị overfit.
 
 ## Kiểm thử
 

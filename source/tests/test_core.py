@@ -19,6 +19,7 @@ from legalqa.index import build_index
 from legalqa.metrics import meteor_exact, rouge_l_f1
 from legalqa.legal_graph import temporal_relation_adjustment
 from legalqa.pipeline import (
+    InferencePaused,
     _append_candidate,
     _candidate_evidence,
     _load_candidate_cache,
@@ -26,6 +27,7 @@ from legalqa.pipeline import (
     generate_from_evidence,
     run_pipeline,
 )
+from legalqa.recovery import RecoveryError, restore_recovery_bundle
 from legalqa.prompts import qwen_user_prompt
 from legalqa.retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
 from legalqa.routing import decide_route
@@ -141,6 +143,11 @@ def test_source_contract_matches_runtime_and_notebooks():
         "agentic_namespace": "agentic-v3",
         "cache_schema": "inference-v7-agentic-error-isolation",
         "selector_schema": SELECTION_WEIGHTS_SCHEMA,
+        "adapter_alias_policy": "sha256-dedupe-v1",
+        "source_alias_policy": "sha256-dedupe-v1",
+        "qlora_recovery_schema": "legalqa-qlora-recovery-v1",
+        "inference_pause_schema": "inference-runtime-pause-v1",
+        "offline_wheel_profile": "hf-stack-2026-08-v1",
         "offline_wheel_count": 12,
     }
     assert contract["agentic_namespace"] in (
@@ -160,6 +167,186 @@ def test_source_contract_matches_runtime_and_notebooks():
         source = (project / "kaggle" / notebook).read_text(encoding="utf-8")
         assert "SOURCE_CONTRACT.json" in source
         assert contract["selector_schema"] in source
+        assert contract["source_alias_policy"] in source
+        assert contract["offline_wheel_profile"] in source
+        assert "def source_identity(path)" in source
+        assert "transformers-5.14.1-" in source
+        assert "require_kaggle_cuda" in source
+        assert "Session Kaggle chưa được gắn GPU" in source
+        notebook_payload = json.loads(source)
+        for cell in notebook_payload["cells"]:
+            if cell.get("cell_type") == "code":
+                compile("".join(cell.get("source", [])), notebook, "exec")
+    inference_notebook = (
+        project / "kaggle" / "legalqa_dsc2026_inference_only_t4.ipynb"
+    ).read_text(encoding="utf-8")
+    assert "--require-generator-adapter" in inference_notebook
+    assert "--require-selection-weights" in inference_notebook
+    assert "--require-prebuilt-indexes" in inference_notebook
+    assert "MAX_RUNTIME_HOURS = 11.5" in inference_notebook
+    assert "TRAIN_MEMORY = False" in inference_notebook
+    assert "input_root.rglob('recovery_state.json')" in inference_notebook
+    assert "if p.is_dir()" in inference_notebook
+    assert "--auto-resume" in inference_notebook
+    assert "status == 'paused'" in inference_notebook
+
+
+def test_inference_notebook_ignores_selector_recovery_directories(tmp_path):
+    import hashlib
+    import zipfile
+
+    project = Path(__file__).resolve().parents[1]
+    notebook = json.loads(
+        (project / "kaggle" / "legalqa_dsc2026_inference_only_t4.ipynb").read_text(
+            encoding="utf-8"
+        )
+    )
+    discovery_cell = "".join(notebook["cells"][3]["source"])
+    discovery_prefix = discovery_cell.split("print('Global dense index:'", 1)[0]
+
+    public_file = tmp_path / "public-official.json"
+    public_file.write_text('{"1":{"question":"q"}}', encoding="utf-8")
+    public_sha = hashlib.sha256(public_file.read_bytes()).hexdigest()
+
+    def write_recovery(root: Path, fingerprint: str, questions_sha: str) -> None:
+        root.mkdir(parents=True)
+        (root / "recovery_state.json").write_text(
+            json.dumps(
+                {
+                    "format_version": 1,
+                    "run_fingerprint": fingerprint,
+                    "stage": "paused",
+                    "completed": 1,
+                    "total": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (root / "run_manifest.json").write_text(
+            json.dumps(
+                {
+                    "mode": "full_sequential_inference_only",
+                    "inputs": {"questions_sha256": questions_sha},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    public_recovery = tmp_path / "legalqa-recovery-latest"
+    write_recovery(public_recovery, "public-fingerprint", public_sha)
+    write_recovery(tmp_path / "selector" / "inference", "selector-fingerprint", "dev-sha")
+    write_recovery(
+        tmp_path / "selector" / "selector_recovery_latest",
+        "selector-fingerprint",
+        "dev-sha",
+    )
+
+    def sha256_path(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    namespace = {
+        "AUTO_RESUME": True,
+        "hashlib": hashlib,
+        "input_root": tmp_path,
+        "json": json,
+        "public_files": [public_file],
+        "sha256_path": sha256_path,
+        "zipfile": zipfile,
+    }
+    exec(discovery_prefix, namespace)
+    assert namespace["recovery_inputs"] == [public_recovery]
+    assert namespace["resume_bundle"] == public_recovery
+
+
+def test_qlora_recovery_bundle_keeps_latest_full_trainer_state(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    script = project / "scripts" / "train_qwen_lora.py"
+    spec = importlib.util.spec_from_file_location("qlora_training_recovery", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    output = tmp_path / "adapter"
+    output.mkdir()
+    (output / "resume_signature.json").write_text('{"epochs": 1}', encoding="utf-8")
+    (output / "qlora_scope.json").write_text('{"train_scope": "split"}', encoding="utf-8")
+    (output / "training_paused.json").write_text('{"status": "paused"}', encoding="utf-8")
+    for step in (20, 40):
+        checkpoint = output / f"checkpoint-{step}"
+        checkpoint.mkdir()
+        (checkpoint / "trainer_state.json").write_text(
+            json.dumps({"global_step": step, "max_steps": 207}), encoding="utf-8"
+        )
+        for name in ("adapter_model.safetensors", "optimizer.pt", "scheduler.pt", "rng_state.pth"):
+            (checkpoint / name).write_bytes(f"{name}-{step}".encode())
+    bundle = tmp_path / "qlora_recovery_latest.zip"
+    report = module.create_qlora_recovery_bundle(output, bundle)
+    assert report["global_step"] == 40
+    with zipfile.ZipFile(bundle) as archive:
+        names = set(archive.namelist())
+        manifest = json.loads(archive.read("recovery_manifest.json"))
+    assert manifest["schema"] == "legalqa-qlora-recovery-v1"
+    assert "training_paused.json" in names
+    assert "checkpoint-40/optimizer.pt" in names
+    assert "checkpoint-40/scheduler.pt" in names
+    assert "checkpoint-40/rng_state.pth" in names
+    assert not any(name.startswith("checkpoint-20/") for name in names)
+
+
+def test_qlora_recovery_zip_extracts_and_resumes_without_path_traversal(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    train_spec = importlib.util.spec_from_file_location(
+        "qlora_training_recovery_roundtrip", project / "scripts" / "train_qwen_lora.py"
+    )
+    train_module = importlib.util.module_from_spec(train_spec)
+    assert train_spec.loader is not None
+    train_spec.loader.exec_module(train_module)
+    runner_spec = importlib.util.spec_from_file_location(
+        "qlora_runner_recovery_roundtrip", project / "kaggle" / "run_qwen_qlora.py"
+    )
+    runner_module = importlib.util.module_from_spec(runner_spec)
+    assert runner_spec.loader is not None
+    runner_spec.loader.exec_module(runner_module)
+
+    source = tmp_path / "source"
+    checkpoint = source / "checkpoint-60"
+    checkpoint.mkdir(parents=True)
+    (source / "resume_signature.json").write_text('{"epochs": 1}', encoding="utf-8")
+    (source / "qlora_scope.json").write_text('{"train_scope": "split"}', encoding="utf-8")
+    (checkpoint / "trainer_state.json").write_text('{"global_step": 60}', encoding="utf-8")
+    for name in ("adapter_model.safetensors", "optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        (checkpoint / name).write_bytes(name.encode())
+    bundle = tmp_path / "qlora_recovery_latest.zip"
+    train_module.create_qlora_recovery_bundle(source, bundle)
+
+    extracted = runner_module._extract_recovery_bundle(bundle, tmp_path / "working")
+    assert runner_module._latest_checkpoint_step(extracted) == 60
+    target = tmp_path / "adapter"
+    runner_module._copy_resume(extracted, target)
+    assert (target / "checkpoint-60" / "optimizer.pt").read_bytes() == b"optimizer.pt"
+
+    malicious = tmp_path / "malicious.zip"
+    with zipfile.ZipFile(malicious, "w") as archive:
+        archive.writestr("recovery_manifest.json", '{"schema":"legalqa-qlora-recovery-v1"}')
+        archive.writestr("qlora_scope.json", '{"train_scope":"split"}')
+        archive.writestr("../escaped.txt", "bad")
+    with pytest.raises(RuntimeError, match="path không an toàn"):
+        runner_module._extract_recovery_bundle(malicious, tmp_path / "malicious-working")
+    assert not (tmp_path / "escaped.txt").exists()
+    malicious_backslash = tmp_path / "malicious-backslash.zip"
+    with zipfile.ZipFile(malicious_backslash, "w") as archive:
+        archive.writestr("recovery_manifest.json", '{"schema":"legalqa-qlora-recovery-v1"}')
+        archive.writestr("qlora_scope.json", '{"train_scope":"split"}')
+        archive.writestr("..\\escaped-backslash.txt", "bad")
+    with pytest.raises(RuntimeError, match="path không an toàn"):
+        runner_module._extract_recovery_bundle(
+            malicious_backslash, tmp_path / "malicious-backslash-working"
+        )
+    assert not (tmp_path / "escaped-backslash.txt").exists()
 
 
 def test_selector_calibration_requires_completed_split_adapter(tmp_path):
@@ -172,7 +359,7 @@ def test_selector_calibration_requires_completed_split_adapter(tmp_path):
     assert spec.loader is not None
     spec.loader.exec_module(module)
 
-    adapter = tmp_path / "adapter"
+    adapter = tmp_path / "qwen-official-lora-split"
     adapter.mkdir()
     (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
     (adapter / "adapter_model.safetensors").write_bytes(b"weights")
@@ -183,11 +370,260 @@ def test_selector_calibration_requires_completed_split_adapter(tmp_path):
         json.dumps({"train_scope": "split"}), encoding="utf-8"
     )
     assert module._find_split_adapter(tmp_path) == adapter
+    alias = tmp_path / "qwen_qlora_adapter"
+    alias.mkdir()
+    for name in (
+        "adapter_config.json",
+        "adapter_model.safetensors",
+        "training_complete.json",
+        "qlora_scope.json",
+    ):
+        (alias / name).write_bytes((adapter / name).read_bytes())
+    # Two exported folders with identical PEFT config/weights are one adapter.
+    assert module._find_split_adapter(tmp_path) == adapter
+    (alias / "adapter_model.safetensors").write_bytes(b"different-weights")
+    with pytest.raises(RuntimeError, match="KHÁC nhau"):
+        module._find_split_adapter(tmp_path)
+    (alias / "adapter_model.safetensors").write_bytes(
+        (adapter / "adapter_model.safetensors").read_bytes()
+    )
     (adapter / "qlora_scope.json").write_text(
+        json.dumps({"train_scope": "full"}), encoding="utf-8"
+    )
+    (alias / "qlora_scope.json").write_text(
         json.dumps({"train_scope": "full"}), encoding="utf-8"
     )
     with pytest.raises(RuntimeError):
         module._find_split_adapter(tmp_path)
+
+
+def test_public_inference_collapses_identical_completed_adapter_aliases(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle/run_inference_only.py"
+    spec = importlib.util.spec_from_file_location("inference_adapter_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    canonical = tmp_path / "qwen-official-lora-full"
+    alias = tmp_path / "qwen_qlora_adapter"
+    for directory in (canonical, alias):
+        directory.mkdir()
+        (directory / "adapter_config.json").write_text(
+            json.dumps({"r": 8, "base_model_name_or_path": "Qwen3.5-2B"}),
+            encoding="utf-8",
+        )
+        (directory / "adapter_model.safetensors").write_bytes(b"same-weights")
+        (directory / "training_complete.json").write_text(
+            json.dumps({"global_step": 219}), encoding="utf-8"
+        )
+        (directory / "qlora_scope.json").write_text(
+            json.dumps({"train_scope": "full"}), encoding="utf-8"
+        )
+    assert module.find_generator_adapter(tmp_path) == canonical
+    (alias / "adapter_model.safetensors").write_bytes(b"different-weights")
+    with pytest.raises(RuntimeError, match="KHÁC nhau"):
+        module.find_generator_adapter(tmp_path)
+
+
+def test_public_inference_ignores_unrelated_training_complete_marker(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle" / "run_inference_only.py"
+    spec = importlib.util.spec_from_file_location("inference_unrelated_training", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    unrelated = tmp_path / "other-training-output"
+    unrelated.mkdir()
+    (unrelated / "training_complete.json").write_text(
+        json.dumps({"global_step": 12}), encoding="utf-8"
+    )
+    assert module.find_generator_adapter(tmp_path) is None
+
+
+def test_public_inference_rejects_split_adapter_and_calibration_accepts_it(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle/run_inference_only.py"
+    spec = importlib.util.spec_from_file_location("inference_adapter_scope", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    adapter = tmp_path / "qwen-official-lora-split"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter / "adapter_model.safetensors").write_bytes(b"weights")
+    (adapter / "training_complete.json").write_text(
+        json.dumps({"global_step": 207}), encoding="utf-8"
+    )
+    (adapter / "qlora_scope.json").write_text(
+        json.dumps({"train_scope": "split"}), encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="scope='full'"):
+        module.find_generator_adapter(tmp_path)
+    assert module.find_generator_adapter(tmp_path, expected_scope="split") == adapter
+
+
+def test_selector_split_integrity_is_checked_before_inference(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle/run_selector_calibration.py"
+    spec = importlib.util.spec_from_file_location("selector_split_integrity", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    dev = {str(i): {"question": f"Câu hỏi pháp luật {i}?"} for i in range(300)}
+    refs = {str(i): {"answer": f"Câu trả lời {i}."} for i in range(300)}
+    train = {"train-1": {"question": "Câu train?", "answer": "Đáp án train."}}
+    write_json(tmp_path / "selector_dev_questions.json", dev)
+    write_json(tmp_path / "selector_dev_references.json", refs)
+    write_json(tmp_path / "selector_train.json", train)
+    manifest = {"dev": 300, "train": 1, "total": 301, "overlap_ids": 0}
+    assert module._validate_selector_split(tmp_path, manifest) == {
+        "dev": 300,
+        "train": 1,
+        "total": 301,
+    }
+    alias = tmp_path / "selector_split_alias"
+    alias.mkdir()
+    write_json(alias / "selector_dev_questions.json", dev)
+    write_json(alias / "selector_dev_references.json", refs)
+    write_json(alias / "selector_train.json", train)
+    assert module._find_split(tmp_path) == tmp_path
+    changed_refs = dict(refs)
+    changed_refs["0"] = {"answer": "Nội dung khác."}
+    write_json(alias / "selector_dev_references.json", changed_refs)
+    with pytest.raises(RuntimeError, match="nội dung selector split"):
+        module._find_split(tmp_path)
+    write_json(alias / "selector_dev_references.json", refs)
+    refs.pop("299")
+    write_json(tmp_path / "selector_dev_references.json", refs)
+    with pytest.raises(RuntimeError, match="không khớp"):
+        module._validate_selector_split(tmp_path, manifest)
+
+
+def test_qlora_resume_copy_prefers_newest_valid_checkpoint(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle/run_qwen_qlora.py"
+    spec = importlib.util.spec_from_file_location("qlora_resume_copy", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    attached = tmp_path / "attached"
+    target = tmp_path / "working"
+    checkpoint20 = attached / "checkpoint-20"
+    checkpoint20.mkdir(parents=True)
+    (checkpoint20 / "trainer_state.json").write_text("{}", encoding="utf-8")
+    for name in ("adapter_model.safetensors", "optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        (checkpoint20 / name).write_bytes(name.encode())
+    (attached / "resume_signature.json").write_text("{}", encoding="utf-8")
+    target.mkdir()
+    (target / "qlora_scope.json").write_text("{}", encoding="utf-8")
+    module._copy_resume(attached, target)
+    assert module._latest_checkpoint_step(target) == 20
+    checkpoint40 = target / "checkpoint-40"
+    checkpoint40.mkdir()
+    (checkpoint40 / "trainer_state.json").write_text("{}", encoding="utf-8")
+    for name in ("adapter_model.safetensors", "optimizer.pt", "scheduler.pt", "rng_state.pth"):
+        (checkpoint40 / name).write_bytes(name.encode())
+    marker = checkpoint40 / "keep.txt"
+    marker.write_text("newer", encoding="utf-8")
+    module._copy_resume(attached, target)
+    assert marker.read_text(encoding="utf-8") == "newer"
+
+
+def test_selector_holdout_guard_follows_primary_metric():
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "scripts/evaluate_selector.py"
+    spec = importlib.util.spec_from_file_location("selector_holdout_guard", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    baseline = {"meteor_exact_probe": 0.40, "rouge_l_f1": 0.50}
+    assert not module.better_primary_metric(
+        {"meteor_exact_probe": 0.39, "rouge_l_f1": 0.90}, baseline
+    )
+    assert module.better_primary_metric(
+        {"meteor_exact_probe": 0.41, "rouge_l_f1": 0.10}, baseline
+    )
+
+
+def test_selector_trace_validation_rejects_duplicate_sources(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "scripts/evaluate_selector.py"
+    spec = importlib.util.spec_from_file_location("selector_trace_validation", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "selected": "extractive",
+                "candidates": [
+                    {"source": "extractive", "answer": "Câu trả lời."},
+                    {"source": "extractive", "answer": "Câu trả lời khác."},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="lặp candidate source"):
+        module.load_trace(trace)
+
+
+def test_inference_rejects_invalid_or_unsafe_selector_overrides(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle/run_inference_only.py"
+    spec = importlib.util.spec_from_file_location("selector_override_validation", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    config = minimal_config(tmp_path)
+    valid = {
+        "schema": SELECTION_WEIGHTS_SCHEMA,
+        "selection": {"evidence_support": 0.2},
+        "retrieval": {"train_memory_candidate_threshold": 0.9},
+    }
+    module.apply_selection_weights(config, valid)
+    assert config["selection"]["evidence_support"] == 0.2
+    assert config["retrieval"]["train_memory_candidate_threshold"] == 0.9
+    with pytest.raises(ValueError, match="không được hỗ trợ"):
+        module.apply_selection_weights(
+            config,
+            {"schema": SELECTION_WEIGHTS_SCHEMA, "selection": {"typo_weight": 1.0}},
+        )
+    with pytest.raises(ValueError, match="hữu hạn"):
+        module.apply_selection_weights(
+            config,
+            {"schema": SELECTION_WEIGHTS_SCHEMA, "selection": {"evidence_support": float("nan")}},
+        )
+    with pytest.raises(ValueError, match="không được ghi đè"):
+        module.apply_selection_weights(
+            config,
+            {
+                "schema": SELECTION_WEIGHTS_SCHEMA,
+                "selection": {"evidence_support": 0.2},
+                "retrieval": {"bm25_top_k": 1},
+            },
+        )
 
 
 def test_selector_calibration_exposes_resume_bundle_flag():
@@ -1119,3 +1555,116 @@ def test_sqlite_bm25_search_fn_returns_evidence_from_tool_call(tmp_path):
         assert results[0].bm25_score > 0
         assert results[0].score > 0
         assert results[0].score != results[0].bm25_score  # legal-reranked, not raw BM25
+
+
+def test_inference_runtime_budget_pauses_before_loading_qwen(tmp_path, monkeypatch):
+    config = minimal_config(tmp_path)
+    config["paths"]["models"]["generator"] = "fake-model"
+    config["generation"]["qwen_enabled"] = True
+    config["runtime"].update(
+        stop_at_unix=1.0,
+        recovery_root=str(tmp_path),
+        recovery_output=str(tmp_path / "legalqa_recovery_latest.zip"),
+        run_fingerprint="pause-test",
+        checkpoint_every=50,
+    )
+    question = QARecord("q1", "Quy định này là gì?", None)
+    evidence = {
+        "q1": [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
+    }
+
+    def must_not_load(_config):
+        raise AssertionError("Qwen must not load after the safe deadline")
+
+    monkeypatch.setattr("legalqa.pipeline.QwenTextGenerator", must_not_load)
+    with pytest.raises(InferencePaused) as raised:
+        generate_from_evidence(config, [question], evidence, tmp_path / "predictions.json")
+    assert raised.value.stage == "qwen"
+    bundle = tmp_path / "legalqa_recovery_latest.zip"
+    assert bundle.is_file()
+    with zipfile.ZipFile(bundle) as archive:
+        state = json.loads(archive.read("recovery_state.json").decode("utf-8"))
+    assert state["stage"] == "qwen"
+    assert state["run_fingerprint"] == "pause-test"
+
+
+def test_inference_recovery_rejects_windows_backslash_traversal(tmp_path):
+    bundle = tmp_path / "malicious-recovery.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr(
+            "recovery_state.json",
+            json.dumps({"run_fingerprint": "expected", "stage": "qwen"}),
+        )
+        archive.writestr("..\\escaped.txt", "bad")
+    with pytest.raises(RecoveryError, match="(Unsafe path|không an toàn)"):
+        restore_recovery_bundle(bundle, tmp_path / "restore", expected_fingerprint="expected")
+    assert not (tmp_path / "escaped.txt").exists()
+
+
+def test_attached_dense_and_train_memory_are_validated_before_models(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle" / "run_inference_only.py"
+    spec = importlib.util.spec_from_file_location("inference_index_validation", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    dense = tmp_path / "dense"
+    dense.mkdir()
+    (dense / "vectors.f16").write_bytes(b"0" * 12)  # 2 chunks * 3 dims * fp16
+    (dense / "rowids.i64").write_bytes(b"0" * 16)
+    (dense / "manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "schema": "global-dense-v1",
+                "identity": "dense-test",
+                "chunks": 2,
+                "dimension": 3,
+                "vectors": "vectors.f16",
+                "rowids": "rowids.i64",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert module.validate_dense_index_input(dense)["chunks"] == 2
+    with pytest.raises(RuntimeError, match="another corpus or embedding"):
+        module.validate_dense_index_input(
+            dense, corpus_identity="official-corpus", embedding_identity="approved-embedding"
+        )
+
+    memory = dense / "train_memory"
+    memory.mkdir()
+    (memory / "vectors.f16").write_bytes(b"0" * 12)
+    records = [
+        {"question_id": "q1", "question": "Câu một?", "answer": "Đáp án một."},
+        {"question_id": "q2", "question": "Câu hai?", "answer": "Đáp án hai."},
+    ]
+    (memory / "records.jsonl").write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records),
+        encoding="utf-8",
+    )
+    (memory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                "schema": "train-memory-v1",
+                "identity": "memory-test",
+                "count": 2,
+                "dimension": 3,
+                "vectors": "vectors.f16",
+                "records": "records.jsonl",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert module.validate_train_memory_input(memory)["count"] == 2
+    with pytest.raises(RuntimeError, match="another train set or embedding"):
+        module.validate_train_memory_input(
+            memory, train_identity="official-train", embedding_identity="approved-embedding"
+        )
+    (dense / "vectors.f16").write_bytes(b"truncated")
+    with pytest.raises(RuntimeError, match="missing/truncated"):
+        module.validate_dense_index_input(dense)

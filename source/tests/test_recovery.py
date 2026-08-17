@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import zipfile
 
 import pytest
 
-from legalqa.recovery import RecoveryError, create_recovery_bundle, restore_recovery_bundle
+from legalqa.recovery import (
+    RecoveryError,
+    create_recovery_bundle,
+    recovery_input_state,
+    restore_recovery_bundle,
+)
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -51,6 +57,8 @@ def test_inference_only_runner_never_builds_training_pairs():
     assert "train_reranker" not in runner
     assert '"training_performed": False' in runner
     assert "--resume-bundle" in runner
+    assert "--auto-resume" in runner
+    assert "discover_recovery_inputs" in runner
     assert "--checkpoint-every" in runner
     assert "smoke_inference_models" in runner
     assert "corpus_content_fingerprint" in runner
@@ -89,6 +97,54 @@ def test_inference_recovery_roundtrip_keeps_only_resumable_state(tmp_path):
     assert (second / candidates.relative_to(first)).read_text(encoding="utf-8") == candidates.read_text(encoding="utf-8")
     assert not (second / unrelated.relative_to(first)).exists()
     assert not (second / "official_corpus.sqlite").exists()
+
+
+def test_inference_recovery_accepts_kaggle_extracted_directory(tmp_path):
+    first = tmp_path / "first"
+    retrieval = first / "cache" / "abc" / "retrieval.v7.jsonl"
+    candidates = first / "artifacts" / "abc" / "candidate_cache" / "qwen_agentic.jsonl"
+    retrieval.parent.mkdir(parents=True)
+    candidates.parent.mkdir(parents=True)
+    retrieval.write_text('{"question_id":"1"}\n', encoding="utf-8")
+    candidates.write_text('{"cache_key":"k","answer":"a"}\n', encoding="utf-8")
+    bundle = tmp_path / "legalqa_recovery_latest.zip"
+    create_recovery_bundle(
+        first,
+        bundle,
+        fingerprint="abc",
+        stage="paused",
+        completed=211,
+        total=372,
+    )
+
+    extracted = tmp_path / "legalqa_recovery_latest"
+    with zipfile.ZipFile(bundle) as archive:
+        archive.extractall(extracted)
+
+    restored_root = tmp_path / "restored"
+    restored = restore_recovery_bundle(
+        extracted,
+        restored_root,
+        expected_fingerprint="abc",
+    )
+    assert restored["stage"] == "paused"
+    assert restored["completed"] == 211
+    assert restored["source_bundle"] == str(extracted.resolve())
+    assert recovery_input_state(extracted)["completed"] == 211
+    assert recovery_input_state(bundle)["completed"] == 211
+    assert (restored_root / retrieval.relative_to(first)).is_file()
+    assert (restored_root / candidates.relative_to(first)).is_file()
+
+
+def test_inference_recovery_directory_rejects_other_fingerprint(tmp_path):
+    source = tmp_path / "legalqa_recovery_latest"
+    source.mkdir()
+    (source / "recovery_state.json").write_text(
+        '{"format_version":1,"run_fingerprint":"old","stage":"paused","completed":1,"total":2}',
+        encoding="utf-8",
+    )
+    with pytest.raises(RecoveryError, match="expected=new"):
+        restore_recovery_bundle(source, tmp_path / "restored", expected_fingerprint="new")
 
 
 def test_inference_recovery_rejects_other_fingerprint(tmp_path):

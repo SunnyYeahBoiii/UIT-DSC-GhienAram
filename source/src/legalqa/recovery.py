@@ -106,9 +106,103 @@ def create_recovery_bundle(
 def _read_bundle_state(bundle: Path) -> dict[str, Any]:
     try:
         with zipfile.ZipFile(bundle) as archive:
-            return json.loads(archive.read(RECOVERY_STATE).decode("utf-8"))
-    except (KeyError, json.JSONDecodeError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+            state = json.loads(archive.read(RECOVERY_STATE).decode("utf-8"))
+            if not isinstance(state, dict):
+                raise TypeError("recovery_state.json must be a JSON object")
+            return state
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        zipfile.BadZipFile,
+    ) as exc:
         raise RecoveryError(f"Recovery ZIP không hợp lệ: {bundle}") from exc
+
+
+def _read_directory_state(directory: Path) -> dict[str, Any]:
+    state_path = directory / RECOVERY_STATE
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise TypeError("recovery_state.json must be a JSON object")
+        return state
+    except (
+        OSError,
+        TypeError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise RecoveryError(f"Thư mục recovery không hợp lệ: {directory}") from exc
+
+
+def recovery_input_state(path: str | Path) -> dict[str, Any]:
+    """Read metadata from either an atomic ZIP or Kaggle-extracted recovery."""
+    recovery_path = Path(path).resolve()
+    if not recovery_path.exists():
+        raise FileNotFoundError(f"Không tìm thấy recovery input: {recovery_path}")
+    if recovery_path.is_dir():
+        return _read_directory_state(recovery_path)
+    if recovery_path.is_file():
+        return _read_bundle_state(recovery_path)
+    raise RecoveryError(f"Recovery input không phải ZIP/thư mục: {recovery_path}")
+
+
+def _restore_recovery_directory(
+    source_root: Path,
+    target_root: Path,
+    *,
+    fingerprint: str,
+) -> int:
+    """Restore the allow-listed recovery payload Kaggle extracted from a ZIP."""
+    files = _checkpoint_files(source_root, fingerprint)
+    if not files or source_root / RECOVERY_STATE not in files:
+        raise RecoveryError(f"Thư mục recovery thiếu {RECOVERY_STATE}: {source_root}")
+    if len(files) > 100_000:
+        raise RecoveryError(f"Recovery directory contains too many files: {len(files):,}")
+
+    targets: set[str] = set()
+    transfers: list[tuple[Path, Path]] = []
+    total_bytes = 0
+    for source in files:
+        if source.is_symlink():
+            raise RecoveryError(f"Recovery directory contains a symlink: {source}")
+        resolved_source = source.resolve()
+        try:
+            relative = resolved_source.relative_to(source_root)
+        except ValueError as exc:
+            raise RecoveryError(f"Recovery file vượt source root: {source}") from exc
+        target = (target_root / relative).resolve()
+        try:
+            target.relative_to(target_root)
+        except ValueError as exc:
+            raise RecoveryError(f"Đường dẫn vượt recovery root: {relative}") from exc
+        target_key = str(target).casefold()
+        if target_key in targets:
+            raise RecoveryError(f"Duplicate recovery target: {relative}")
+        targets.add(target_key)
+        total_bytes += resolved_source.stat().st_size
+        transfers.append((resolved_source, target))
+
+    if total_bytes > 8 * 1024**3:
+        raise RecoveryError(
+            f"Recovery directory is unexpectedly large: {total_bytes:,} bytes"
+        )
+
+    restored = 0
+    for resolved_source, target in transfers:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.restore.tmp")
+        with resolved_source.open("rb") as source_handle, temporary.open("wb") as destination:
+            while True:
+                block = source_handle.read(1024 * 1024)
+                if not block:
+                    break
+                destination.write(block)
+        os.replace(temporary, target)
+        restored += 1
+    return restored
 
 
 def restore_recovery_bundle(
@@ -119,44 +213,61 @@ def restore_recovery_bundle(
 ) -> dict[str, Any]:
     bundle_path = Path(bundle).resolve()
     root_path = Path(root).resolve()
-    if not bundle_path.is_file():
-        raise FileNotFoundError(f"Không tìm thấy recovery ZIP: {bundle_path}")
-    state = _read_bundle_state(bundle_path)
+    state = recovery_input_state(bundle_path)
     actual = str(state.get("run_fingerprint", ""))
     if actual != expected_fingerprint:
         raise RecoveryError(
-            "Recovery ZIP thuộc cấu hình/model khác: "
+            "Recovery input thuộc cấu hình/model khác: "
             f"expected={expected_fingerprint}, actual={actual or '<missing>'}."
         )
 
     root_path.mkdir(parents=True, exist_ok=True)
-    restored = 0
-    with zipfile.ZipFile(bundle_path) as archive:
-        files = [info for info in archive.infolist() if not info.is_dir()]
-        for info in files:
-            relative = PurePosixPath(info.filename)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise RecoveryError(f"Đường dẫn không an toàn trong recovery ZIP: {info.filename}")
-            target = root_path.joinpath(*relative.parts).resolve()
-            try:
-                target.relative_to(root_path)
-            except ValueError as exc:
-                raise RecoveryError(f"Đường dẫn vượt recovery root: {info.filename}") from exc
-        for info in files:
-            if info.is_dir():
-                continue
-            relative = PurePosixPath(info.filename)
-            target = root_path.joinpath(*relative.parts).resolve()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.restore.tmp")
-            with archive.open(info) as source, temporary.open("wb") as destination:
-                while True:
-                    block = source.read(1024 * 1024)
-                    if not block:
-                        break
-                    destination.write(block)
-            os.replace(temporary, target)
-            restored += 1
+    if bundle_path.is_dir():
+        restored = _restore_recovery_directory(
+            bundle_path,
+            root_path,
+            fingerprint=actual,
+        )
+    else:
+        restored = 0
+        with zipfile.ZipFile(bundle_path) as archive:
+            files = [info for info in archive.infolist() if not info.is_dir()]
+            if len(files) > 100_000:
+                raise RecoveryError(f"Recovery ZIP contains too many files: {len(files):,}")
+            total_uncompressed = sum(int(info.file_size) for info in files)
+            if total_uncompressed > 8 * 1024**3:
+                raise RecoveryError(
+                    f"Recovery ZIP is unexpectedly large when extracted: {total_uncompressed:,} bytes"
+                )
+            targets: set[str] = set()
+            for info in files:
+                if "\\" in info.filename or ":" in info.filename or "\x00" in info.filename:
+                    raise RecoveryError(f"Unsafe path in recovery ZIP: {info.filename}")
+                relative = PurePosixPath(info.filename)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise RecoveryError(f"Đường dẫn không an toàn trong recovery ZIP: {info.filename}")
+                target = root_path.joinpath(*relative.parts).resolve()
+                try:
+                    target.relative_to(root_path)
+                except ValueError as exc:
+                    raise RecoveryError(f"Đường dẫn vượt recovery root: {info.filename}") from exc
+                target_key = str(target).casefold()
+                if target_key in targets:
+                    raise RecoveryError(f"Duplicate recovery target: {info.filename}")
+                targets.add(target_key)
+            for info in files:
+                relative = PurePosixPath(info.filename)
+                target = root_path.joinpath(*relative.parts).resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(f".{target.name}.restore.tmp")
+                with archive.open(info) as source, temporary.open("wb") as destination:
+                    while True:
+                        block = source.read(1024 * 1024)
+                        if not block:
+                            break
+                        destination.write(block)
+                os.replace(temporary, target)
+                restored += 1
     print(
         f"[Recovery] restored {restored:,} files from {bundle_path}; "
         f"stage={state.get('stage')} completed={state.get('completed')}/{state.get('total')}",

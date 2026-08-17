@@ -65,10 +65,37 @@ def load_trace(path: Path) -> dict[str, dict[str, Any]]:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
-            row = json.loads(line)
-            question_id = str(row["question_id"])
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Trace JSON lỗi ở dòng {line_number}: {error}") from error
+            if not isinstance(row, dict):
+                raise ValueError(f"Trace dòng {line_number} không phải JSON Object.")
+            question_id = str(row.get("question_id", ""))
+            if not question_id:
+                raise ValueError(f"Trace thiếu question_id ở dòng {line_number}.")
             if question_id in result:
                 raise ValueError(f"Trace lặp ID {question_id} ở dòng {line_number}.")
+            candidates = row.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                raise ValueError(f"Trace {question_id} thiếu candidates không rỗng.")
+            sources = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    raise ValueError(f"Trace {question_id} có candidate không phải Object.")
+                source = candidate.get("source")
+                answer = candidate.get("answer")
+                if not isinstance(source, str) or not source:
+                    raise ValueError(f"Trace {question_id} có candidate thiếu source.")
+                if not isinstance(answer, str) or not answer.strip():
+                    raise ValueError(f"Trace {question_id}/{source} có answer rỗng/sai kiểu.")
+                sources.append(source)
+            if len(sources) != len(set(sources)):
+                raise ValueError(f"Trace {question_id} lặp candidate source: {sources}")
+            if row.get("selected") not in set(sources):
+                raise ValueError(
+                    f"Trace {question_id} selected={row.get('selected')!r} không có trong candidates."
+                )
             result[question_id] = row
     return result
 
@@ -122,6 +149,8 @@ def pick(
             < memory_threshold
         )
     ]
+    if not candidates:
+        raise RuntimeError("Không còn candidate hợp lệ sau bộ lọc BARTpho/train-memory.")
     ranked = sorted(candidates, key=lambda item: (-candidate_score(item, weights), item["source"]))
     qwen = next(
         (
@@ -155,6 +184,16 @@ def aggregate(
         "rouge_l_f1": mean(item[1] for item in rows) if rows else 0.0,
         "sources": dict(sources),
     }
+
+
+def better_primary_metric(candidate: dict[str, Any], baseline: dict[str, Any]) -> bool:
+    """Accept tuning only when the METEOR-primary holdout does not regress."""
+    meteor_delta = candidate["meteor_exact_probe"] - baseline["meteor_exact_probe"]
+    if meteor_delta > 1e-12:
+        return True
+    if abs(meteor_delta) <= 1e-12:
+        return candidate["rouge_l_f1"] > baseline["rouge_l_f1"] + 1e-12
+    return False
 
 
 def sampled_weights(base: dict[str, Any], rng: random.Random) -> dict[str, Any]:
@@ -229,6 +268,8 @@ def main() -> None:
             metrics[(question_id, candidate["source"])] = values
             source_rows[candidate["source"]].append(values)
             scored.append((values, candidate["source"]))
+        if not scored:
+            raise RuntimeError(f"Trace {question_id} không có candidate hợp lệ sau khi loại BARTpho.")
         best, source = max(scored, key=lambda item: (item[0][0], item[0][1]))
         oracle_rows.append(best)
         oracle_sources[source] += 1
@@ -236,6 +277,10 @@ def main() -> None:
     # Tune on deterministic template groups; report untouched groups separately.
     rng = random.Random(args.seed)
     tune_ids, holdout_ids = grouped_tune_holdout(ids, trace, args.seed)
+    if not tune_ids or not holdout_ids:
+        raise RuntimeError(
+            "Không tạo được tune/holdout template-group đều không rỗng; không xuất weights giả an toàn."
+        )
     best_weights = copy.deepcopy(base_weights)
     best_report = aggregate(
         tune_ids, trace, metrics, best_weights, base_memory_threshold
@@ -282,6 +327,18 @@ def main() -> None:
     tuned_holdout = aggregate(
         holdout_ids, trace, metrics, best_weights, best_memory_threshold
     )
+    base_holdout = aggregate(
+        holdout_ids, trace, metrics, base_weights, base_memory_threshold
+    )
+    accepted_on_holdout = better_primary_metric(tuned_holdout, base_holdout)
+    recommended_weights = best_weights if accepted_on_holdout else base_weights
+    recommended_memory_threshold = (
+        best_memory_threshold if accepted_on_holdout else base_memory_threshold
+    )
+    recommended_all = aggregate(
+        ids, trace, metrics, recommended_weights, recommended_memory_threshold
+    )
+    recommended_holdout = tuned_holdout if accepted_on_holdout else base_holdout
     report = {
         "count": len(ids),
         "selected_from_trace": selected_original,
@@ -305,12 +362,18 @@ def main() -> None:
             "holdout_count": len(holdout_ids),
             "split": "grouped by normalized question template; no template crosses tune/holdout",
             "tune": best_report,
-            "holdout": tuned_holdout,
-            "all": tuned_all,
-            "best_selection": best_weights,
+            "base_holdout": base_holdout,
+            "tuned_holdout": tuned_holdout,
+            "accepted_on_holdout": accepted_on_holdout,
+            "holdout": recommended_holdout,
+            "all": recommended_all,
+            "tuned_all": tuned_all,
+            "best_on_tune_selection": best_weights,
+            "recommended_selection": recommended_weights,
             "memory_candidate_threshold": {
                 "base": base_memory_threshold,
                 "best_on_tune": best_memory_threshold,
+                "recommended": recommended_memory_threshold,
                 "sweep": threshold_reports,
             },
         },
@@ -324,9 +387,14 @@ def main() -> None:
             yaml.safe_dump(
                 {
                     "schema": SELECTION_WEIGHTS_SCHEMA,
-                    "selection": best_weights,
+                    "selection": recommended_weights,
                     "retrieval": {
-                        "train_memory_candidate_threshold": best_memory_threshold
+                        "train_memory_candidate_threshold": recommended_memory_threshold
+                    },
+                    "calibration": {
+                        "accepted_on_holdout": accepted_on_holdout,
+                        "base_holdout": base_holdout,
+                        "tuned_holdout": tuned_holdout,
                     },
                 },
                 allow_unicode=True,

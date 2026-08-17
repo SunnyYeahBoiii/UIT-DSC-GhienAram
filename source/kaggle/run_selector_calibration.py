@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -8,6 +9,50 @@ from pathlib import Path
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT / "src"))
+
+from legalqa.data import load_qa, read_json  # noqa: E402
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _adapter_identity(path: Path) -> str:
+    """Path-independent identity used to collapse exported adapter aliases."""
+    config = json.loads((path / "adapter_config.json").read_text(encoding="utf-8"))
+    payload = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(_sha256_file(path / "adapter_model.safetensors").encode("ascii"))
+    return digest.hexdigest()
+
+
+def _adapter_preference(path: Path) -> tuple[int, int, str]:
+    canonical = 0 if path.name == "qwen-official-lora-split" else 1
+    return canonical, len(path.parts), path.as_posix()
+
+
+def _selector_split_identity(path: Path) -> str:
+    digest = hashlib.sha256()
+    for name in (
+        "selector_train.json",
+        "selector_dev_questions.json",
+        "selector_dev_references.json",
+    ):
+        payload = read_json(path / name)
+        canonical = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(canonical.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _find_split(root: Path) -> Path:
@@ -19,23 +64,79 @@ def _find_split(root: Path) -> Path:
             and (path.parent / "selector_dev_references.json").is_file()
         }
     )
-    if len(candidates) != 1:
-        raise RuntimeError(f"Cần đúng một selector split artifact: {candidates}")
-    return candidates[0]
+    identities: dict[str, list[Path]] = {}
+    for path in candidates:
+        identities.setdefault(_selector_split_identity(path), []).append(path)
+    if len(identities) != 1:
+        raise RuntimeError(f"Cần đúng một nội dung selector split artifact: {identities}")
+    aliases = next(iter(identities.values()))
+    selected = min(aliases, key=lambda path: (len(path.parts), path.as_posix()))
+    if len(aliases) > 1:
+        print(f"[Selector split] aliases cùng SHA-256; chọn {selected}: {aliases}", flush=True)
+    return selected
 
 
 def _find_dense(root: Path) -> Path:
-    candidates = []
+    candidates: dict[str, list[Path]] = {}
     for manifest_path in root.rglob("manifest.json"):
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             continue
         if payload.get("schema") == "global-dense-v1" and payload.get("status") == "complete":
-            candidates.append(manifest_path.parent)
+            identity = str(payload.get("identity", ""))
+            if not identity:
+                raise RuntimeError(f"Dense manifest hoàn tất nhưng thiếu identity: {manifest_path}")
+            candidates.setdefault(identity, []).append(manifest_path.parent)
     if len(candidates) != 1:
-        raise RuntimeError(f"Cần đúng một completed global dense index: {candidates}")
-    return candidates[0]
+        raise RuntimeError(f"Cần đúng một nội dung completed global dense index: {candidates}")
+    aliases = next(iter(candidates.values()))
+    selected = min(aliases, key=lambda path: (len(path.parts), path.as_posix()))
+    if len(aliases) > 1:
+        print(f"[Dense index] aliases cùng identity; chọn {selected}: {aliases}", flush=True)
+    return selected
+
+
+def _validate_selector_split(split_dir: Path, manifest: dict) -> dict[str, int]:
+    """Fail before GPU inference if a copied selector artifact is incomplete or mixed."""
+    questions = load_qa(split_dir / "selector_dev_questions.json")
+    train = load_qa(split_dir / "selector_train.json", require_answers=True)
+    references = read_json(split_dir / "selector_dev_references.json")
+    if not isinstance(references, dict):
+        raise ValueError("selector_dev_references.json phải là JSON Object.")
+    reference_ids: set[str] = set()
+    for raw_id, item in references.items():
+        question_id = str(raw_id)
+        if not question_id or not isinstance(item, dict):
+            raise ValueError(f"Reference selector không hợp lệ: {raw_id!r}")
+        answer = item.get("answer")
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError(f"Reference selector {question_id} thiếu answer dạng chuỗi.")
+        reference_ids.add(question_id)
+    question_ids = {item.question_id for item in questions}
+    train_ids = {item.question_id for item in train}
+    if question_ids != reference_ids:
+        raise RuntimeError(
+            "ID selector dev questions/references không khớp: "
+            f"missing_refs={sorted(question_ids - reference_ids)[:10]}, "
+            f"extra_refs={sorted(reference_ids - question_ids)[:10]}"
+        )
+    overlap = question_ids & train_ids
+    if overlap:
+        raise RuntimeError(f"Selector split bị leakage train/dev: {sorted(overlap)[:10]}")
+    actual = {"dev": len(question_ids), "train": len(train_ids), "total": len(question_ids | train_ids)}
+    for key, value in actual.items():
+        if int(manifest.get(key, -1)) != value:
+            raise RuntimeError(
+                f"Selector manifest {key}={manifest.get(key)!r} nhưng dữ liệu thực tế={value}."
+            )
+    if int(manifest.get("overlap_ids", 0)) != 0:
+        raise RuntimeError(f"Selector manifest khai báo overlap_ids != 0: {manifest!r}")
+    if not 300 <= actual["dev"] <= 500:
+        raise RuntimeError(
+            f"Candidate-oracle yêu cầu grouped dev 300–500 câu, nhận {actual['dev']}."
+        )
+    return actual
 
 
 def _validate_split_adapter(path: Path) -> Path:
@@ -82,12 +183,33 @@ def _find_split_adapter(root: Path, explicit: str | None = None) -> Path:
             continue
         if scope.get("train_scope") == "split":
             valid.append(candidate)
-    if len(valid) != 1:
+    if not valid:
         raise RuntimeError(
             "Cần đúng một completed QLoRA adapter scope='split' cho calibration; "
             f"tìm thấy: {valid}"
         )
-    return _validate_split_adapter(valid[0])
+    validated = [_validate_split_adapter(path) for path in valid]
+    identities: dict[str, list[Path]] = {}
+    for path in validated:
+        identities.setdefault(_adapter_identity(path), []).append(path)
+    if len(identities) != 1:
+        report = {
+            identity[:12]: [str(path) for path in paths]
+            for identity, paths in identities.items()
+        }
+        raise RuntimeError(
+            "Phát hiện nhiều QLoRA split adapter có trọng số KHÁC nhau; "
+            f"hãy chỉ attach một checkpoint: {report}"
+        )
+    aliases = next(iter(identities.values()))
+    selected = min(aliases, key=_adapter_preference)
+    if len(aliases) > 1:
+        print(
+            "[Selector calibration] các thư mục adapter là bản sao cùng SHA-256; "
+            f"chọn {selected}; aliases={aliases}",
+            flush=True,
+        )
+    return selected
 
 
 def main() -> None:
@@ -116,11 +238,8 @@ def main() -> None:
     if not split_manifest_path.is_file():
         raise FileNotFoundError(f"Selector split thiếu manifest.json: {split_dir}")
     split_manifest = json.loads(split_manifest_path.read_text(encoding="utf-8"))
-    grouped_dev_count = int(split_manifest.get("dev", 0))
-    if not 300 <= grouped_dev_count <= 500:
-        raise RuntimeError(
-            f"Candidate-oracle yêu cầu grouped dev 300–500 câu, nhận {grouped_dev_count}."
-        )
+    split_counts = _validate_selector_split(split_dir, split_manifest)
+    grouped_dev_count = split_counts["dev"]
     dense_dir = (
         Path(args.dense_index_input)
         if args.dense_index_input
@@ -155,6 +274,8 @@ def main() -> None:
         "25",
         "--generator-adapter",
         str(generator_adapter),
+        "--expected-adapter-scope",
+        "split",
     ]
     if args.resume_bundle:
         command.extend(["--resume-bundle", args.resume_bundle])
@@ -188,6 +309,9 @@ def main() -> None:
         "selected": report["selected_from_trace"],
         "candidate_oracle": report["candidate_oracle"],
         "tuned_holdout": report["tuning"]["holdout"],
+        "tuning_accepted_on_holdout": report["tuning"]["accepted_on_holdout"],
+        "base_holdout": report["tuning"]["base_holdout"],
+        "raw_tuned_holdout": report["tuning"]["tuned_holdout"],
         "weights": str(weights_path.resolve()),
         "full_report": str(report_path.resolve()),
     }

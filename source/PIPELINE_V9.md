@@ -61,14 +61,21 @@ Báo cáo gồm:
 4. train Qwen3.5-2B 4-bit NF4, LoRA r=8 mặc định;
 5. chỉ tính loss trên assistant answer;
 6. lưu checkpoint model, optimizer, scheduler, callback và RNG mỗi 20 optimizer steps;
-7. kiểm tra SHA-256 dữ liệu/pairs và toàn bộ hyperparameter trước khi resume.
+7. cập nhật nguyên tử `qlora_recovery_latest.zip` sau mỗi checkpoint;
+8. tự dừng an toàn theo ngân sách runtime (notebook mặc định 11 giờ), buộc tạo
+   checkpoint cuối và trả về manifest `status=paused` thay vì gắn nhầm nhãn hoàn tất;
+9. kiểm tra SHA-256 dữ liệu/pairs và toàn bộ hyperparameter trước khi resume.
 
 Hai scope không được trộn:
 
 - `split`: loại grouped-dev khỏi train, dùng để đo candidate oracle và selector trung thực.
 - `full`: train trên toàn bộ official train để tạo adapter cuối cho public inference.
 
-Mỗi state có `qlora_scope.json`; runner từ chối resume nếu scope không khớp. Nếu Kaggle gần hết giờ, Save Version toàn bộ `/kaggle/working/legalqa_qlora`, biến output đó thành Dataset, attach vào session mới và giữ nguyên hyperparameter.
+Mỗi state có `qlora_scope.json`; runner từ chối resume nếu scope không khớp. Khi
+notebook báo `PAUSED SAFELY`, Save Version, tạo Dataset từ
+`/kaggle/working/qlora_recovery_latest.zip`, attach vào session mới và giữ nguyên
+hyperparameter. Runner chấp nhận cả thư mục state và ZIP recovery, đồng thời chặn
+path traversal khi giải nén.
 
 ## 5. Inference và cache identity
 
