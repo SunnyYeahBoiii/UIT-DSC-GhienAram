@@ -8,8 +8,8 @@ from typing import Any, Callable
 
 from .answer_style import generation_plan
 from .prompts import AGENTIC_SYSTEM_PROMPT, SYSTEM_PROMPT, qwen_agentic_user_prompt, qwen_user_prompt
-from .retrieval import Evidence, deduplicate_and_merge_evidence, retrieval_confidence
-from .text import (
+from ..retrieval.retrieval import Evidence, deduplicate_and_merge_evidence, retrieval_confidence
+from ..core.text import (
     citations,
     document_numbers,
     legal_tokens,

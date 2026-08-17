@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from legalqa.recovery import RecoveryError, create_recovery_bundle, restore_recovery_bundle
+from legalqa.core.recovery import RecoveryError, create_recovery_bundle, restore_recovery_bundle
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ def test_v7_runner_exposes_recovery_controls():
 
 def test_inference_only_runner_never_builds_training_pairs():
     runner = (PROJECT / "kaggle" / "run_inference_only.py").read_text(encoding="utf-8")
-    models = (PROJECT / "src" / "legalqa" / "models.py").read_text(encoding="utf-8")
+    models = (PROJECT / "src" / "legalqa" / "core" / "models.py").read_text(encoding="utf-8")
     assert "prepare_sqlite_weak_pairs" not in runner
     assert "train_qwen_lora" not in runner
     assert "train_reranker" not in runner

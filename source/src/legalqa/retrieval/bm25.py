@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
-from .text import legal_tokens
+from ..core.text import legal_tokens
 
 
 class BM25Index:

@@ -16,11 +16,11 @@ for stream in (sys.stdout, sys.stderr):
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.config import load_config, require_local_model  # noqa: E402
-from legalqa.data import load_qa  # noqa: E402
-from legalqa.fingerprint import sha256_file  # noqa: E402
-from legalqa.generation import clean_answer  # noqa: E402
-from legalqa.prompts import SYSTEM_PROMPT  # noqa: E402
+from legalqa.core.config import load_config, require_local_model  # noqa: E402
+from legalqa.core.data import load_qa  # noqa: E402
+from legalqa.core.fingerprint import sha256_file  # noqa: E402
+from legalqa.generation.generation import clean_answer  # noqa: E402
+from legalqa.generation.prompts import SYSTEM_PROMPT  # noqa: E402
 
 
 class ChatDataset(torch.utils.data.Dataset):

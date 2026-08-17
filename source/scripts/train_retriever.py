@@ -13,7 +13,7 @@ import torch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.config import load_config, require_local_model  # noqa: E402
+from legalqa.core.config import load_config, require_local_model  # noqa: E402
 
 
 def read_pairs(path):

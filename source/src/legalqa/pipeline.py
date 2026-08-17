@@ -9,27 +9,27 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .data import Chunk, load_qa, write_json
-from .generation import (
+from .core.data import Chunk, load_qa, write_json
+from .generation.generation import (
     Candidate,
     extractive_candidate,
     make_qwen_agentic_candidate,
     make_qwen_candidate,
     make_train_memory_candidate,
 )
-from .index import LegalIndex
-from .legal_graph import asks_for_current_law, has_complex_cue
-from .models import (
+from .retrieval.index import LegalIndex
+from .retrieval.legal_graph import asks_for_current_law, has_complex_cue
+from .core.models import (
     CrossEncoderReranker,
     DenseEncoder,
     LegalSemanticEncoder,
     QwenTextGenerator,
     unload_model,
 )
-from .retrieval import Evidence, HybridRetriever, retrieval_confidence
-from .recovery import RecoveryManager
-from .text import citations, document_numbers
-from .verifier import score_candidates
+from .retrieval.retrieval import Evidence, HybridRetriever, retrieval_confidence
+from .core.recovery import RecoveryManager
+from .core.text import citations, document_numbers
+from .generation.verifier import score_candidates
 
 
 def _candidate_key(question, evidence: list[Evidence], source: str, cache_namespace: str | None) -> str:

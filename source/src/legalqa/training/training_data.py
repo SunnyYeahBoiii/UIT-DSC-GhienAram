@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .data import load_qa, write_jsonl
-from .index import LegalIndex
-from .text import citations, legal_tokens, numbers, overlap_ratio, words
+from ..core.data import load_qa, write_jsonl
+from ..retrieval.index import LegalIndex
+from ..core.text import citations, legal_tokens, numbers, overlap_ratio, words
 
 
 def _features(text: str) -> tuple[list[str], set[str], set[str]]:

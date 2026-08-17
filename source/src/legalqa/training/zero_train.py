@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from .text import citations, document_numbers
+from ..core.text import citations, document_numbers
 
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])(?:[ \t]+|\n+)|\n{2,}")

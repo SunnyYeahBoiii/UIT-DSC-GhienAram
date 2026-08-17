@@ -21,18 +21,18 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from legalqa.budget import count_system_budget  # noqa: E402
-from legalqa.answer_style import build_answer_style_profile  # noqa: E402
-from legalqa.config import load_config  # noqa: E402
-from legalqa.data import load_qa, write_json  # noqa: E402
-from legalqa.dense_store import ensure_global_dense_index  # noqa: E402
-from legalqa.fingerprint import (  # noqa: E402
+from legalqa.core.budget import count_system_budget  # noqa: E402
+from legalqa.generation.answer_style import build_answer_style_profile  # noqa: E402
+from legalqa.core.config import load_config  # noqa: E402
+from legalqa.core.data import load_qa, write_json  # noqa: E402
+from legalqa.storage.dense_store import ensure_global_dense_index  # noqa: E402
+from legalqa.core.fingerprint import (  # noqa: E402
     adapter_fingerprint,
     checkpoint_fingerprint,
     corpus_content_fingerprint,
     sha256_file,
 )
-from legalqa.models import (  # noqa: E402
+from legalqa.core.models import (  # noqa: E402
     CrossEncoderReranker,
     DenseEncoder,
     LegalSemanticEncoder,
@@ -40,13 +40,13 @@ from legalqa.models import (  # noqa: E402
     unload_model,
 )
 from legalqa.pipeline import generate_from_evidence  # noqa: E402
-from legalqa.recovery import RecoveryManager, restore_recovery_bundle  # noqa: E402
-from legalqa.selector_schema import SELECTION_WEIGHTS_SCHEMA  # noqa: E402
-from legalqa.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
-from legalqa.sqlite_store import build_sqlite_store  # noqa: E402
-from legalqa.sqlite_store import SQLiteLegalStore  # noqa: E402
-from legalqa.submission import create_submission  # noqa: E402
-from legalqa.train_memory import ensure_train_memory_index  # noqa: E402
+from legalqa.core.recovery import RecoveryManager, restore_recovery_bundle  # noqa: E402
+from legalqa.core.selector_schema import SELECTION_WEIGHTS_SCHEMA  # noqa: E402
+from legalqa.storage.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
+from legalqa.storage.sqlite_store import build_sqlite_store  # noqa: E402
+from legalqa.storage.sqlite_store import SQLiteLegalStore  # noqa: E402
+from legalqa.core.submission import create_submission  # noqa: E402
+from legalqa.storage.train_memory import ensure_train_memory_index  # noqa: E402
 from run_end_to_end import (  # noqa: E402
     find_corpus,
     find_model,

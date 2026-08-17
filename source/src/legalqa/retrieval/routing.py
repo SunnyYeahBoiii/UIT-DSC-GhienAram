@@ -5,7 +5,7 @@ from typing import Any
 
 from .legal_graph import has_complex_cue
 from .retrieval import Evidence, retrieval_confidence
-from .text import citations, document_numbers, normalize_text
+from ..core.text import citations, document_numbers, normalize_text
 
 
 @dataclass(frozen=True)

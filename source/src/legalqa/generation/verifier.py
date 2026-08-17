@@ -6,8 +6,8 @@ from typing import Any
 
 from .answer_style import generation_plan
 from .generation import Candidate
-from .retrieval import Evidence, retrieval_confidence
-from .text import citations, length_prior, numbers, overlap_ratio, split_sentences, words
+from ..retrieval.retrieval import Evidence, retrieval_confidence
+from ..core.text import citations, length_prior, numbers, overlap_ratio, split_sentences, words
 
 
 def _duplicate_ratio(answer: str) -> float:

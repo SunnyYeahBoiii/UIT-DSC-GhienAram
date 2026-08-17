@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .models import DenseEncoder
+from ..core.models import DenseEncoder
 from .sqlite_store import SQLiteLegalStore
 
 

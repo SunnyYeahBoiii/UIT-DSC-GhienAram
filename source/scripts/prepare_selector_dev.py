@@ -11,8 +11,8 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.data import load_qa, qa_as_object, write_json  # noqa: E402
-from legalqa.text import question_type, words  # noqa: E402
+from legalqa.core.data import load_qa, qa_as_object, write_json  # noqa: E402
+from legalqa.core.text import question_type, words  # noqa: E402
 
 
 def template_key(question: str) -> str:

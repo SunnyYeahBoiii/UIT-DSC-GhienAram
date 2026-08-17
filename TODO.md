@@ -9,7 +9,7 @@ cho phần noise Lớp A/B không chặn hết (model vẫn có xác suất khô
 ### Vị trí implement
 
 - Hàm mới `finalize_answer(question: str, answer: str, *, truncated: bool = False) -> tuple[str, dict]`
-  trong `source/src/legalqa/generation.py`, đặt cạnh `clean_answer()`/`compact_generated_answer()`.
+  trong `source/src/legalqa/generation/generation.py`, đặt cạnh `clean_answer()`/`compact_generated_answer()`.
 - Gọi tại chokepoint duy nhất mọi answer đi qua trước khi vào `predictions.json`/`submission.json`:
   `source/src/legalqa/pipeline.py:555-556`
   ```python
@@ -36,8 +36,8 @@ cho phần noise Lớp A/B không chặn hết (model vẫn có xác suất khô
 
 ### Tái dùng, không viết lại
 
-Trước khi viết `finalize_answer`, di chuyển 3 hàm generic từ `source/src/legalqa/zero_train.py`
-sang `source/src/legalqa/text.py` (thuần regex/string, không phụ thuộc sklearn — tránh kéo
+Trước khi viết `finalize_answer`, di chuyển 3 hàm generic từ `source/src/legalqa/training/zero_train.py`
+sang `source/src/legalqa/core/text.py` (thuần regex/string, không phụ thuộc sklearn — tránh kéo
 `sklearn`/`TfidfVectorizer` vào hot path của `generation.py`, hiện `zero_train.py` không được
 import bởi pipeline chính):
 
@@ -46,7 +46,7 @@ import bởi pipeline chính):
 - `close_truncated_answer`
 - helper `_sentence_fingerprint` + `SENTENCE_SPLIT_RE`/`FINGERPRINT_RE`
 
-`zero_train.py` sau đó import lại từ `.text` để giữ nguyên API cho
+`zero_train.py` sau đó import lại từ `..core.text` để giữ nguyên API cho
 `tests/test_zero_train.py` và `scripts/build_v8_zero_train.py`.
 
 ### Verification khi làm

@@ -5,10 +5,10 @@ from typing import Any
 
 import numpy as np
 
-from .data import Chunk
+from ..core.data import Chunk
 from .index import LegalIndex
-from .models import CrossEncoderReranker, DenseEncoder, sigmoid
-from .text import citations, document_numbers, legal_tokens, numbers
+from ..core.models import CrossEncoderReranker, DenseEncoder, sigmoid
+from ..core.text import citations, document_numbers, legal_tokens, numbers
 
 
 @dataclass
@@ -195,8 +195,6 @@ def deduplicate_and_merge_evidence(
         if len(group) == 1:
             candidate = item
         else:
-            from .data import Chunk
-
             text = ""
             for member in group:
                 text = _merge_text(text, member.chunk.text)

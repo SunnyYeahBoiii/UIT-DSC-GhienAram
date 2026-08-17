@@ -8,9 +8,9 @@ from typing import Any
 
 import numpy as np
 
-from .data import load_qa
-from .fingerprint import sha256_file
-from .models import DenseEncoder
+from ..core.data import load_qa
+from ..core.fingerprint import sha256_file
+from ..core.models import DenseEncoder
 
 
 TRAIN_MEMORY_SCHEMA = "train-memory-v1"

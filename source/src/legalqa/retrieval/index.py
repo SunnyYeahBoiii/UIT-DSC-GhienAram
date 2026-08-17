@@ -8,8 +8,8 @@ import numpy as np
 
 from .bm25 import BM25Index
 from .chunking import chunk_documents
-from .data import Chunk, load_chunks, load_corpus, write_chunks
-from .models import DenseEncoder, unload_model
+from ..core.data import Chunk, load_chunks, load_corpus, write_chunks
+from ..core.models import DenseEncoder, unload_model
 
 
 class LegalIndex:

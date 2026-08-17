@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from .data import Chunk, Document
-from .text import normalize_text
+from ..core.data import Chunk, Document
+from ..core.text import normalize_text
 
 
 HEADING_RE = re.compile(

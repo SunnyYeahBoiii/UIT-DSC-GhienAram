@@ -12,8 +12,8 @@ import torch
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.config import load_config, require_local_model  # noqa: E402
-from legalqa.data import load_qa  # noqa: E402
+from legalqa.core.config import load_config, require_local_model  # noqa: E402
+from legalqa.core.data import load_qa  # noqa: E402
 
 
 class QADataset(torch.utils.data.Dataset):

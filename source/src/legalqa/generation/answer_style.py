@@ -5,8 +5,8 @@ import re
 from collections import Counter
 from typing import Any, Iterable
 
-from .data import QARecord
-from .text import citations, numbers, question_type, split_sentences, words
+from ..core.data import QARecord
+from ..core.text import citations, numbers, question_type, split_sentences, words
 
 
 STYLE_PROFILE_SCHEMA = "answer-style-v1"

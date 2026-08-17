@@ -8,4 +8,4 @@ Luồng v9.2 dùng ba notebook:
 2. `legalqa_dsc2026_v9_selector_calibration_t4.ipynb` — grouped-dev, candidate oracle và selector tuning.
 3. `legalqa_dsc2026_inference_only_t4.ipynb` — dựng dense/train-memory index hoặc sinh public submission.
 
-Xem `README_INFERENCE_ONLY_T4.md` và `../PIPELINE_V9.md` để biết thứ tự chạy và artifact phải lưu giữa các Kaggle session.
+Xem `README_INFERENCE_ONLY_T4.md` và `../docs/PIPELINE_V9.md` để biết thứ tự chạy và artifact phải lưu giữa các Kaggle session.

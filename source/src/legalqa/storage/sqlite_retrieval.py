@@ -7,14 +7,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .data import Chunk, QARecord
+from ..core.data import Chunk, QARecord
 from .dense_store import ensure_global_dense_index, search_global_dense_index
-from .legal_graph import asks_for_current_law, temporal_relation_adjustment
-from .models import CrossEncoderReranker, DenseEncoder, sigmoid, unload_model
-from .retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
-from .routing import decide_route
+from ..retrieval.legal_graph import asks_for_current_law, temporal_relation_adjustment
+from ..core.models import CrossEncoderReranker, DenseEncoder, sigmoid, unload_model
+from ..retrieval.retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
+from ..retrieval.routing import decide_route
 from .sqlite_store import SQLiteHit, SQLiteLegalStore
-from .text import citations, document_numbers, numbers
+from ..core.text import citations, document_numbers, numbers
 from .train_memory import ensure_train_memory_index, search_train_memory
 
 

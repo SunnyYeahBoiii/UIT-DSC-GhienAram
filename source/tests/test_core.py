@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from legalqa.bm25 import BM25Index
-from legalqa.answer_style import build_answer_style_profile, generation_plan
-from legalqa.chunking import chunk_documents
-from legalqa.data import Chunk, Document, QARecord, deterministic_split, write_json
-from legalqa.dense_store import ensure_global_dense_index, search_global_dense_index
-from legalqa.generation import Candidate, make_qwen_agentic_candidate, make_train_memory_candidate, parse_agentic_step
-from legalqa.models import GenerationResult
-from legalqa.fingerprint import adapter_fingerprint, checkpoint_fingerprint, corpus_content_fingerprint
-from legalqa.index import build_index
-from legalqa.metrics import meteor_exact, rouge_l_f1
-from legalqa.legal_graph import temporal_relation_adjustment
+from legalqa.retrieval.bm25 import BM25Index
+from legalqa.generation.answer_style import build_answer_style_profile, generation_plan
+from legalqa.retrieval.chunking import chunk_documents
+from legalqa.core.data import Chunk, Document, QARecord, deterministic_split, write_json
+from legalqa.storage.dense_store import ensure_global_dense_index, search_global_dense_index
+from legalqa.generation.generation import Candidate, make_qwen_agentic_candidate, make_train_memory_candidate, parse_agentic_step
+from legalqa.core.models import GenerationResult
+from legalqa.core.fingerprint import adapter_fingerprint, checkpoint_fingerprint, corpus_content_fingerprint
+from legalqa.retrieval.index import build_index
+from legalqa.core.metrics import meteor_exact, rouge_l_f1
+from legalqa.retrieval.legal_graph import temporal_relation_adjustment
 from legalqa.pipeline import (
     _append_candidate,
     _candidate_evidence,
@@ -26,22 +26,22 @@ from legalqa.pipeline import (
     generate_from_evidence,
     run_pipeline,
 )
-from legalqa.prompts import qwen_user_prompt
-from legalqa.retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
-from legalqa.routing import decide_route
-from legalqa.selector_schema import SELECTION_WEIGHTS_SCHEMA
-from legalqa.submission import create_submission
-from legalqa.sqlite_retrieval import (
+from legalqa.generation.prompts import qwen_user_prompt
+from legalqa.retrieval.retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
+from legalqa.retrieval.routing import decide_route
+from legalqa.core.selector_schema import SELECTION_WEIGHTS_SCHEMA
+from legalqa.core.submission import create_submission
+from legalqa.storage.sqlite_retrieval import (
     _filter_graph_candidates,
     RetrievalBatch,
     load_retrieval_cache,
     retrieve_sqlite_batch,
     sqlite_bm25_search_fn,
 )
-from legalqa.sqlite_store import SQLiteLegalStore, build_sqlite_store, prepare_sqlite_weak_pairs
-from legalqa.verifier import score_candidates
-from legalqa.text import document_numbers
-from legalqa.train_memory import ensure_train_memory_index, search_train_memory
+from legalqa.storage.sqlite_store import SQLiteLegalStore, build_sqlite_store, prepare_sqlite_weak_pairs
+from legalqa.generation.verifier import score_candidates
+from legalqa.core.text import document_numbers
+from legalqa.storage.train_memory import ensure_train_memory_index, search_train_memory
 
 
 def minimal_config(tmp_path: Path) -> dict:
@@ -94,7 +94,7 @@ def test_legal_chunking_and_bm25(tmp_path):
 
 
 def test_official_corpus_directory_schema(tmp_path):
-    from legalqa.data import load_corpus
+    from legalqa.core.data import load_corpus
     config = minimal_config(tmp_path)
     config["corpus"]["text_fields"].insert(0, "passage")
     config["corpus"]["title_fields"].insert(0, "name")
@@ -693,7 +693,7 @@ def test_train_memory_candidate_and_fewshot_prompt_are_gated(tmp_path):
 
 
 def test_generated_answer_compaction_removes_loops_and_stops_on_sentence_boundary():
-    from legalqa.generation import compact_generated_answer
+    from legalqa.generation.generation import compact_generated_answer
 
     repeated = (
         "Theo Điều 1, người lao động được nghỉ phép mười ngày. "

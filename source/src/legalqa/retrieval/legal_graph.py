@@ -4,7 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from .text import document_numbers, normalize_text
+from ..core.text import document_numbers, normalize_text
 
 
 RELATION_PRIORITY = {

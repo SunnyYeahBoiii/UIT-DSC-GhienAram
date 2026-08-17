@@ -18,11 +18,11 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from legalqa.answer_style import build_answer_style_profile  # noqa: E402
-from legalqa.config import load_config  # noqa: E402
-from legalqa.data import load_qa, write_json  # noqa: E402
-from legalqa.fingerprint import corpus_content_fingerprint, sha256_file  # noqa: E402
-from legalqa.sqlite_store import build_sqlite_store, prepare_sqlite_weak_pairs  # noqa: E402
+from legalqa.generation.answer_style import build_answer_style_profile  # noqa: E402
+from legalqa.core.config import load_config  # noqa: E402
+from legalqa.core.data import load_qa, write_json  # noqa: E402
+from legalqa.core.fingerprint import corpus_content_fingerprint, sha256_file  # noqa: E402
+from legalqa.storage.sqlite_store import build_sqlite_store, prepare_sqlite_weak_pairs  # noqa: E402
 from run_end_to_end import (  # noqa: E402
     find_corpus,
     find_model,

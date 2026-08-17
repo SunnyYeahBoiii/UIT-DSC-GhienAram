@@ -39,7 +39,7 @@ Question
   -> submission.zip
 ```
 
-Chi tiết nằm trong [PIPELINE_V9.md](PIPELINE_V9.md). Hướng dẫn Kaggle nằm trong [kaggle/README_INFERENCE_ONLY_T4.md](kaggle/README_INFERENCE_ONLY_T4.md).
+Chi tiết nằm trong [docs/PIPELINE_V9.md](docs/PIPELINE_V9.md). Hướng dẫn Kaggle nằm trong [kaggle/README_INFERENCE_ONLY_T4.md](kaggle/README_INFERENCE_ONLY_T4.md).
 
 ## Thứ tự chạy khuyến nghị
 

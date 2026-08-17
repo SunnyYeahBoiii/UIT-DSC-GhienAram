@@ -17,9 +17,9 @@ import yaml
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.data import load_qa, read_json, write_json  # noqa: E402
-from legalqa.metrics import meteor_exact, rouge_l_f1  # noqa: E402
-from legalqa.selector_schema import SELECTION_WEIGHTS_SCHEMA  # noqa: E402
+from legalqa.core.data import load_qa, read_json, write_json  # noqa: E402
+from legalqa.core.metrics import meteor_exact, rouge_l_f1  # noqa: E402
+from legalqa.core.selector_schema import SELECTION_WEIGHTS_SCHEMA  # noqa: E402
 
 
 POSITIVE = (

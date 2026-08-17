@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from .answer_style import generation_plan
-from .retrieval import Evidence
-from .text import strip_source_noise
+from ..retrieval.retrieval import Evidence
+from ..core.text import strip_source_noise
 
 
 SYSTEM_PROMPT = """Bạn là hệ thống trả lời câu hỏi pháp luật Việt Nam trong một cuộc thi học thuật.

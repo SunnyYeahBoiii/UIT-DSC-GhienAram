@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from .chunking import chunk_documents
-from .data import Chunk, iter_corpus, load_qa, write_jsonl
-from .legal_graph import RelationEdge, document_aliases, extract_relation_mentions
-from .text import citations, document_numbers, legal_tokens, numbers, overlap_ratio, words
+from ..retrieval.chunking import chunk_documents
+from ..core.data import Chunk, iter_corpus, load_qa, write_jsonl
+from ..retrieval.legal_graph import RelationEdge, document_aliases, extract_relation_mentions
+from ..core.text import citations, document_numbers, legal_tokens, numbers, overlap_ratio, words
 
 
 STORE_SCHEMA_VERSION = "4"
