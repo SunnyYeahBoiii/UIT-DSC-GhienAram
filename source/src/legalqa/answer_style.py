@@ -49,7 +49,7 @@ def _summarize(records: Iterable[QARecord]) -> dict[str, Any]:
         "count": count,
         "words": {
             f"p{int(probability * 100):02d}": _percentile(word_counts, probability)
-            for probability in (0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
+            for probability in (0.10, 0.25, 0.50, 0.60, 0.75, 0.90, 0.95)
         },
         "sentences": {
             f"p{int(probability * 100):02d}": _percentile(sentence_counts, probability)
@@ -106,7 +106,9 @@ def generation_plan(
             target_words = int(distribution.get("p75", distribution.get("p50", 220)))
             maximum_words = int(distribution.get("p95", distribution.get("p90", 420)))
         else:
-            target_words = int(distribution.get("p50", 140))
+            # p50 làm target khiến ~nửa số câu cùng loại trong train dài hơn
+            # mục tiêu; dùng p60 để bớt lệch xuống dưới trung vị thật.
+            target_words = int(distribution.get("p60", distribution.get("p50", 140)))
             maximum_words = int(distribution.get("p90", 280))
         minimum_words = int(distribution.get("p10", 35))
         learned = True

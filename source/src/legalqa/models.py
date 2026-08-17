@@ -232,6 +232,7 @@ class QwenTextGenerator:
             "max_new_tokens": token_limit,
             "do_sample": bool(cfg.get("do_sample", False)),
             "repetition_penalty": float(cfg.get("repetition_penalty", 1.0)),
+            "no_repeat_ngram_size": int(cfg.get("no_repeat_ngram_size", 5)),
             "pad_token_id": getattr(self.processor.tokenizer, "pad_token_id", None),
             "eos_token_id": getattr(self.processor.tokenizer, "eos_token_id", None),
         }
