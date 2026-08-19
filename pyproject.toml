@@ -31,7 +31,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-train = []
+# nltk + rouge-score: chấm điểm local đúng công thức BTC (scripts/validate_official_score.py,
+# scripts/select_best_sft_checkpoint.py). Trên Kaggle offline dùng wheelhouse_scoring/ (tách khỏi
+# wheelhouse/ 12 wheel để không phá SOURCE_CONTRACT.json của 3 notebook v9.2 khác); extra này chỉ
+# phục vụ cài local qua pip.
+train = ["nltk>=3.9", "rouge-score>=0.1.2"]
 dev = ["pytest>=8.3"]
 
 [project.scripts]

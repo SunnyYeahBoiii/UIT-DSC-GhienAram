@@ -78,3 +78,35 @@ def evaluate_predictions(predictions: dict[str, str], references: dict[str, str]
         "note": "METEOR ở đây chỉ khớp token chính xác; leaderboard của BTC là nguồn điểm chính thức.",
     }
 
+
+def evaluate_predictions_official(predictions: dict[str, str], references: dict[str, str]) -> dict[str, Any]:
+    """METEOR/ROUGE-L đúng công thức scoring.py của BTC (nltk WordNet meteor_score + rouge_score RougeL,
+    use_stemmer=False, không tokenize riêng). Cần `nltk` + `rouge-score` cài sẵn và corpus wordnet/omw-1.4
+    đã tải trước (nltk.download('wordnet'); nltk.download('omw-1.4')) vì môi trường chấm chạy offline.
+    """
+    if set(predictions) != set(references):
+        missing = sorted(set(references) - set(predictions))[:10]
+        extra = sorted(set(predictions) - set(references))[:10]
+        raise ValueError(f"ID không khớp. Thiếu={missing}; thừa={extra}")
+    from nltk.translate.meteor_score import meteor_score
+    from rouge_score import rouge_scorer
+
+    rouge_scoring = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=False)
+    rows = []
+    for question_id in references:
+        prediction, reference = str(predictions[question_id]), str(references[question_id])
+        rows.append(
+            {
+                "question_id": question_id,
+                "meteor": meteor_score([reference.split()], prediction.split()),
+                "rouge_l_f1": rouge_scoring.score(reference, prediction)["rougeL"].fmeasure,
+            }
+        )
+    return {
+        "count": len(rows),
+        "meteor": mean(row["meteor"] for row in rows) if rows else 0.0,
+        "rouge_l_f1": mean(row["rouge_l_f1"] for row in rows) if rows else 0.0,
+        "per_question": rows,
+        "note": "METEOR/ROUGE-L tính đúng công thức chấm điểm của BTC (Scoring-Program-Task-LegalQA/scoring.py).",
+    }
+
