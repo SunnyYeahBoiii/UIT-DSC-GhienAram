@@ -8,6 +8,11 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 def test_public_v5007_selector_is_frozen() -> None:
+    contract = json.loads(
+        (PROJECT / "SOURCE_CONTRACT.json").read_text(encoding="utf-8")
+    )
+    assert contract["release"] == "0.9.2-v5007"
+
     payload = yaml.safe_load(
         (PROJECT / "configs" / "selector_v5007.yaml").read_text(encoding="utf-8")
     )

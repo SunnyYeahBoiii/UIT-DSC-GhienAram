@@ -2,7 +2,7 @@
 
 Đây là mốc an toàn để phát triển sau thất bại của selector v9.3 (0.4272).
 
-- Runtime: source contract `0.9.2`, selector schema
+- Runtime: source contract `0.9.2-v5007`, selector schema
   `selector-weights-v3-agentic-evidence`.
 - Generator: Qwen3.5-2B + completed QLoRA adapter `full`.
 - Frozen selector: `configs/selector_v5007.yaml`.

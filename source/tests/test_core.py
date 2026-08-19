@@ -139,7 +139,7 @@ def test_source_contract_matches_runtime_and_notebooks():
     contract = json.loads((project / "SOURCE_CONTRACT.json").read_text(encoding="utf-8"))
     assert contract == {
         "schema": "legalqa-source-contract-v1",
-        "release": "0.9.2",
+        "release": "0.9.2-v5007",
         "agentic_namespace": "agentic-v3",
         "cache_schema": "inference-v7-agentic-error-isolation",
         "selector_schema": SELECTION_WEIGHTS_SCHEMA,
@@ -166,6 +166,7 @@ def test_source_contract_matches_runtime_and_notebooks():
     ):
         source = (project / "kaggle" / notebook).read_text(encoding="utf-8")
         assert "SOURCE_CONTRACT.json" in source
+        assert contract["release"] in source
         assert contract["selector_schema"] in source
         assert contract["source_alias_policy"] in source
         assert contract["offline_wheel_profile"] in source
