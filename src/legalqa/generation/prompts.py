@@ -32,8 +32,9 @@ def _render_evidence_sections(
     used = 0
     for rank, item in enumerate(evidence, start_rank):
         relation = f" | quan hệ {item.relation_type}" if item.relation_type else ""
+        document_name = item.chunk.metadata.get("_document_name") or item.chunk.doc_id
         header = (
-            f"[CĂN CỨ {rank} | văn bản {item.chunk.doc_id} | "
+            f"[CĂN CỨ {rank} | văn bản {document_name} | "
             f"{item.chunk.heading or 'đoạn ' + item.chunk.chunk_id}{relation}]"
         )
         text = item.chunk.text.strip()
