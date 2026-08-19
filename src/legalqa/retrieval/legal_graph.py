@@ -15,6 +15,21 @@ RELATION_PRIORITY = {
     "REFERENCES": 0.45,
 }
 
+_DOC_TYPE_PREFIX_RE = re.compile(
+    r"(?i)^(luat|bo[-_ ]luat|nghi[-_ ]dinh|thong[-_ ]tu|quyet[-_ ]dinh|"
+    r"nghi[-_ ]quyet|phap[-_ ]lenh|cong[-_ ]van)\b"
+)
+_DOC_TYPE_LABELS = {
+    "luat": "Luật",
+    "bo luat": "Bộ luật",
+    "nghi dinh": "Nghị định",
+    "thong tu": "Thông tư",
+    "quyet dinh": "Quyết định",
+    "nghi quyet": "Nghị quyết",
+    "phap lenh": "Pháp lệnh",
+    "cong van": "Công văn",
+}
+
 CURRENT_LAW_RE = re.compile(
     r"\b(?:hiện hành|hiện nay|mới nhất|còn hiệu lực|đang có hiệu lực|"
     r"thay thế|bãi bỏ|sửa đổi|bổ sung)\b",
@@ -64,6 +79,38 @@ def document_aliases(title: str, text: str) -> set[str]:
         lead,
     )
     return set().union(*(document_numbers(value) for value in header_matches)) if header_matches else set()
+
+
+def _doc_type_label_from_slug(title: str) -> str:
+    match = _DOC_TYPE_PREFIX_RE.match(title.strip())
+    if not match:
+        return ""
+    key = re.sub(r"[-_]+", " ", match.group(1).lower())
+    return _DOC_TYPE_LABELS.get(key, "")
+
+
+def _humanize_slug(title: str) -> str:
+    text = title.strip()
+    if not text:
+        return ""
+    text = re.sub(r"-\d+$", "", text)
+    words = [word for word in text.split("-") if word]
+    return " ".join(words)
+
+
+def resolve_document_name(title: str) -> str:
+    """Chọn 1 tên hiển thị ổn định cho văn bản (dùng trong prompt cho model).
+
+    Ưu tiên số hiệu chuẩn lấy riêng từ title/slug của chính văn bản — không
+    quét thân bài như `document_aliases`, vì thân bài (lời mở đầu) thường
+    trích dẫn số hiệu của NHIỀU văn bản khác, dễ chọn nhầm tên.
+    """
+    numbers = document_numbers(title)
+    if len(numbers) == 1:
+        number = next(iter(numbers))
+        label = _doc_type_label_from_slug(title)
+        return f"{label} {number}".strip()
+    return _humanize_slug(title)
 
 
 def _relation_type(context: str) -> tuple[str, float, bool]:
