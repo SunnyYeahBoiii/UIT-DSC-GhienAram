@@ -5,6 +5,7 @@ from typing import Iterable
 
 from ..core.data import Chunk, Document
 from ..core.text import normalize_text
+from .legal_graph import resolve_document_name
 
 
 HEADING_RE = re.compile(
@@ -70,6 +71,7 @@ def chunk_documents(documents: Iterable[Document], config: dict) -> list[Chunk]:
     cfg = config["corpus"]
     result: list[Chunk] = []
     for document in documents:
+        document_name = resolve_document_name(document.title)
         section_number = 0
         for heading, section in _legal_sections(document.text):
             windows = _window_text(
@@ -97,6 +99,7 @@ def chunk_documents(documents: Iterable[Document], config: dict) -> list[Chunk]:
                             "_section_index": section_number,
                             "_window_index": window_number,
                             "_legal_heading": heading,
+                            "_document_name": document_name,
                         },
                     )
                 )
