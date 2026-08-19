@@ -17,7 +17,7 @@ from legalqa.core.models import GenerationResult
 from legalqa.core.fingerprint import adapter_fingerprint, checkpoint_fingerprint, corpus_content_fingerprint
 from legalqa.retrieval.index import build_index
 from legalqa.core.metrics import meteor_exact, rouge_l_f1
-from legalqa.retrieval.legal_graph import temporal_relation_adjustment
+from legalqa.retrieval.legal_graph import resolve_document_name, temporal_relation_adjustment
 from legalqa.pipeline import (
     _append_candidate,
     _candidate_evidence,
@@ -26,7 +26,7 @@ from legalqa.pipeline import (
     generate_from_evidence,
     run_pipeline,
 )
-from legalqa.generation.prompts import qwen_user_prompt
+from legalqa.generation.prompts import _render_evidence_sections, qwen_user_prompt
 from legalqa.retrieval.retrieval import Evidence, deduplicate_and_merge_evidence, rank_agentic_evidence
 from legalqa.retrieval.routing import decide_route
 from legalqa.core.selector_schema import SELECTION_WEIGHTS_SCHEMA
@@ -91,6 +91,33 @@ def test_legal_chunking_and_bm25(tmp_path):
     assert chunks and all(chunk.doc_id == "vb1" for chunk in chunks)
     index = BM25Index().fit(chunk.text for chunk in chunks)
     assert index.search("nghỉ phép người lao động", 1)
+
+
+def test_legal_chunking_attaches_document_name_metadata(tmp_path):
+    config = minimal_config(tmp_path)
+    title = "Thong-tu-33-2018-TT-BLDTBXH-dao-tao-trinh-do-cao-dang"
+    docs = [Document("vb1", "Điều 1. Phạm vi áp dụng\nNội dung điều 1.", title)]
+    chunks = chunk_documents(docs, config)
+    assert chunks
+    assert all(chunk.metadata["_document_name"] == "Thông tư 33/2018/TT-BLDTBXH" for chunk in chunks)
+
+
+def test_prompt_evidence_header_uses_document_name_not_raw_id():
+    chunk = Chunk(
+        "vb1::s0000::w000", "234274", "Nội dung.", "slug-thô", "Điều 1",
+        {"_document_name": "Thông tư 33/2018/TT-BLDTBXH"},
+    )
+    text, count = _render_evidence_sections([Evidence(chunk, 1.0)], 4000)
+    assert count == 1
+    assert "văn bản Thông tư 33/2018/TT-BLDTBXH" in text
+    assert "văn bản 234274" not in text
+
+
+def test_prompt_evidence_header_falls_back_to_doc_id_when_name_missing():
+    chunk = Chunk("vb1::s0000::w000", "234274", "Nội dung.", "slug-thô", "Điều 1", {})
+    text, count = _render_evidence_sections([Evidence(chunk, 1.0)], 4000)
+    assert count == 1
+    assert "văn bản 234274" in text
 
 
 def test_official_corpus_directory_schema(tmp_path):
@@ -352,6 +379,21 @@ def test_document_number_parser_supports_official_slug_titles():
     title = "Thong-tu-12-2012-TT-BTP-bieu-mau-to-chuc-hoat-dong-trong-tai"
     assert document_numbers(title) == {"12/2012/TT-BTP"}
     assert document_numbers("Nghị định số 10 / 2020 / NĐ-CP") == {"10/2020/ND-CP"}
+
+
+def test_resolve_document_name_from_clean_slug():
+    title = "Thong-tu-33-2018-TT-BLDTBXH-dao-tao-trinh-do-cao-dang-trung-cap-so-cap-hinh-thuc-dao-tao-tu-xa-411766"
+    assert resolve_document_name(title) == "Thông tư 33/2018/TT-BLDTBXH"
+
+
+def test_resolve_document_name_falls_back_when_title_ambiguous():
+    # Không thuộc danh sách loại văn bản slug nhận diện được (QCVN) -> document_numbers
+    # rỗng -> phải fallback nhân hoá slug, không được trả chuỗi rỗng.
+    title = "QCVN-02-2017-BCT-mot-so-noi-dung-ky-thuat-465663"
+    name = resolve_document_name(title)
+    assert name
+    assert "/" not in name
+    assert name == "QCVN 02 2017 BCT mot so noi dung ky thuat"
 
 
 def test_sqlite_global_chunk_fts_and_replacement_graph(tmp_path):
