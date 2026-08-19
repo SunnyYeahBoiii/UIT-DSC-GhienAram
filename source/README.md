@@ -1,5 +1,10 @@
 # UIT DSC 2026 Task 2 — LegalQA v9.2
 
+Baseline public đang được khóa tại METEOR **0.5007** bằng
+`configs/selector_v5007.yaml`. Notebook inference mặc định bỏ qua selector
+attach ngoài để tránh vô tình dùng lại calibration v9.3 bị regression; xem
+`BASELINE_V5007.md`.
+
 Pipeline offline cho Kaggle T4, chỉ dùng dữ liệu chính thức và các checkpoint mã nguồn mở đã được BTC phê duyệt. Tổng tham số runtime vẫn được runner kiểm tra phải nhỏ hơn 4B. BARTpho đã bị loại.
 
 ## Những phần mới trong v9/v9.1

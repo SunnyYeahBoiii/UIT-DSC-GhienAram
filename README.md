@@ -1,5 +1,10 @@
 # UIT DSC 2026 LegalQA v9.2 — gated agentic retrieval
 
+> Baseline hiện hành là public METEOR **0.5007**. Inference mặc định dùng
+> `source/configs/selector_v5007.yaml`; xem `source/BASELINE_V5007.md`.
+> Thử nghiệm selector v9.3 gây regression 0.4272 đã được tách sang nhánh
+> `codex/v9.3-regression-snapshot` và không còn thuộc runtime mặc định.
+
 Repository này chứa **một** cây source hoàn chỉnh tại `source/`. Đây là bản
 v9.2 kế thừa v9.1 graph-gated và bổ sung Agentic Search đã sửa lỗi.
 

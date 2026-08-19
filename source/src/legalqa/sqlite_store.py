@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,19 +44,6 @@ def _quote_fts(token: str) -> str:
     return f'"{token.replace(chr(34), chr(34) * 2)}"'
 
 
-def fold_vietnamese(text: str) -> str:
-    """Fold about/missing diacritics + đ→d để so khớp không phân biệt dấu.
-
-    FTS5 index dùng tokenize='unicode61 remove_diacritics 0' (giữ nguyên dấu)
-    nên token không dấu do model sinh ra ("muc phat cham dong") sẽ không khớp
-    term có dấu trong index ("mức", "phạt"). Fold này dùng chung cho cả term
-    trong index và token truy vấn để dựng ánh xạ khôi phục dấu.
-    """
-    lowered = text.lower().replace("đ", "d")
-    decomposed = unicodedata.normalize("NFD", lowered)
-    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
-
-
 def _fts_queries(terms: list[str], max_terms: int = 14) -> list[str]:
     terms = terms[:max_terms]
     if not terms:
@@ -84,7 +70,6 @@ class SQLiteLegalStore:
         self.connection.row_factory = sqlite3.Row
         self._feature_cache: OrderedDict[int, tuple[set[str], set[str], set[str]]] = OrderedDict()
         self._alignment_cache: OrderedDict[int, tuple[set[str], set[str], set[str]]] = OrderedDict()
-        self._fold_cache: tuple[set[str], dict[str, str]] | None = None
         self._has_vocab = False
         try:
             self.connection.execute(
@@ -162,54 +147,6 @@ class SQLiteLegalStore:
             known.sort(key=lambda token: (document_frequency[token], tokens.index(token)))
             return known + [token for token in tokens if token not in document_frequency]
         return tokens
-
-    def _diacritic_maps(self) -> tuple[set[str], dict[str, str]]:
-        """(vocab terms, fold→biến thể có dấu phổ biến nhất), load 1 lần/lazy."""
-        if self._fold_cache is None:
-            terms: set[str] = set()
-            best_variant: dict[str, tuple[str, int]] = {}
-            if self._has_vocab:
-                rows = self.connection.execute(
-                    "SELECT term, doc FROM temp.legalqa_vocab WHERE length(term) >= 3"
-                ).fetchall()
-                for row in rows:
-                    term = str(row["term"])
-                    terms.add(term)
-                    folded = fold_vietnamese(term)
-                    if folded == term or not folded:
-                        continue
-                    previous = best_variant.get(folded)
-                    frequency = int(row["doc"])
-                    if previous is None or frequency > previous[1]:
-                        best_variant[folded] = (term, frequency)
-            self._fold_cache = (terms, {key: value[0] for key, value in best_variant.items()})
-        return self._fold_cache
-
-    def restore_query_diacritics(self, query: str) -> str:
-        """Khôi phục dấu cho truy vấn thiếu dấu tiếng Việt của model.
-
-        Model 2B hay bỏ dấu khi phát "TRA_CUU: muc phat cham dong ..."; với
-        FTS5 giữ nguyên dấu, toàn bộ term kiểu đó không khớp index và lượt tra
-        cứu trả về 0 kết quả. Mỗi token không có trong vocab được thay bằng
-        biến thể có dấu phổ biến nhất (document frequency cao nhất) của cùng
-        dạng fold; token đã đúng dấu hoặc không có biến thể thì giữ nguyên.
-        """
-        terms, fold_to_variant = self._diacritic_maps()
-        if not fold_to_variant:
-            return query
-        restored: list[str] = []
-        changed = False
-        for token in words(query):
-            if token in terms:
-                restored.append(token)
-                continue
-            variant = fold_to_variant.get(fold_vietnamese(token))
-            if variant and variant != token:
-                restored.append(variant)
-                changed = True
-            else:
-                restored.append(token)
-        return " ".join(restored) if changed else query
 
     def search_documents(
         self,

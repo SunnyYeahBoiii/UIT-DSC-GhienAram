@@ -13,16 +13,13 @@ Nếu các căn cứ chưa đủ để khẳng định một chi tiết thì nó
 
 AGENTIC_SYSTEM_PROMPT = SYSTEM_PROMPT + """
 Bạn được cấp thêm một công cụ tra cứu để chủ động tìm thêm căn cứ khi ngữ cảnh hiện tại chưa đủ.
-Chỉ dùng công cụ khi thực sự cần thiết; nếu căn cứ đã đủ hãy trả lời ngay, không tra cứu cho có.
-Khi tra cứu, viết truy vấn có dấu tiếng Việt đầy đủ và dùng đúng thuật ngữ pháp luật."""
+Chỉ dùng công cụ khi thực sự cần thiết; nếu căn cứ đã đủ hãy trả lời ngay, không tra cứu cho có."""
 
 
-def _render_evidence_sections(
-    evidence: Iterable[Evidence], max_chars: int, start_rank: int = 1
-) -> tuple[str, int]:
+def render_evidence(evidence: Iterable[Evidence], max_chars: int) -> str:
     sections: list[str] = []
     used = 0
-    for rank, item in enumerate(evidence, start_rank):
+    for rank, item in enumerate(evidence, 1):
         relation = f" | quan hệ {item.relation_type}" if item.relation_type else ""
         header = (
             f"[CĂN CỨ {rank} | văn bản {item.chunk.doc_id} | "
@@ -37,11 +34,7 @@ def _render_evidence_sections(
         section = f"{header}\n{text}"
         sections.append(section)
         used += len(section) + 2
-    return "\n\n".join(sections), len(sections)
-
-
-def render_evidence(evidence: Iterable[Evidence], max_chars: int) -> str:
-    return _render_evidence_sections(evidence, max_chars)[0]
+    return "\n\n".join(sections)
 
 
 def render_train_memory_examples(
@@ -78,15 +71,6 @@ def qwen_user_prompt(
     retrieval_diagnostics: dict | None = None,
 ) -> str:
     context = render_evidence(evidence, int(config["generation"]["max_context_chars"]))
-    return _user_prompt_body(question, context, config, retrieval_diagnostics)
-
-
-def _user_prompt_body(
-    question: str,
-    context: str,
-    config: dict,
-    retrieval_diagnostics: dict | None = None,
-) -> str:
     diagnostics = retrieval_diagnostics or {}
     route = diagnostics.get("route", {}).get("route", "simple")
     plan = generation_plan(question, route, config)
@@ -121,54 +105,16 @@ YÊU CẦU ĐẦU RA:
 def render_tool_transcript(transcript: list[dict[str, Any]]) -> str:
     if not transcript:
         return ""
-    lines = []
-    for step in transcript:
-        added = len(step["evidence_added"])
-        if added:
-            outcome = f"tìm thêm {added} đoạn căn cứ mới"
-        else:
-            outcome = (
-                "không tìm thấy đoạn căn cứ mới (truy vấn trùng hoặc không khớp) — "
-                "hãy đổi hẳn truy vấn hoặc trả lời bằng căn cứ hiện có"
-            )
-        lines.append(f"- Lượt {step['step']}: tra cứu \"{step['query']}\" → {outcome}.")
+    lines = [
+        f"- Lượt {step['step']}: tra cứu \"{step['query']}\" → tìm thêm {len(step['evidence_added'])} đoạn căn cứ mới."
+        for step in transcript
+    ]
     return "\n".join(lines)
-
-
-def _agentic_context(
-    initial_evidence: list[Evidence],
-    tool_evidence: list[Evidence],
-    config: dict,
-) -> str:
-    """Render context cho vòng lặp agentic với ngân sách ký tự tách đôi.
-
-    Căn cứ do tool-call tìm thêm được đặt trước (mới nhất trước) trong phần
-    ngân sách `agentic_tool_context_share`; phần còn lại luôn dành cho căn cứ
-    retrieval ban đầu. Không tách đôi như vậy thì khi số đoạn tool-call cộng
-    dồn qua các lượt, render_evidence sẽ cắt đuôi và xoá sạch căn cứ ban đầu
-    — mất đúng những đoạn đã được rerank kỹ nhất của câu hỏi.
-    """
-    generation = config.get("generation", {})
-    max_chars = int(generation.get("max_context_chars", 18000))
-    if not tool_evidence:
-        return render_evidence(initial_evidence, max_chars)
-    share = min(0.8, max(0.2, float(generation.get("agentic_tool_context_share", 0.45))))
-    tool_budget = int(max_chars * share)
-    initial_budget = max_chars - tool_budget
-    tool_context, tool_count = _render_evidence_sections(reversed(tool_evidence), tool_budget)
-    parts = [tool_context] if tool_context else []
-    initial_context, _ = _render_evidence_sections(
-        initial_evidence, initial_budget, start_rank=tool_count + 1
-    )
-    if initial_context:
-        parts.append(initial_context)
-    return "\n\n".join(parts)
 
 
 def qwen_agentic_user_prompt(
     question: str,
-    initial_evidence: list[Evidence],
-    tool_evidence: list[Evidence],
+    evidence: list[Evidence],
     config: dict,
     retrieval_diagnostics: dict | None,
     transcript: list[dict[str, Any]],
@@ -176,8 +122,7 @@ def qwen_agentic_user_prompt(
 ) -> str:
     """Biến thể của qwen_user_prompt cho vòng lặp tool-call: cùng khung nội dung,
     thêm hướng dẫn công cụ tra cứu (khi còn lượt) và lịch sử các lần đã tra cứu."""
-    context = _agentic_context(initial_evidence, tool_evidence, config)
-    base = _user_prompt_body(question, context, config, retrieval_diagnostics)
+    base = qwen_user_prompt(question, evidence, config, retrieval_diagnostics)
     tool_section = ""
     if allow_tool:
         remaining = int(config.get("generation", {}).get("agentic_max_tool_calls", 2)) - len(transcript)
@@ -187,10 +132,6 @@ CÔNG CỤ TRA CỨU:
 Nếu các CĂN CỨ hiện có CHƯA đủ để trả lời chắc chắn, dòng đầu tiên của lượt này có thể là:
 TRA_CUU: <câu truy vấn tiếng Việt ngắn gọn để tìm thêm căn cứ>
 Nếu dùng công cụ thì không viết gì khác trong lượt đó. Bạn còn {remaining} lượt tra cứu.
-Quy tắc viết truy vấn hiệu quả:
-- Viết có dấu tiếng Việt đầy đủ, dùng đúng thuật ngữ pháp luật (ví dụ: "bảo hiểm xã hội bắt buộc").
-- Ưu tiên số hiệu văn bản, tên văn bản hoặc điều/khoản cụ thể nếu câu hỏi nhắc đến.
-- Mỗi lượt dùng truy vấn khác các lượt trước: đổi sang khái niệm pháp lý chưa tra hoặc đổi cách diễn đạt.
 Nếu căn cứ đã đủ, bỏ qua công cụ và viết thẳng câu trả lời cuối cùng theo YÊU CẦU ĐẦU RA ở trên."""
     history = render_tool_transcript(transcript)
     history_section = f"\n\nLỊCH SỬ TRA CỨU TRONG LƯỢT NÀY:\n{history}" if history else ""

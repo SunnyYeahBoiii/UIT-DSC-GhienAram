@@ -184,12 +184,6 @@ def _tool_evidence_from_metadata(tool_evidence: list[dict[str, Any]]) -> list[Ev
                     text=text,
                     title=str(entry.get("title", "")),
                     heading=str(entry.get("heading", "")),
-                    metadata={
-                        "_merged_chunk_ids": [
-                            str(value)
-                            for value in entry.get("merged_chunk_ids", [])
-                        ]
-                    },
                 ),
                 score=float(entry.get("score", 0.0)),
                 bm25_score=float(entry.get("bm25_score", 0.0)),
@@ -215,17 +209,10 @@ def _candidate_evidence(seed_evidence: list[Evidence], candidate: Candidate) -> 
     combined: list[Evidence] = []
     seen: set[str] = set()
     for item in [*tool_items, *seed_evidence]:
-        source_ids = {
-            str(value)
-            for value in item.chunk.metadata.get(
-                "_merged_chunk_ids", [item.chunk.chunk_id]
-            )
-        }
-        source_ids.add(item.chunk.chunk_id)
-        if source_ids & seen:
+        if item.chunk.chunk_id in seen:
             continue
         combined.append(item)
-        seen.update(source_ids)
+        seen.add(item.chunk.chunk_id)
     return combined
 
 

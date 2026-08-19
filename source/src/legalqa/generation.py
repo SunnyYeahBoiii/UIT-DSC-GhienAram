@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .answer_style import generation_plan
 from .prompts import AGENTIC_SYSTEM_PROMPT, SYSTEM_PROMPT, qwen_agentic_user_prompt, qwen_user_prompt
-from .retrieval import Evidence, deduplicate_and_merge_evidence, retrieval_confidence
+from .retrieval import Evidence, retrieval_confidence
 from .text import citations, document_numbers, legal_tokens, normalize_text, numbers, split_sentences, words
 
 
@@ -196,7 +196,7 @@ def make_qwen_candidate(
 
 
 _TOOL_CALL_MARKER = re.compile(
-    r"^\s*(?:(?:[-*•>_#]\s*)|(?:\d+[.)]\s*)|[*_]{1,4}\s*){0,3}`{0,3}\s*"
+    r"^\s*(?:(?:[-*•>]\s*)|(?:\d+[.)]\s*))?`{0,3}\s*"
     r"tra[_\s]*cuu\s*[:：]",
     re.IGNORECASE,
 )
@@ -229,12 +229,12 @@ def parse_agentic_step(raw_text: str) -> tuple[str | None, str | None]:
             continue
         inspected += 1
         if _TOOL_CALL_MARKER.match(_strip_diacritics(stripped)):
-            query = re.split(r"[:：]", stripped, maxsplit=1)[-1].strip(" `*_#")
+            query = re.split(r"[:：]", stripped, maxsplit=1)[-1].strip(" `")
             if not query:
                 for continuation in lines[index + 1 :]:
                     continuation = continuation.strip()
                     if continuation and not continuation.startswith("```"):
-                        query = continuation.strip(" `*_#")
+                        query = continuation.strip(" `")
                         break
             return query, None
         if inspected >= 3:
@@ -272,42 +272,6 @@ def _call_agentic_search(
     return search_fn(query)
 
 
-def _select_new_tool_evidence(
-    new_evidence: list[Evidence],
-    seen_chunk_ids: set[str],
-    per_call: int,
-    max_per_document: int,
-) -> list[Evidence]:
-    """Chọn các đoạn căn cứ mới cho một lượt tool-call.
-
-    Danh sách vào đã được rank_agentic_evidence xếp hạng; BM25 thô vẫn hay trả
-    nhiều window liền kề của cùng một văn bản ở đầu danh sách, nếu lấy nguyên
-    top-k thì cả ngân sách lượt tra cứu chỉ chứa một văn bản. Giới hạn
-    `max_per_document` giữ tính đa dạng văn bản cho câu hỏi complex; việc gộp
-    text trùng của window liền kề do caller đảm nhiệm.
-    """
-    selected: list[Evidence] = []
-    per_document: dict[str, int] = {}
-    for item in new_evidence:
-        if len(selected) >= per_call:
-            break
-        source_ids = {
-            str(value)
-            for value in item.chunk.metadata.get(
-                "_merged_chunk_ids", [item.chunk.chunk_id]
-            )
-        }
-        source_ids.add(item.chunk.chunk_id)
-        if source_ids & seen_chunk_ids:
-            continue
-        used = per_document.get(item.chunk.doc_id, 0)
-        if used >= max_per_document:
-            continue
-        selected.append(item)
-        per_document[item.chunk.doc_id] = used + 1
-    return selected
-
-
 def make_qwen_agentic_candidate(
     generator,
     question: str,
@@ -326,16 +290,9 @@ def make_qwen_agentic_candidate(
     generation_cfg = config.get("generation", {})
     max_tool_calls = max(0, int(generation_cfg.get("agentic_max_tool_calls", 2)))
     evidence_per_call = max(1, int(generation_cfg.get("agentic_evidence_per_call", 3)))
-    max_per_document = max(1, int(generation_cfg.get("agentic_max_per_document", 2)))
 
-    initial_evidence = list(evidence)
-    seen_chunk_ids: set[str] = set()
-    for item in initial_evidence:
-        seen_chunk_ids.add(item.chunk.chunk_id)
-        seen_chunk_ids.update(
-            str(value)
-            for value in item.chunk.metadata.get("_merged_chunk_ids", [])
-        )
+    current_evidence = list(evidence)
+    seen_chunk_ids = {item.chunk.chunk_id for item in current_evidence}
     tool_evidence_pool: list[Evidence] = []
     transcript: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
@@ -348,8 +305,7 @@ def make_qwen_agentic_candidate(
     for step in range(max_tool_calls + 1):
         allow_tool = search_fn is not None and step < max_tool_calls and not force_final_answer
         prompt = qwen_agentic_user_prompt(
-            question, initial_evidence, tool_evidence_pool, config,
-            retrieval_diagnostics, transcript, allow_tool,
+            question, current_evidence, config, retrieval_diagnostics, transcript, allow_tool,
         )
         result = generator.generate_with_metadata(
             AGENTIC_SYSTEM_PROMPT if allow_tool else SYSTEM_PROMPT,
@@ -399,31 +355,16 @@ def make_qwen_agentic_candidate(
             force_final_answer = True
             continue
         seen_queries.add(normalized_query)
-        # search_fn v9.2 nhận thêm câu hỏi gốc + căn cứ hiện có (để gieo mối
-        # quan hệ graph); truyền newest-first như cũ: tool evidence mới nhất
-        # trước, rồi căn cứ retrieval ban đầu.
-        new_evidence = _call_agentic_search(
-            search_fn, query, question, list(reversed(tool_evidence_pool)) + initial_evidence
-        )
-        raw_selected = _select_new_tool_evidence(
-            new_evidence, seen_chunk_ids, evidence_per_call, max_per_document
-        )
-        for item in raw_selected:
-            seen_chunk_ids.add(item.chunk.chunk_id)
-            seen_chunk_ids.update(
-                str(value)
-                for value in item.chunk.metadata.get("_merged_chunk_ids", [])
-            )
-        # Gộp các window liền kề của cùng điều/khoản: BM25 hay trả về nhiều
-        # window chồng lấn (overlap_chars) của cùng một chỗ trong văn bản;
-        # giữ nguyên thì text trùng nhau lãng phí ngân sách ký tự context
-        # (prompt tách budget theo agentic_tool_context_share, xem prompts.py).
-        added = deduplicate_and_merge_evidence(
-            raw_selected, evidence_per_call, prefer_document_diversity=False
-        )
+        new_evidence = _call_agentic_search(search_fn, query, question, current_evidence)
+        added = [item for item in new_evidence if item.chunk.chunk_id not in seen_chunk_ids][:evidence_per_call]
         for item in added:
-            for source_id in item.chunk.metadata.get("_merged_chunk_ids", [item.chunk.chunk_id]):
-                seen_chunk_ids.add(source_id)
+            seen_chunk_ids.add(item.chunk.chunk_id)
+        # Chèn căn cứ mới lên đầu danh sách: model chỉ tra cứu thêm khi thấy
+        # thiếu, nên phần vừa tìm được cần ưu tiên ngân sách ký tự của
+        # render_evidence hơn căn cứ ban đầu — nếu nối vào cuối, ngân sách
+        # (max_context_chars) thường đã bị các đoạn ban đầu dùng hết và căn cứ
+        # mới sẽ bị cắt bỏ hoàn toàn (xem prompts.render_evidence).
+        current_evidence = added + current_evidence
         tool_evidence_pool.extend(added)
         transcript.append(
             {
@@ -506,10 +447,6 @@ def make_qwen_agentic_candidate(
                     "stage": item.stage,
                     "relation_type": item.relation_type,
                     "relation_path": item.relation_path,
-                    "merged_chunk_ids": [
-                        str(value)
-                        for value in item.chunk.metadata.get("_merged_chunk_ids", [])
-                    ],
                 }
                 for item in tool_evidence_pool
             ],
