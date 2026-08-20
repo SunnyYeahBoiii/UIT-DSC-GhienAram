@@ -214,6 +214,12 @@ def main() -> None:
     )
     parser.add_argument("--force-index", action="store_true")
     parser.add_argument(
+        "--max-questions",
+        type=int,
+        default=None,
+        help="Giới hạn số câu hỏi xử lý (smoke test); None = chạy hết",
+    )
+    parser.add_argument(
         "--model-smoke",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -535,6 +541,8 @@ def main() -> None:
         return
 
     questions = load_qa(public_path, require_answers=False)
+    if args.max_questions is not None:
+        questions = questions[: args.max_questions]
     retrieval_cache = working / "cache" / run_fingerprint / "retrieval.v7.jsonl"
     retrieval_started = time.time()
     evidence = retrieve_sqlite_batch(

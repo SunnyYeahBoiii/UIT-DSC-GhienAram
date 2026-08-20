@@ -31,9 +31,9 @@ corpus:
   id_fields: ["id", "document_id", "doc_id", "law_id"]
   title_fields: ["name", "title", "document_name"]
   text_fields: ["passage", "text", "content", "body", "document"]
-  max_chunk_chars: 4200
-  overlap_chars: 350
-  min_chunk_chars: 120
+  max_chunk_chars: 1500
+  overlap_chars: 100
+  min_chunk_chars: 400
   skip_empty: true
 
 retrieval:
