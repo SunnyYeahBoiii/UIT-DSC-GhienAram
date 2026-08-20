@@ -107,6 +107,41 @@ class RagChatDataset(torch.utils.data.Dataset):
         return self.items[index]
 
 
+class _EpochRandomSubsetSampler(torch.utils.data.Sampler):
+    """Rút subset_size mẫu random khác nhau mỗi epoch từ pool lớn hơn (giống mini-batch SGD).
+
+    __iter__ được HF Trainer gọi lại (fresh) mỗi epoch khi lặp `for step, inputs in
+    enumerate(train_dataloader)` — tăng self.epoch mỗi lần để seed đổi, tránh lặp y hệt.
+    """
+
+    def __init__(self, data_len: int, subset_size: int, seed: int):
+        self.data_len = data_len
+        self.subset_size = min(subset_size, data_len)
+        self.seed = seed
+        self.epoch = 0
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        self.epoch += 1
+        indices = torch.randperm(self.data_len, generator=generator)[: self.subset_size]
+        return iter(indices.tolist())
+
+    def __len__(self) -> int:
+        return self.subset_size
+
+
+def _make_epoch_resample_trainer(transformers_module, epoch_subset_size: int):
+    """Trả về subclass Trainer override _get_train_sampler() để mỗi epoch dùng subset random khác
+    nhau thay vì RandomSampler mặc định (vẫn full permutation của cùng 1 tập cố định mọi epoch)."""
+
+    class EpochResampleTrainer(transformers_module.Trainer):
+        def _get_train_sampler(self, *args, **kwargs):
+            return _EpochRandomSubsetSampler(len(self.train_dataset), epoch_subset_size, self.args.seed)
+
+    return EpochResampleTrainer
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="SFT LoRA thuần cho Qwen3.5-2B (không evidence), lưu checkpoint mỗi epoch "
@@ -139,7 +174,21 @@ def main() -> None:
     )
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--load-in-4bit", action="store_true")
+    parser.add_argument(
+        "--backend",
+        choices=("transformers", "unsloth"),
+        default="transformers",
+        help="unsloth cần internet lúc chạy (pip install unsloth trước) và nhanh/tiết kiệm VRAM hơn "
+        "transformers+peft+bitsandbytes thuần; --load-in-4bit vẫn áp dụng cho backend unsloth.",
+    )
     parser.add_argument("--max-train-samples", type=int, default=None)
+    parser.add_argument(
+        "--train-pool-samples",
+        type=int,
+        default=None,
+        help="pool lớn hơn --max-train-samples để mỗi epoch rút random subset khác nhau (kiểu SGD "
+        "mini-batch); mặc định = --max-train-samples, tức mọi epoch dùng đúng cùng bộ mẫu như cũ.",
+    )
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument(
         "--resume-from-checkpoint",
@@ -170,60 +219,109 @@ def main() -> None:
         print(f"[SFT resume] Khôi phục model/optimizer/scheduler/RNG từ {resume_checkpoint}", flush=True)
 
     model_path = require_local_model(config, "generator")
-    kwargs = dict(local_files_only=True, trust_remote_code=config["runtime"].get("trust_remote_code", True))
-    processor = transformers.AutoProcessor.from_pretrained(str(model_path), **kwargs)
-    tokenizer = processor.tokenizer
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    auto_class = getattr(transformers, "AutoModelForMultimodalLM", None)
-    if auto_class is None:
-        raise RuntimeError("Cần Transformers mới có AutoModelForMultimodalLM.")
-    model_load_kwargs = dict(kwargs)
     compute_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-    if args.load_in_4bit:
-        if not torch.cuda.is_available():
-            raise RuntimeError("--load-in-4bit yêu cầu CUDA và bitsandbytes.")
-        model_load_kwargs.update(
-            quantization_config=transformers.BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_compute_dtype=compute_dtype,
-            ),
-            device_map={"": 0},
+
+    if args.backend == "unsloth":
+        # unsloth khuyến cáo import trước transformers để patch kernel; ở đây torch/transformers
+        # đã bị import từ module-level (train_qwen_lora.CausalCollator) nên patch không trọn vẹn
+        # 100%, nhưng FastLanguageModel vẫn áp fused kernel + 4bit lúc load model bên dưới.
+        from unsloth import FastLanguageModel
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=str(model_path),
+            max_seq_length=args.max_length,
+            dtype=compute_dtype,
+            load_in_4bit=args.load_in_4bit,
+            trust_remote_code=config["runtime"].get("trust_remote_code", True),
         )
+        # checkpoint đa phương thức nên from_pretrained trả về cả AutoProcessor (có
+        # .image_processor); __call__ đã bị unsloth patch để hiểu arg đầu là ảnh, nên phải lấy
+        # đúng sub-tokenizer text thuần để gọi tokenizer(prompt, ...) như phần dataset bên dưới.
+        if hasattr(tokenizer, "tokenizer"):
+            tokenizer = tokenizer.tokenizer
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        # unsloth's get_peft_regex() fullmatch tên module theo dạng .*?<tag>.*?<tag>.*?<leaf>,
+        # nên target_modules phải là TÊN LEAF (vd "out_proj"), không phải full dotted path
+        # (full path thì fullmatch không bao giờ khớp -> "No layers to finetune").
+        target_modules = sorted(
+            {
+                name.rsplit(".", 1)[-1]
+                for name, module in model.named_modules()
+                if isinstance(module, torch.nn.Linear)
+                and not any(blocked in name.lower() for blocked in ("visual", "vision", "merger", "lm_head"))
+            }
+        )
+        if not target_modules:
+            raise RuntimeError("Không tìm thấy linear layer phía ngôn ngữ để gắn LoRA.")
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=args.lora_r,
+            lora_alpha=args.lora_r * 2,
+            lora_dropout=0.05,
+            bias="none",
+            target_modules=target_modules,
+            use_gradient_checkpointing="unsloth",
+            random_state=int(config["seed"]),
+        )
+        model.print_trainable_parameters()
     else:
-        model_load_kwargs["dtype"] = compute_dtype if torch.cuda.is_available() else None
-    model = auto_class.from_pretrained(str(model_path), **model_load_kwargs)
-    if args.load_in_4bit:
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
-    for cache_config in (model.config, getattr(model.config, "text_config", None)):
-        if cache_config is not None and hasattr(cache_config, "use_cache"):
-            cache_config.use_cache = False
-    model.gradient_checkpointing_enable()
-    target_modules = [
-        name
-        for name, module in model.named_modules()
-        if isinstance(module, torch.nn.Linear)
-        and not any(blocked in name.lower() for blocked in ("visual", "vision", "merger", "lm_head"))
-    ]
-    if not target_modules:
-        raise RuntimeError("Không tìm thấy linear layer phía ngôn ngữ để gắn LoRA.")
-    lora = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_r * 2,
-        lora_dropout=0.05,
-        bias="none",
-        target_modules=target_modules,
-    )
-    model = get_peft_model(model, lora)
-    model.print_trainable_parameters()
+        kwargs = dict(local_files_only=True, trust_remote_code=config["runtime"].get("trust_remote_code", True))
+        processor = transformers.AutoProcessor.from_pretrained(str(model_path), **kwargs)
+        tokenizer = processor.tokenizer
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        auto_class = getattr(transformers, "AutoModelForMultimodalLM", None)
+        if auto_class is None:
+            raise RuntimeError("Cần Transformers mới có AutoModelForMultimodalLM.")
+        model_load_kwargs = dict(kwargs)
+        if args.load_in_4bit:
+            if not torch.cuda.is_available():
+                raise RuntimeError("--load-in-4bit yêu cầu CUDA và bitsandbytes.")
+            # device_map="auto" chia layer qua tất cả GPU thấy được (vd Kaggle T4x2) để tăng VRAM
+            # khả dụng cho backward pass; máy 1 GPU thì "auto" cũng chỉ dồn hết về gpu0 như cũ.
+            model_load_kwargs.update(
+                quantization_config=transformers.BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=compute_dtype,
+                ),
+                device_map="auto",
+            )
+        else:
+            model_load_kwargs["dtype"] = compute_dtype if torch.cuda.is_available() else None
+        model = auto_class.from_pretrained(str(model_path), **model_load_kwargs)
+        if args.load_in_4bit:
+            model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+        for cache_config in (model.config, getattr(model.config, "text_config", None)):
+            if cache_config is not None and hasattr(cache_config, "use_cache"):
+                cache_config.use_cache = False
+        model.gradient_checkpointing_enable()
+        target_modules = [
+            name
+            for name, module in model.named_modules()
+            if isinstance(module, torch.nn.Linear)
+            and not any(blocked in name.lower() for blocked in ("visual", "vision", "merger", "lm_head"))
+        ]
+        if not target_modules:
+            raise RuntimeError("Không tìm thấy linear layer phía ngôn ngữ để gắn LoRA.")
+        lora = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_r * 2,
+            lora_dropout=0.05,
+            bias="none",
+            target_modules=target_modules,
+        )
+        model = get_peft_model(model, lora)
+        model.print_trainable_parameters()
 
     evidence_by_id = load_evidence_by_id(args.evidence)
     train_file = Path(args.train_file)
     train_rows = load_qa(train_file, True)
-    if args.max_train_samples:
-        train_rows = train_rows[: args.max_train_samples]
+    pool_size = args.train_pool_samples or args.max_train_samples
+    if pool_size:
+        train_rows = train_rows[:pool_size]
     train = RagChatDataset(
         train_rows,
         tokenizer,
@@ -258,8 +356,15 @@ def main() -> None:
     if not train:
         raise RuntimeError("SFT không có sample hợp lệ; kiểm tra --train-file/--evidence/--require-evidence.")
 
+    # subset random khác nhau mỗi epoch chỉ bật khi pool > max_train_samples; nếu không set
+    # --train-pool-samples thì pool_size == max_train_samples, train == đúng subset, không random.
+    epoch_subset_size = (
+        args.max_train_samples if args.max_train_samples and args.max_train_samples < len(train) else None
+    )
+
     run_signature = {
         "train": len(train),
+        "epoch_subset_size": epoch_subset_size,
         "dev": len(dev),
         "train_sha256": sha256_file(train_file),
         "dev_sha256": sha256_file(dev_file) if dev_file and dev_file.is_file() else None,
@@ -274,6 +379,7 @@ def main() -> None:
         "require_evidence": args.require_evidence,
         "lora_r": args.lora_r,
         "load_in_4bit": args.load_in_4bit,
+        "backend": args.backend,
     }
     if resume_checkpoint:
         previous_signature_path = Path(resume_checkpoint).parent / "resume_signature.json"
@@ -316,13 +422,22 @@ def main() -> None:
         remove_unused_columns=False,
         seed=int(config["seed"]),
     )
-    trainer = transformers.Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train,
-        eval_dataset=dev if len(dev) else None,
-        data_collator=CausalCollator(tokenizer),
-    )
+    if epoch_subset_size:
+        trainer = _make_epoch_resample_trainer(transformers, epoch_subset_size)(
+            model=model,
+            args=training_args,
+            train_dataset=train,
+            eval_dataset=dev if len(dev) else None,
+            data_collator=CausalCollator(tokenizer),
+        )
+    else:
+        trainer = transformers.Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train,
+            eval_dataset=dev if len(dev) else None,
+            data_collator=CausalCollator(tokenizer),
+        )
     trainer.train(resume_from_checkpoint=resume_checkpoint)
 
     epoch_checkpoints = sorted(

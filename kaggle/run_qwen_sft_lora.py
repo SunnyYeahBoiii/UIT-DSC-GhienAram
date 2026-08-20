@@ -116,7 +116,21 @@ def main() -> None:
     )
     parser.add_argument("--max-target-tokens", type=int, default=700)
     parser.add_argument("--lora-r", type=int, default=8)
+    parser.add_argument(
+        "--backend",
+        choices=("transformers", "unsloth"),
+        default="transformers",
+        help="unsloth cần internet để pip install trước khi chạy notebook; adapter sinh ra vẫn là "
+        "PEFT chuẩn nên select_best_sft_checkpoint.py/inference không cần đổi gì.",
+    )
     parser.add_argument("--max-train-samples", type=int, default=None)
+    parser.add_argument(
+        "--train-pool-samples",
+        type=int,
+        default=None,
+        help="pool lớn hơn --max-train-samples để mỗi epoch train random subset khác nhau (SGD-style); "
+        "để trống = mỗi epoch dùng đúng cùng --max-train-samples câu như cũ.",
+    )
     parser.add_argument("--max-eval-samples", type=int, default=None)
     parser.add_argument("--resume-input", default=None)
     parser.add_argument(
@@ -194,9 +208,21 @@ def main() -> None:
 
     data_dir = working / "data"
     if dev_sft_candidates:
-        train_split = train_sft_path
         dev_split = dev_sft_candidates[0]
-        split_info = {"source": "attached dev_sft.json", "dev_ratio_requested": None}
+        dev_qids = {record.question_id for record in load_qa(dev_split, require_answers=False)}
+        train_records = [
+            record
+            for record in load_qa(train_sft_path, require_answers=True)
+            if record.question_id not in dev_qids
+        ]
+        train_split = data_dir / "train_sft_split.json"
+        write_json(train_split, qa_as_object(train_records))
+        split_info = {
+            "source": "attached dev_sft.json",
+            "dev_ratio_requested": None,
+            "train": len(train_records),
+            "dev": len(dev_qids),
+        }
     else:
         records = load_qa(train_sft_path, require_answers=True)
         train_records, dev_records = deterministic_split(records, args.dev_ratio, int(config["seed"]))
@@ -215,8 +241,9 @@ def main() -> None:
     # --max-train-samples + dev đã cắt theo --max-eval-samples) — tránh chạy full RAG
     # (dense encode + rerank) trên toàn bộ train_sft.json khi chỉ đang smoke-test vài chục câu.
     train_for_evidence = load_qa(train_split, require_answers=False)
-    if args.max_train_samples:
-        train_for_evidence = train_for_evidence[: args.max_train_samples]
+    train_pool_size = args.train_pool_samples or args.max_train_samples
+    if train_pool_size:
+        train_for_evidence = train_for_evidence[:train_pool_size]
     dev_for_evidence = load_qa(dev_split, require_answers=False)
     if args.max_eval_samples:
         dev_for_evidence = dev_for_evidence[: args.max_eval_samples]
@@ -267,9 +294,12 @@ def main() -> None:
             "--lora-r",
             str(args.lora_r),
             "--load-in-4bit",
+            "--backend",
+            args.backend,
             "--resume-from-checkpoint",
             "auto",
             *(["--max-train-samples", str(args.max_train_samples)] if args.max_train_samples else []),
+            *(["--train-pool-samples", str(args.train_pool_samples)] if args.train_pool_samples else []),
             *(["--max-eval-samples", str(args.max_eval_samples)] if args.max_eval_samples else []),
         ]
     )
@@ -313,6 +343,8 @@ def main() -> None:
             "evidence_sha256": sha256_file(evidence_path),
             "evidence_report": evidence_report,
             "max_context_chars": args.max_context_chars,
+            "max_train_samples": args.max_train_samples,
+            "train_pool_samples": args.train_pool_samples,
         },
         "environment": environment,
         "split": split_info,
