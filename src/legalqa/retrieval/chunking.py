@@ -28,6 +28,30 @@ def _legal_sections(text: str) -> list[tuple[str, str]]:
     return result
 
 
+def _merge_short_sections(sections: list[tuple[str, str]], min_chars: int) -> list[tuple[str, str]]:
+    """Gộp section ngắn (vd Điều chỉ có 1 câu hiệu lực/thay thế) vào section kế tiếp.
+
+    Windowing sau đó lọc theo min_chars trên từng section riêng lẻ, nên một
+    Điều luật ngắn đứng một mình sẽ bị loại hoàn toàn khỏi index nếu không gộp
+    trước — mất nội dung loại điều khoản hay bị hỏi nhất (hiệu lực, thay thế).
+    """
+    merged: list[tuple[str, str]] = []
+    buffer_heading, buffer_text = "", ""
+    for heading, text in sections:
+        buffer_heading = buffer_heading or heading
+        buffer_text = f"{buffer_text}\n\n{text}" if buffer_text else text
+        if len(buffer_text) >= min_chars:
+            merged.append((buffer_heading, buffer_text))
+            buffer_heading, buffer_text = "", ""
+    if buffer_text:
+        if merged:
+            last_heading, last_text = merged[-1]
+            merged[-1] = (last_heading, f"{last_text}\n\n{buffer_text}")
+        else:
+            merged.append((buffer_heading, buffer_text))
+    return merged
+
+
 def _window_text(text: str, max_chars: int, overlap_chars: int, min_chars: int) -> list[str]:
     if len(text) <= max_chars:
         return [text] if len(text) >= min_chars else []
@@ -73,7 +97,8 @@ def chunk_documents(documents: Iterable[Document], config: dict) -> list[Chunk]:
     for document in documents:
         document_name = resolve_document_name(document.title)
         section_number = 0
-        for heading, section in _legal_sections(document.text):
+        sections = _merge_short_sections(_legal_sections(document.text), int(cfg["min_chunk_chars"]))
+        for heading, section in sections:
             windows = _window_text(
                 section,
                 int(cfg["max_chunk_chars"]),
