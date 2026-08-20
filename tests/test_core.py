@@ -93,6 +93,22 @@ def test_legal_chunking_and_bm25(tmp_path):
     assert index.search("nghỉ phép người lao động", 1)
 
 
+def test_legal_chunking_keeps_short_trailing_article(tmp_path):
+    config = minimal_config(tmp_path)
+    config["corpus"]["min_chunk_chars"] = 80
+    docs = [
+        Document(
+            "vb1",
+            "Điều 1. Phạm vi áp dụng\nNgười lao động có quyền nghỉ phép hằng năm theo quy định.\n\n"
+            "Điều 2. Hiệu lực\nThông tư này có hiệu lực từ ngày 01/01/2024.",
+            "Luật thử nghiệm",
+        )
+    ]
+    chunks = chunk_documents(docs, config)
+    joined = " ".join(chunk.text for chunk in chunks)
+    assert "hiệu lực từ ngày 01/01/2024" in joined
+
+
 def test_legal_chunking_attaches_document_name_metadata(tmp_path):
     config = minimal_config(tmp_path)
     title = "Thong-tu-33-2018-TT-BLDTBXH-dao-tao-trinh-do-cao-dang"
@@ -109,15 +125,15 @@ def test_prompt_evidence_header_uses_document_name_not_raw_id():
     )
     text, count = _render_evidence_sections([Evidence(chunk, 1.0)], 4000)
     assert count == 1
-    assert "văn bản Thông tư 33/2018/TT-BLDTBXH" in text
-    assert "văn bản 234274" not in text
+    assert "[VĂN BẢN]: Thông tư 33/2018/TT-BLDTBXH" in text
+    assert "[VĂN BẢN]: 234274" not in text
 
 
 def test_prompt_evidence_header_falls_back_to_doc_id_when_name_missing():
     chunk = Chunk("vb1::s0000::w000", "234274", "Nội dung.", "slug-thô", "Điều 1", {})
     text, count = _render_evidence_sections([Evidence(chunk, 1.0)], 4000)
     assert count == 1
-    assert "văn bản 234274" in text
+    assert "[VĂN BẢN]: 234274" in text
 
 
 def test_official_corpus_directory_schema(tmp_path):

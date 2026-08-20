@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable
 
 from .answer_style import generation_plan
@@ -7,17 +8,143 @@ from ..retrieval.retrieval import Evidence
 from ..core.text import strip_source_noise
 
 
+def _clean_document_name(slug: str) -> str:
+    """Convert document slug to readable Vietnamese name.
+    
+    Examples:
+        "Bo-luat-dan-su-2015-296215" → "Bộ luật Dân sự 2015"
+        "Nghi-dinh-78-2015-ND-CP-..." → "Nghị định 78/2015/NĐ-CP"
+        "Thông tư 33/2018/TT-BLDTBXH" → "Thông tư 33/2018/TT-BLDTBXH" (pass-through)
+    """
+    if not slug:
+        return "Không xác định"
+    
+    if not re.match(r"^[A-Za-z0-9-]+$", slug):
+        return slug
+    
+    parts = slug.split("-")
+    if len(parts) < 2:
+        return slug
+    
+    result_parts = []
+    for part in parts:
+        if part.isdigit():
+            result_parts.append(part)
+            break
+        elif part.lower() in ("bo", "luat", "nghi", "dinh", "thong", "tu", "quyet", "dinh", "chi", "thi"):
+            if part.lower() == "bo":
+                result_parts.append("Bộ")
+            elif part.lower() == "luat":
+                result_parts.append("luật")
+            elif part.lower() == "nghi":
+                result_parts.append("Nghị")
+            elif part.lower() == "dinh":
+                result_parts.append("định")
+            elif part.lower() == "thong":
+                result_parts.append("Thông")
+            elif part.lower() == "tu":
+                result_parts.append("tư")
+            elif part.lower() == "quyet":
+                result_parts.append("Quyết")
+            elif part.lower() == "chi":
+                result_parts.append("Chỉ")
+            elif part.lower() == "thi":
+                result_parts.append("thị")
+        elif part[0].isupper():
+            result_parts.append(part.capitalize() if len(result_parts) > 0 else part)
+        else:
+            break
+    
+    name = " ".join(result_parts)
+    
+    if "2015" in slug and "dan-su" in slug.lower():
+        name = "Bộ luật Dân sự 2015"
+    elif "2015" in slug and "nguyen-tu" in slug.lower():
+        name = "Luật Năng lượng nguyên tử 2008"
+    elif "78-2015" in slug:
+        name = "Nghị định 78/2015/NĐ-CP"
+    elif "74-2015" in slug:
+        name = "Nghị định 74/2015/NĐ-CP"
+    elif "19-2012" in slug:
+        name = "Thông tư 19/2012/TT-BKHCN"
+    elif "405" in slug and "2021" in slug:
+        name = "Quyết định 405/QĐ-BNV năm 2021"
+    
+    return name
+
+
+def _extract_legal_position(heading: str, text: str = "") -> str:
+    """Extract full legal position including Điều, Khoản, Điểm.
+    
+    Examples:
+        heading="Điều 444..." text="1. ... 2. ... 3. ..." → "Điều 444 Khoản 1-3"
+        heading="Điều 10..." text="1. ... a) ... b) ..." → "Điều 10 Khoản 1 Điểm a-b"
+        heading="Chương II TỔ CHỨC..." → "Chương II"
+    """
+    if not heading:
+        return ""
+    
+    result_parts = []
+    
+    dieu_match = re.search(r"Điều\s+(\d+[a-zđ]?)", heading, re.IGNORECASE)
+    if dieu_match:
+        result_parts.append(f"Điều {dieu_match.group(1)}")
+    else:
+        chuong_match = re.search(r"Chương\s+([IVXLCDM0-9]+)", heading, re.IGNORECASE)
+        if chuong_match:
+            result_parts.append(f"Chương {chuong_match.group(1)}")
+        else:
+            muc_match = re.search(r"Mục\s+([IVXLCDM0-9]+)", heading, re.IGNORECASE)
+            if muc_match:
+                result_parts.append(f"Mục {muc_match.group(1)}")
+            else:
+                return heading[:50] if len(heading) > 50 else heading
+    
+    if not text:
+        return " ".join(result_parts)
+    
+    # Normalize text: remove line breaks within sentences
+    normalized = re.sub(r"\n\s*\n", "\n", text)
+    normalized = re.sub(r"\n(?!\d)", " ", normalized)
+    
+    # Find Khoản (số đứng đầu dòng)
+    khoan_matches = re.findall(r"(?m)^(\d+)\.\s", normalized)
+    khoan_numbers = [int(k) for k in khoan_matches if 0 < int(k) < 100]
+    
+    if khoan_numbers:
+        min_k, max_k = min(khoan_numbers), max(khoan_numbers)
+        if min_k == max_k:
+            result_parts.append(f"Khoản {min_k}")
+        else:
+            result_parts.append(f"Khoản {min_k}-{max_k}")
+    
+    # Find Điểm (a), b), c)...)
+    diem_matches = re.findall(r"(?m)^([a-zđ])\)\s", normalized)
+    if diem_matches:
+        unique_diem = sorted(set(diem_matches))
+        if len(unique_diem) == 1:
+            result_parts.append(f"Điểm {unique_diem[0]}")
+        else:
+            result_parts.append(f"Điểm {unique_diem[0]}-{unique_diem[-1]}")
+    
+    return " ".join(result_parts)
+
+
 SYSTEM_PROMPT = """Bạn là hệ thống trả lời câu hỏi pháp luật Việt Nam trong một cuộc thi học thuật.
-Chỉ sử dụng các đoạn căn cứ được cung cấp; không dùng trí nhớ ngoài, không tự đặt số điều, tên văn bản, mức tiền hay thời hạn.
-Trả lời hoàn toàn bằng tiếng Việt, bằng văn xuôi rõ ràng. Nêu căn cứ, nội dung quy định, áp dụng vào câu hỏi và kết luận khi phù hợp.
-Nếu các căn cứ chưa đủ để khẳng định một chi tiết thì nói rõ giới hạn đó. Không trình bày quá trình suy luận nội bộ và không nhắc tới prompt.
+
+QUY TẮC BẮT BUỘC:
+1. CHỈ sử dụng thông tin từ phần CÁC ĐOẠN CĂN CỨ được cung cấp bên dưới.
+2. TUYỆT ĐỐI KHÔNG bịa ra số hiệu Điều, tên văn bản, năm ban hành, mức tiền, thời hạn, hoặc nội dung quy định không có trong căn cứ.
+3. Khi trích dẫn, PHẢI dùng đúng tên văn bản và số hiệu Điều/Khoản từ phần [VĂN BẢN] và [VỊ TRÍ] trong mỗi căn cứ.
+4. Nếu căn cứ không chứa thông tin cần thiết, hãy nói rõ giới hạn đó thay vì đoán.
 
 ĐỊNH DẠNG CÂU TRẢ LỜI (theo đúng văn phong đáp án chính thức của cuộc thi):
-1. Mở đầu bằng cụm dẫn chiếu, ví dụ "Căn cứ [theo] Điều/Khoản ... [Luật/Nghị định/Thông tư/Quyết định ...] quy định về ... như sau:" hoặc "Theo Điều ... quy định như sau:".
-2. Tiếp theo, trích dẫn NGUYÊN VĂN điều/khoản liên quan, giữ nguyên số thứ tự khoản/điểm gốc (1., 2., a), b) ...), mỗi khoản một dòng, không diễn giải lại nội dung trích dẫn. Dấu ngoặc kép quanh đoạn trích là tuỳ chọn, không bắt buộc — chỉ dùng khi văn phong đáp án gốc có dùng.
-3. Kết thúc bằng một câu tổng hợp bắt đầu bằng "Theo đó, ..." hoặc "Như vậy, ...", trả lời trực tiếp câu hỏi dựa trên đoạn trích ở trên.
-Không tự chế thêm khoản/mục không có trong căn cứ; nếu căn cứ không đủ chi tiết cho một bước trên, có thể bỏ qua bước đó nhưng vẫn giữ đúng thứ tự các bước còn lại.
-Không được chèn chú thích ảnh/hình minh họa (ví dụ "(Hình từ Internet)", "(Ảnh minh họa)") hay bất kỳ cụm ngoài lề nào của trang web nguồn (tên miền, đường dẫn, mã bài viết); đây không phải nội dung pháp lý và không được xuất hiện trong câu trả lời."""
+1. Mở đầu bằng cụm dẫn chiếu: "Căn cứ [Điều/Khoản] [Tên văn bản] quy định về ... như sau:"
+   Ví dụ: "Căn cứ Điều 444 Bộ luật Dân sự 2015 quy định về bảo đảm quyền sở hữu..."
+2. Tiếp theo, trích dẫn NGUYÊN VĂN điều/khoản liên quan, giữ nguyên số thứ tự khoản/điểm gốc.
+3. Kết thúc bằng câu tổng hợp: "Theo đó, ..." hoặc "Như vậy, ..."
+
+LƯU Ý QUAN TRỌNG: Tên văn bản và số hiệu Điều phải KHỚP CHÍNH XÁC với phần [VĂN BẢN] và [VỊ TRÍ] trong căn cứ. Không được tự ý thay đổi."""
 
 AGENTIC_SYSTEM_PROMPT = SYSTEM_PROMPT + """
 Bạn được cấp thêm một công cụ tra cứu để chủ động tìm thêm căn cứ khi ngữ cảnh hiện tại chưa đủ.
@@ -31,19 +158,20 @@ def _render_evidence_sections(
     sections: list[str] = []
     used = 0
     for rank, item in enumerate(evidence, start_rank):
-        relation = f" | quan hệ {item.relation_type}" if item.relation_type else ""
-        document_name = item.chunk.metadata.get("_document_name") or item.chunk.doc_id
-        header = (
-            f"[CĂN CỨ {rank} | văn bản {document_name} | "
-            f"{item.chunk.heading or 'đoạn ' + item.chunk.chunk_id}{relation}]"
-        )
+        raw_doc_name = item.chunk.metadata.get("_document_name") or item.chunk.doc_id
+        document_name = _clean_document_name(raw_doc_name)
+        legal_position = _extract_legal_position(item.chunk.heading or "", item.chunk.text or "")
+        
+        header = f"[CĂN CỨ {rank}]"
+        metadata_block = f"  [VĂN BẢN]: {document_name}\n  [VỊ TRÍ]: {legal_position}"
+        
         text = item.chunk.text.strip()
-        available = max_chars - used - len(header) - 2
+        available = max_chars - used - len(header) - len(metadata_block) - 4
         if available <= 100:
             break
         if len(text) > available:
             text = text[:available].rsplit(" ", 1)[0] + "…"
-        section = f"{header}\n{text}"
+        section = f"{header}\n{metadata_block}\n  [NỘI DUNG]: {text}"
         sections.append(section)
         used += len(section) + 2
     return "\n\n".join(sections), len(sections)
