@@ -105,3 +105,26 @@ def test_inference_recovery_rejects_other_fingerprint(tmp_path):
     )
     with pytest.raises(RecoveryError, match="expected=new"):
         restore_recovery_bundle(bundle, tmp_path / "restored", expected_fingerprint="new")
+
+
+def test_inference_recovery_from_extracted_directory(tmp_path):
+    import json
+    import shutil
+
+    first = tmp_path / "first"
+    retrieval = first / "cache" / "abc" / "public_retrieval.inference_only.jsonl"
+    retrieval.parent.mkdir(parents=True)
+    retrieval.write_text('{"question_id":"1"}\n', encoding="utf-8")
+
+    bundle_dir = tmp_path / "recovery_extracted"
+    bundle_dir.mkdir()
+    (bundle_dir / "recovery_state.json").write_text(
+        json.dumps({"format_version": 1, "run_fingerprint": "abc", "stage": "qwen", "completed": 50, "total": 1000}),
+        encoding="utf-8",
+    )
+    shutil.copytree(first / "cache", bundle_dir / "cache")
+
+    second = tmp_path / "second"
+    restored = restore_recovery_bundle(bundle_dir, second, expected_fingerprint="abc")
+    assert restored["stage"] == "qwen"
+    assert (second / retrieval.relative_to(first)).read_text(encoding="utf-8") == retrieval.read_text(encoding="utf-8")

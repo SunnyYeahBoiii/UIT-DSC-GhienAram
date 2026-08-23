@@ -111,17 +111,36 @@ def _read_bundle_state(bundle: Path) -> dict[str, Any]:
         raise RecoveryError(f"Recovery ZIP không hợp lệ: {bundle}") from exc
 
 
+def _resolve_bundle_path(bundle: Path) -> tuple[Path, bool]:
+    """Resolve bundle to (path, is_directory). Handle ZIP, dir-with-ZIP, or extracted dir."""
+    if bundle.is_file():
+        return bundle, False
+    if bundle.is_dir():
+        for name in ("recovery_latest.zip", "recovery.zip"):
+            candidate = bundle / name
+            if candidate.is_file():
+                return candidate, False
+        return bundle, True
+    raise FileNotFoundError(f"Không tìm thấy recovery ZIP: {bundle}")
+
+
 def restore_recovery_bundle(
     bundle: str | Path,
     root: str | Path,
     *,
     expected_fingerprint: str,
 ) -> dict[str, Any]:
-    bundle_path = Path(bundle).resolve()
+    bundle_path, is_dir = _resolve_bundle_path(Path(bundle))
     root_path = Path(root).resolve()
-    if not bundle_path.is_file():
-        raise FileNotFoundError(f"Không tìm thấy recovery ZIP: {bundle_path}")
-    state = _read_bundle_state(bundle_path)
+
+    if is_dir:
+        state_file = bundle_path / RECOVERY_STATE
+        if not state_file.is_file():
+            raise RecoveryError(f"Recovery directory thiếu {RECOVERY_STATE}: {bundle_path}")
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    else:
+        state = _read_bundle_state(bundle_path)
+
     actual = str(state.get("run_fingerprint", ""))
     if actual != expected_fingerprint:
         raise RecoveryError(
@@ -131,32 +150,45 @@ def restore_recovery_bundle(
 
     root_path.mkdir(parents=True, exist_ok=True)
     restored = 0
-    with zipfile.ZipFile(bundle_path) as archive:
-        files = [info for info in archive.infolist() if not info.is_dir()]
-        for info in files:
-            relative = PurePosixPath(info.filename)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise RecoveryError(f"Đường dẫn không an toàn trong recovery ZIP: {info.filename}")
-            target = root_path.joinpath(*relative.parts).resolve()
-            try:
-                target.relative_to(root_path)
-            except ValueError as exc:
-                raise RecoveryError(f"Đường dẫn vượt recovery root: {info.filename}") from exc
-        for info in files:
-            if info.is_dir():
+    if is_dir:
+        for src in bundle_path.rglob("*"):
+            if not src.is_file():
                 continue
-            relative = PurePosixPath(info.filename)
+            relative = src.relative_to(bundle_path)
+            if ".." in relative.parts:
+                continue
             target = root_path.joinpath(*relative.parts).resolve()
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.restore.tmp")
-            with archive.open(info) as source, temporary.open("wb") as destination:
-                while True:
-                    block = source.read(1024 * 1024)
-                    if not block:
-                        break
-                    destination.write(block)
-            os.replace(temporary, target)
+            import shutil
+            shutil.copy2(src, target)
             restored += 1
+    else:
+        with zipfile.ZipFile(bundle_path) as archive:
+            files = [info for info in archive.infolist() if not info.is_dir()]
+            for info in files:
+                relative = PurePosixPath(info.filename)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise RecoveryError(f"Đường dẫn không an toàn trong recovery ZIP: {info.filename}")
+                target = root_path.joinpath(*relative.parts).resolve()
+                try:
+                    target.relative_to(root_path)
+                except ValueError as exc:
+                    raise RecoveryError(f"Đường dẫn vượt recovery root: {info.filename}") from exc
+            for info in files:
+                if info.is_dir():
+                    continue
+                relative = PurePosixPath(info.filename)
+                target = root_path.joinpath(*relative.parts).resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(f".{target.name}.restore.tmp")
+                with archive.open(info) as source, temporary.open("wb") as destination:
+                    while True:
+                        block = source.read(1024 * 1024)
+                        if not block:
+                            break
+                        destination.write(block)
+                os.replace(temporary, target)
+                restored += 1
     print(
         f"[Recovery] restored {restored:,} files from {bundle_path}; "
         f"stage={state.get('stage')} completed={state.get('completed')}/{state.get('total')}",
