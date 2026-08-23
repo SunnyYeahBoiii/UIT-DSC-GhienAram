@@ -8,71 +8,6 @@ from ..retrieval.retrieval import Evidence
 from ..core.text import strip_source_noise
 
 
-def _clean_document_name(slug: str) -> str:
-    """Convert document slug to readable Vietnamese name.
-    
-    Examples:
-        "Bo-luat-dan-su-2015-296215" → "Bộ luật Dân sự 2015"
-        "Nghi-dinh-78-2015-ND-CP-..." → "Nghị định 78/2015/NĐ-CP"
-        "Thông tư 33/2018/TT-BLDTBXH" → "Thông tư 33/2018/TT-BLDTBXH" (pass-through)
-    """
-    if not slug:
-        return "Không xác định"
-    
-    if not re.match(r"^[A-Za-z0-9-]+$", slug):
-        return slug
-    
-    parts = slug.split("-")
-    if len(parts) < 2:
-        return slug
-    
-    result_parts = []
-    for part in parts:
-        if part.isdigit():
-            result_parts.append(part)
-            break
-        elif part.lower() in ("bo", "luat", "nghi", "dinh", "thong", "tu", "quyet", "dinh", "chi", "thi"):
-            if part.lower() == "bo":
-                result_parts.append("Bộ")
-            elif part.lower() == "luat":
-                result_parts.append("luật")
-            elif part.lower() == "nghi":
-                result_parts.append("Nghị")
-            elif part.lower() == "dinh":
-                result_parts.append("định")
-            elif part.lower() == "thong":
-                result_parts.append("Thông")
-            elif part.lower() == "tu":
-                result_parts.append("tư")
-            elif part.lower() == "quyet":
-                result_parts.append("Quyết")
-            elif part.lower() == "chi":
-                result_parts.append("Chỉ")
-            elif part.lower() == "thi":
-                result_parts.append("thị")
-        elif part[0].isupper():
-            result_parts.append(part.capitalize() if len(result_parts) > 0 else part)
-        else:
-            break
-    
-    name = " ".join(result_parts)
-    
-    if "2015" in slug and "dan-su" in slug.lower():
-        name = "Bộ luật Dân sự 2015"
-    elif "2015" in slug and "nguyen-tu" in slug.lower():
-        name = "Luật Năng lượng nguyên tử 2008"
-    elif "78-2015" in slug:
-        name = "Nghị định 78/2015/NĐ-CP"
-    elif "74-2015" in slug:
-        name = "Nghị định 74/2015/NĐ-CP"
-    elif "19-2012" in slug:
-        name = "Thông tư 19/2012/TT-BKHCN"
-    elif "405" in slug and "2021" in slug:
-        name = "Quyết định 405/QĐ-BNV năm 2021"
-    
-    return name
-
-
 def _extract_legal_position(heading: str, text: str = "") -> str:
     """Extract full legal position including Điều, Khoản, Điểm.
     
@@ -158,8 +93,7 @@ def _render_evidence_sections(
     sections: list[str] = []
     used = 0
     for rank, item in enumerate(evidence, start_rank):
-        raw_doc_name = item.chunk.metadata.get("_document_name") or item.chunk.doc_id
-        document_name = _clean_document_name(raw_doc_name)
+        document_name = item.chunk.metadata.get("_document_name") or item.chunk.doc_id
         legal_position = _extract_legal_position(item.chunk.heading or "", item.chunk.text or "")
         
         header = f"[CĂN CỨ {rank}]"
