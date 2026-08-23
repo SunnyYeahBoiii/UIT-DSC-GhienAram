@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import random
 import shutil
 import sys
 from pathlib import Path
@@ -34,11 +35,12 @@ def build_prompt(question: str, question_id: str, evidence_by_id, max_context_ch
 
 
 def generate_predictions(
-    model, tokenizer, rows, max_new_tokens: int, label: str, evidence_by_id, max_context_chars: int, config
+    model, tokenizer, rows, max_new_tokens: int, label: str, evidence_by_id, max_context_chars: int, config,
+    print_limit: int = 5,
 ) -> dict[str, str]:
     predictions = {}
     with torch.no_grad():
-        for row in rows:
+        for i, row in enumerate(rows):
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -56,12 +58,15 @@ def generate_predictions(
             )
             text = tokenizer.decode(generated[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
             predictions[row.question_id] = clean_answer(text)
-            print(
-                f"  [{label}] qid={row.question_id}\n"
-                f"    ref : {row.answer[:300]}\n"
-                f"    pred: {predictions[row.question_id][:300]}",
-                flush=True,
-            )
+            if i < print_limit:
+                print(
+                    f"  [{label}] qid={row.question_id}\n"
+                    f"    ref : {row.answer[:300]}\n"
+                    f"    pred: {predictions[row.question_id][:300]}",
+                    flush=True,
+                )
+            elif i == print_limit:
+                print(f"  [{label}] ... còn lại {len(rows) - print_limit} câu không in chi tiết", flush=True)
     return predictions
 
 
@@ -101,6 +106,7 @@ def main() -> None:
     )
     parser.add_argument("--max-new-tokens", type=int, default=700)
     parser.add_argument("--max-eval-samples", type=int, default=None, help="giới hạn số câu dev để sinh nhanh hơn")
+    parser.add_argument("--print-limit", type=int, default=5, help="số câu in chi tiết ref/pred mỗi epoch (0 = không in)")
     parser.add_argument(
         "--max-train-eval-samples",
         type=int,
@@ -124,6 +130,12 @@ def main() -> None:
 
     dev_rows = load_qa(Path(args.dev_file), True)
     if args.max_eval_samples:
+        # dev_rows đến từ deterministic_split rồi sorted theo question_id — lấy N câu
+        # đầu tiên sẽ không đại diện (thiên theo thứ tự id); shuffle theo seed config
+        # trước khi cắt để mẫu smoke-test thực sự ngẫu nhiên nhưng vẫn tái lập được.
+        rng = random.Random(int(config["seed"]))
+        dev_rows = sorted(dev_rows, key=lambda row: row.question_id)
+        rng.shuffle(dev_rows)
         dev_rows = dev_rows[: args.max_eval_samples]
     if not dev_rows:
         raise RuntimeError(f"Dev file rỗng: {args.dev_file}")
@@ -176,6 +188,7 @@ def main() -> None:
             evidence_by_id,
             args.max_context_chars,
             config,
+            print_limit=args.print_limit,
         )
         scores = evaluate_predictions_official(predictions, references)
         trainer_state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
@@ -215,6 +228,7 @@ def main() -> None:
             evidence_by_id,
             args.max_context_chars,
             config,
+            print_limit=args.print_limit,
         )
         train_predictions_path = root / f"predictions_train_{best_checkpoint_name}.json"
         save_predictions(train_predictions_path, train_predictions, train_references)

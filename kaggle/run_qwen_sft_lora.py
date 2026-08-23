@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import sys
 import time
@@ -132,6 +133,7 @@ def main() -> None:
         "để trống = mỗi epoch dùng đúng cùng --max-train-samples câu như cũ.",
     )
     parser.add_argument("--max-eval-samples", type=int, default=None)
+    parser.add_argument("--print-limit", type=int, default=5, help="số câu in chi tiết ref/pred khi chọn epoch")
     parser.add_argument("--resume-input", default=None)
     parser.add_argument(
         "--dense-index-input",
@@ -246,6 +248,11 @@ def main() -> None:
         train_for_evidence = train_for_evidence[:train_pool_size]
     dev_for_evidence = load_qa(dev_split, require_answers=False)
     if args.max_eval_samples:
+        # PHẢI cùng seed + cùng thứ tự sort-rồi-shuffle với select_best_sft_checkpoint.py
+        # (xem shuffle ở đó khi cắt --max-eval-samples), nếu không 2 bên chọn ra 2 tập N câu
+        # khác nhau -> lúc eval thiếu evidence cho câu được chọn, bị skip oan.
+        dev_for_evidence = sorted(dev_for_evidence, key=lambda row: row.question_id)
+        random.Random(int(config["seed"])).shuffle(dev_for_evidence)
         dev_for_evidence = dev_for_evidence[: args.max_eval_samples]
     seen_ids = set()
     evidence_records = []
@@ -313,8 +320,6 @@ def main() -> None:
         str(adapter_output),
         "--dev-file",
         str(dev_split),
-        "--train-file",
-        str(train_split),
         "--evidence",
         str(evidence_path),
         "--max-context-chars",
@@ -323,8 +328,8 @@ def main() -> None:
     ]
     if args.max_eval_samples:
         select_command.extend(["--max-eval-samples", str(args.max_eval_samples)])
-    if args.max_train_samples:
-        select_command.extend(["--max-train-eval-samples", str(args.max_train_samples)])
+    if args.print_limit is not None:
+        select_command.extend(["--print-limit", str(args.print_limit)])
     run_command(select_command)
 
     selection_report = json.loads((adapter_output / "epoch_selection_report.json").read_text(encoding="utf-8"))
