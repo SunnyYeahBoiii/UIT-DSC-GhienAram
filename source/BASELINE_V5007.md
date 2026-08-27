@@ -2,6 +2,10 @@
 
 Đây là mốc an toàn để phát triển sau thất bại của selector v9.3 (0.4272).
 
+Source hiện có thêm chế độ `guarded-v5007`; xem `INFERENCE_GUARDED_V5007.md`.
+Frozen selector dưới đây vẫn được giữ nguyên để làm đối chứng. Guarded runtime
+dùng cache/index schema mới và không được resume trực tiếp từ recovery v7.
+
 - Runtime: source contract `0.9.2-v5007`, selector schema
   `selector-weights-v3-agentic-evidence`.
 - Generator: Qwen3.5-2B + completed QLoRA adapter `full`.

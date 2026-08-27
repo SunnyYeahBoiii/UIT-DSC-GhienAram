@@ -12,7 +12,7 @@ from .models import DenseEncoder
 from .sqlite_store import SQLiteLegalStore
 
 
-DENSE_INDEX_SCHEMA = "global-dense-v1"
+DENSE_INDEX_SCHEMA = "global-dense-v2-structured-headings"
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:

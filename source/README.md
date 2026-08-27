@@ -5,6 +5,11 @@ Baseline public đang được khóa tại METEOR **0.5007** bằng
 attach ngoài để tránh vô tình dùng lại calibration v9.3 bị regression; xem
 `BASELINE_V5007.md`.
 
+Runtime hiện tại là thử nghiệm **guarded-v5007**: giữ frozen selector làm mốc,
+nhưng thêm windowed reranking, kiểm tra citation/con số/ý hỏi và Qwen repair có
+giới hạn. Xem `INFERENCE_GUARDED_V5007.md`. Do chunking có thêm tiêu đề kỹ thuật,
+dense index baseline cũ phải được dựng lại bằng source này.
+
 Pipeline offline cho Kaggle T4, chỉ dùng dữ liệu chính thức và các checkpoint mã nguồn mở đã được BTC phê duyệt. Tổng tham số runtime vẫn được runner kiểm tra phải nhỏ hơn 4B. BARTpho đã bị loại.
 
 ## Những phần mới trong v9/v9.1
@@ -37,6 +42,7 @@ Question
        -> 0–2 style examples for Qwen
        -> high-threshold memory candidate
   -> evidence-grounded Qwen base/QLoRA + extractive candidate
+       -> quality audit + bounded Qwen repair for severe defects only
        -> gated Agentic Qwen for complex/low-confidence questions only
        -> BM25 tool call + citation/temporal/relation legal-rerank
   -> learned answer-length compaction
@@ -48,7 +54,9 @@ Chi tiết nằm trong [PIPELINE_V9.md](PIPELINE_V9.md). Hướng dẫn Kaggle n
 
 ## Thứ tự chạy khuyến nghị
 
-1. Import `kaggle/legalqa_dsc2026_inference_only_t4.ipynb`, đặt `DENSE_INDEX_ONLY=True`; lưu `/kaggle/working/legalqa_dense_index` thành Dataset. Thư mục này chứa cả global corpus dense index và official train-memory.
+1. Import `kaggle/legalqa_dsc2026_inference_only_t4.ipynb` từ source hiện tại,
+   đặt `DENSE_INDEX_ONLY=True`; lưu `/kaggle/working/legalqa_dense_index` thành
+   Dataset. Chỉ dùng manifest schema `global-dense-v2-structured-headings`.
 2. Import `kaggle/legalqa_dsc2026_v9_qlora_t4.ipynb`, đặt `TRAIN_SCOPE='split'`. Nếu manifest báo `paused`, Save Version rồi tạo Dataset từ `/kaggle/working/qlora_recovery_latest.zip` và attach vào session sau; nếu báo `complete`, lưu adapter split.
 3. Attach dense index và completed split adapter; chạy `kaggle/legalqa_dsc2026_v9_selector_calibration_t4.ipynb` bằng source v9.2. Lưu `tuned_selection.yaml` cùng báo cáo candidate oracle. Không dùng trace/trọng số calibration từ Agentic cũ vì candidate evidence và prior đã thay đổi.
 4. Chạy lại notebook QLoRA với `TRAIN_SCOPE='full'`. Không attach state `split` làm state resume cho bước này; code cũng từ chối scope sai.

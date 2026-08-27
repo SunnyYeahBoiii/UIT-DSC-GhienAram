@@ -62,7 +62,7 @@ from run_end_to_end import (  # noqa: E402
 )
 
 
-CACHE_SCHEMA_VERSION = "inference-v7-agentic-error-isolation"
+CACHE_SCHEMA_VERSION = "inference-v8-quality-repair-windowed-rerank"
 RUNTIME_MODEL_ROLES = ("generator", "embedding", "reranker", "verifier")
 EPHEMERAL_RUNTIME_KEYS = {"max_runtime_hours", "runtime_started_unix", "stop_at_unix"}
 

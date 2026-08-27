@@ -9,7 +9,9 @@ from .text import normalize_text
 
 HEADING_RE = re.compile(
     r"(?im)^(?P<heading>\s*(?:chương\s+[IVXLCDM0-9]+|mục\s+[IVXLCDM0-9]+|"
-    r"điều\s+\d+[a-zđ]?\.?|phần\s+(?:thứ\s+)?[A-ZÀ-ỸIVXLCDM0-9]+)"
+    r"điều\s+\d+[a-zđ]?\.?|phần\s+(?:thứ\s+)?[A-ZÀ-ỸIVXLCDM0-9]+|"
+    r"[IVXLCDM]{1,8}\s*[.):-]\s*[A-ZÀ-ỸĐ][^\n]{0,160}|"
+    r"\d{1,3}\s*[.)-]\s*[A-ZÀ-ỸĐ][^\n]{0,160})"
     r"(?:\s*[-.:–—]?\s*[^\n]{0,180})?)\s*$"
 )
 

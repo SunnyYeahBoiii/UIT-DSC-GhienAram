@@ -1,5 +1,10 @@
 # Kaggle T4 — LegalQA v9.2
 
+> Guarded-v5007 dùng dense schema `global-dense-v2-structured-headings`.
+> Dense index cũ của baseline 0.5007 không còn tương thích: dựng lại bằng
+> `DENSE_INDEX_ONLY=True` trước khi chạy public inference. Xem
+> `INFERENCE_GUARDED_V5007.md` ở thư mục source.
+
 ## Inputs bắt buộc
 
 Attach Dataset official chứa `train.json`, `public-official.json`, `selected-contexts/`; Dataset source v9; Dataset bốn base checkpoint đã được BTC duyệt. Internet tắt, GPU bật.

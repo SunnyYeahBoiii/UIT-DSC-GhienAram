@@ -23,6 +23,10 @@ runtime:
   reranker_batch_size: 1
   verifier_batch_size: 4
   reranker_max_length: 512
+  # Rerank các cửa sổ token phù hợp câu hỏi thay vì chỉ 512 token đầu chunk.
+  reranker_max_windows: 3
+  reranker_window_stride: 96
+  reranker_window_aggregation: "max"
   unload_after_stage: true
   dense_index_dir: "/kaggle/working/legalqa_dense_index"
   train_memory_dir: "/kaggle/working/legalqa_dense_index/train_memory"
@@ -104,6 +108,7 @@ routing:
   graph_chunks_per_document: 2
 
 generation:
+  quality_recipe: "guarded-v5007-repair-v1"
   qwen_enabled: true
   bartpho_enabled: false
   extractive_enabled: true
@@ -113,11 +118,17 @@ generation:
   agentic_routes: ["complex"]
   agentic_confidence_below: 0.45
   agentic_on_legal_cues: true
+  # Gate đã xác định đây là câu cần mở rộng; thực hiện một lượt BM25/graph CPU
+  # chắc chắn trước khi model được phép kết luận.
+  agentic_force_first_search: true
   agentic_max_tool_calls: 2
   agentic_evidence_per_call: 3
   agentic_max_query_chars: 240
   agentic_warn_after_nonfatal_errors: 3
   max_context_chars: 18000
+  # Áp dụng bằng tokenizer thật khi generator đã được nạp; char limit vẫn là
+  # hàng rào phụ để cache/log không phình bất thường.
+  max_context_tokens: 6000
   max_new_tokens: 900
   simple_max_new_tokens: 512
   complex_max_new_tokens: 900
@@ -125,6 +136,9 @@ generation:
   temperature: 0.7
   top_p: 0.9
   repetition_penalty: 1.03
+  stop_on_tandem_repeat: true
+  repeat_stop_min_block_tokens: 8
+  repeat_stop_max_block_tokens: 40
   min_answer_words: 35
   target_answer_words: 180
   simple_target_answer_words: 140
@@ -136,6 +150,12 @@ generation:
   tokens_per_vietnamese_word: 1.65
   compact_generated_answers: true
   hard_trim_generated_answers: false
+  log_raw_generated_answers: true
+  extractive_min_sentence_overlap: 0.12
+  extractive_complex_max_documents: 3
+  selective_repair_enabled: true
+  repair_max_questions: 220
+  repair_max_new_tokens: 700
 
 selection:
   evidence_support: 0.18
@@ -151,9 +171,21 @@ selection:
   truncation_penalty: 0.22
   retrieval_risk_penalty: 0.10
   qwen_preference_margin: 0.06
+  # Guarded-v5007 features: frozen selector vẫn ghi đè các trọng số cũ, còn
+  # các guard mới được giữ độc lập và chỉ phạt mâu thuẫn đo được.
+  intent_coverage: 0.10
+  scope_coverage: 0.08
+  evidence_document_coverage: 0.06
+  document_citation_penalty: 0.45
+  numeric_relation_penalty: 0.28
+  degenerate_generation_penalty: 0.70
+  dangling_ending_penalty: 0.14
+  repair_minimum_quality_gain: 0.04
+  repair_non_improvement_penalty: 1.0
   source_priors:
     qwen3.5-2b: 0.08
     qwen3.5-2b-agentic: 0.08
+    qwen3.5-2b-repair: 0.08
     extractive: -0.03
     train-memory: 0.00
 

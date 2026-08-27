@@ -1,0 +1,305 @@
+{
+  "schema": "legalqa-training-quality-v1",
+  "qlora_excluded_ids": [
+    "11399",
+    "115937",
+    "115979",
+    "11767",
+    "11815",
+    "120507",
+    "120933",
+    "12161",
+    "121833",
+    "122793",
+    "132175",
+    "136933",
+    "1371",
+    "140865",
+    "148605",
+    "157509",
+    "165613",
+    "167475",
+    "17505",
+    "17915",
+    "18595",
+    "19447",
+    "21037",
+    "2185",
+    "23955",
+    "24313",
+    "24803",
+    "25243",
+    "26225",
+    "31787",
+    "327",
+    "39671",
+    "45401",
+    "49031",
+    "50211",
+    "51505",
+    "52111",
+    "59427",
+    "6067",
+    "62459",
+    "66189",
+    "87313",
+    "91149",
+    "91957",
+    "93871",
+    "96413",
+    "99633"
+  ],
+  "exclusion_reasons": {
+    "11815": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "327": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "2185": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "157509": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "24803": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "39671": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "115937": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "11767": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "21037": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "25243": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "23955": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "26225": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "167475": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "12161": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "96413": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "31787": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "93871": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "120933": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "17505": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "99633": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "51505": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "165613": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "49031": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "59427": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "121833": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "120507": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "132175": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "148605": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "87313": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "140865": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "52111": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "1371": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "91149": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "24313": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "6067": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "122793": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "50211": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "19447": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "91957": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "62459": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "45401": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "115979": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "17915": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "136933": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "18595": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "66189": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ],
+    "11399": [
+      "answer_lost_table_or_form_content_after_scraping"
+    ]
+  },
+  "duplicate_question_groups": [
+    [
+      "40089",
+      "142041"
+    ],
+    [
+      "21781",
+      "52157"
+    ],
+    [
+      "25227",
+      "112319",
+      "142213"
+    ],
+    [
+      "24375",
+      "31453"
+    ],
+    [
+      "27801",
+      "24829"
+    ],
+    [
+      "97793",
+      "138397"
+    ],
+    [
+      "7939",
+      "122125"
+    ],
+    [
+      "44927",
+      "88511"
+    ],
+    [
+      "131673",
+      "163345"
+    ],
+    [
+      "10515",
+      "11071"
+    ],
+    [
+      "81057",
+      "63211"
+    ],
+    [
+      "31251",
+      "80247"
+    ],
+    [
+      "92843",
+      "127357"
+    ],
+    [
+      "85891",
+      "117887"
+    ],
+    [
+      "104879",
+      "163099"
+    ],
+    [
+      "101633",
+      "72397"
+    ]
+  ],
+  "split_rule": "keep_every_duplicate_question_group_in_one_split",
+  "long_answer_ids_over_1200_words": [
+    "79987",
+    "113663",
+    "153671",
+    "37491",
+    "113337",
+    "164923",
+    "59529",
+    "132267",
+    "5537",
+    "150051",
+    "124807",
+    "41685",
+    "70629",
+    "26265",
+    "43537",
+    "152455",
+    "37801",
+    "126191",
+    "131625",
+    "13495",
+    "118227",
+    "138007",
+    "120573",
+    "80809",
+    "147929",
+    "155249",
+    "87427",
+    "104937",
+    "167691",
+    "75975",
+    "2899",
+    "156335",
+    "133661",
+    "13003",
+    "126379",
+    "113423",
+    "12581",
+    "61739",
+    "97955"
+  ],
+  "long_answer_rule": "retain_content_but_use_truncation_aware_training"
+}

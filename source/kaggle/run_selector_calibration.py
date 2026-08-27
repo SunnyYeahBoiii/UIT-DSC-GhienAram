@@ -83,7 +83,10 @@ def _find_dense(root: Path) -> Path:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if payload.get("schema") == "global-dense-v1" and payload.get("status") == "complete":
+        if (
+            payload.get("schema") == "global-dense-v2-structured-headings"
+            and payload.get("status") == "complete"
+        ):
             identity = str(payload.get("identity", ""))
             if not identity:
                 raise RuntimeError(f"Dense manifest hoàn tất nhưng thiếu identity: {manifest_path}")

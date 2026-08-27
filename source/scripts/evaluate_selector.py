@@ -108,7 +108,7 @@ def candidate_score(candidate: dict[str, Any], weights: dict[str, Any]) -> float
     details = candidate.get("details", {})
     source_priors = weights.get("source_priors", {})
     source_prior = source_priors.get(candidate["source"])
-    if source_prior is None and candidate["source"] == "qwen3.5-2b-agentic":
+    if source_prior is None and candidate["source"].startswith("qwen3.5-2b-"):
         source_prior = source_priors.get("qwen3.5-2b", 0.0)
     trust = float(details.get("evidence_trust", 1.0))
     retrieval = float(details.get("retrieval_confidence", 1.0))
@@ -121,11 +121,23 @@ def candidate_score(candidate: dict[str, Any], weights: dict[str, Any]) -> float
         + float(weights["legal_semantic"]) * float(details.get("legal_semantic", 0.0))
         + float(weights["length_prior"]) * float(details.get("length_prior", 0.0))
         + float(weights.get("fluency", 0.0)) * float(details.get("fluency", 0.0))
+        + float(weights.get("intent_coverage", 0.0)) * float(details.get("intent_coverage", 1.0))
+        + float(weights.get("scope_coverage", 0.0)) * float(details.get("scope_coverage", 1.0))
+        + float(weights.get("evidence_document_coverage", 0.0))
+        * float(details.get("evidence_document_coverage", 1.0))
         + float(source_prior or 0.0)
         - float(weights["unsupported_penalty"]) * unsupported
         - float(weights["duplicate_penalty"]) * float(details.get("duplicate", 0.0))
         - float(weights.get("fragment_penalty", 0.0)) * float(details.get("fragment_ratio", 0.0))
         - float(weights.get("truncation_penalty", 0.0)) * float(bool(details.get("truncated", False)))
+        - float(weights.get("document_citation_penalty", 0.0))
+        * (1.0 - float(details.get("document_citation_precision", 1.0)))
+        - float(weights.get("numeric_relation_penalty", 0.0))
+        * float(details.get("numeric_relation_conflict", 0.0))
+        - float(weights.get("degenerate_generation_penalty", 0.0))
+        * float(details.get("degenerate_generation", 0.0))
+        - float(weights.get("dangling_ending_penalty", 0.0))
+        * float(details.get("dangling_ending", 0.0))
         - float(weights.get("retrieval_risk_penalty", 0.0))
         * (1.0 - retrieval)
         * (unsupported + float(candidate["source"].startswith("qwen")) * 0.15)
@@ -151,7 +163,19 @@ def pick(
     ]
     if not candidates:
         raise RuntimeError("Không còn candidate hợp lệ sau bộ lọc BARTpho/train-memory.")
-    ranked = sorted(candidates, key=lambda item: (-candidate_score(item, weights), item["source"]))
+    base_qwen = next((item for item in candidates if item["source"] == "qwen3.5-2b"), None)
+    adjusted_scores = {id(item): candidate_score(item, weights) for item in candidates}
+    if base_qwen is not None:
+        base_risk = float(base_qwen.get("details", {}).get("quality_risk", 1.0))
+        for item in candidates:
+            if item["source"] != "qwen3.5-2b-repair":
+                continue
+            gain = base_risk - float(item.get("details", {}).get("quality_risk", 1.0))
+            if gain < float(weights.get("repair_minimum_quality_gain", 0.04)):
+                adjusted_scores[id(item)] -= float(
+                    weights.get("repair_non_improvement_penalty", 1.0)
+                )
+    ranked = sorted(candidates, key=lambda item: (-adjusted_scores[id(item)], item["source"]))
     qwen = next(
         (
             item for item in ranked
@@ -160,7 +184,7 @@ def pick(
         None,
     )
     margin = float(weights.get("qwen_preference_margin", 0.0))
-    if qwen is not None and candidate_score(ranked[0], weights) - candidate_score(qwen, weights) <= margin:
+    if qwen is not None and adjusted_scores[id(ranked[0])] - adjusted_scores[id(qwen)] <= margin:
         return qwen
     return ranked[0]
 
@@ -206,6 +230,12 @@ def sampled_weights(base: dict[str, Any], rng: random.Random) -> dict[str, Any]:
         "duplicate_penalty": (0.02, 0.18), "fragment_penalty": (0.04, 0.28),
         "truncation_penalty": (0.08, 0.40),
         "retrieval_risk_penalty": (0.03, 0.20),
+        "intent_coverage": (0.03, 0.18), "scope_coverage": (0.02, 0.16),
+        "evidence_document_coverage": (0.0, 0.12),
+        "document_citation_penalty": (0.20, 0.70),
+        "numeric_relation_penalty": (0.10, 0.50),
+        "degenerate_generation_penalty": (0.35, 1.00),
+        "dangling_ending_penalty": (0.05, 0.30),
     }
     for key, (low, high) in ranges.items():
         candidate[key] = rng.uniform(low, high)
@@ -213,6 +243,7 @@ def sampled_weights(base: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     candidate["source_priors"] = {
         "qwen3.5-2b": rng.uniform(-0.02, 0.14),
         "qwen3.5-2b-agentic": rng.uniform(-0.02, 0.14),
+        "qwen3.5-2b-repair": rng.uniform(-0.02, 0.14),
         "extractive": rng.uniform(-0.10, 0.04),
         "train-memory": rng.uniform(-0.08, 0.10),
     }

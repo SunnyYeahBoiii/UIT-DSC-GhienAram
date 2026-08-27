@@ -68,10 +68,16 @@ Báo cáo gồm:
 
 Hai scope không được trộn:
 
-- `split`: loại grouped-dev khỏi train, dùng để đo candidate oracle và selector trung thực.
-- `full`: train trên toàn bộ official train để tạo adapter cuối cho public inference.
+- `split`: chia grouped-dev từ tập QLoRA đã lọc, loại dev khỏi train.
+- `full`: train trên toàn bộ 6.953 mẫu hợp lệ để tạo adapter cuối. Đầu vào duy nhất
+  là `train_clean.json` (7.000 ID); runner áp dụng 47 ID loại từ
+  `training_quality.json` và tạo `prepared_train/qlora_train.json` trong working.
+  Không tự chọn `train.json`/`train_clean_qlora.json`, không sửa dữ liệu gốc.
 
-Mỗi state có `qlora_scope.json`; runner từ chối resume nếu scope không khớp. Khi
+Mỗi state có `qlora_scope.json` với scope và SHA-256 dữ liệu. Lần đầu train sạch
+phải dùng session mới, `AUTO_RESUME_TRAINING=False`, `RESUME_INPUT=None`; không
+resume checkpoint dữ liệu cũ. Khi tiếp tục chính lần train sạch, bật
+`AUTO_RESUME_TRAINING=True`; runner từ chối nếu scope/hash không khớp. Khi
 notebook báo `PAUSED SAFELY`, Save Version, tạo Dataset từ
 `/kaggle/working/qlora_recovery_latest.zip`, attach vào session mới và giữ nguyên
 hyperparameter. Runner chấp nhận cả thư mục state và ZIP recovery, đồng thời chặn
@@ -79,14 +85,18 @@ path traversal khi giải nén.
 
 ## 5. Inference và cache identity
 
-Inference fingerprint v5 chứa hash question file, train file, corpus, bốn base checkpoint, Qwen adapter và toàn bộ retrieval/generation/selection config. Vì vậy:
+Inference fingerprint v8 chứa hash question file, train file, corpus, bốn base
+checkpoint, Qwen adapter và toàn bộ retrieval/generation/selection config. Vì vậy:
 
 - adapter khác không dùng nhầm Qwen cache;
 - selector train khác không dùng nhầm train-memory;
 - recovery cũ không được dùng âm thầm;
 - thay đổi threshold/length plan tạo namespace cache mới.
 
-Runtime tuần tự: embedding → unload → reranker → unload → Qwen → unload → ViLegalBERT → unload. BARTpho không được tải.
+Runtime tuần tự: embedding → unload → windowed reranker → unload → Qwen base +
+bounded repair → unload → gated Agentic Qwen → unload → ViLegalBERT → unload.
+BARTpho không được tải. Repair có cache/recovery riêng và chỉ được chọn khi giảm
+quality risk đủ mức cấu hình.
 
 ## 6. Quyết định dựa trên oracle
 
@@ -98,4 +108,7 @@ So sánh ba khoảng cách:
 
 Chỉ mang `tuned_selection.yaml` sang public khi holdout cải thiện. Sau đó train adapter `full` riêng và giữ nguyên retrieval/selector đã chọn.
 
-V9.1 yêu cầu tuning YAML có `schema: selector-weights-v2-graph-gate`. Trọng số v9 cũ bị từ chối vì graph gate đã thay đổi phân phối evidence và candidate score; phải chạy lại grouped calibration.
+Frozen baseline và calibration hiện dùng
+`schema: selector-weights-v3-agentic-evidence`. Các feature guarded-v5007 mới
+được bổ sung vào resolved config; cần chạy lại grouped calibration nếu muốn tune
+chúng. Dense index phải có schema `global-dense-v2-structured-headings`.

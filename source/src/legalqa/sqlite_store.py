@@ -15,7 +15,7 @@ from .legal_graph import RelationEdge, document_aliases, extract_relation_mentio
 from .text import citations, document_numbers, legal_tokens, numbers, overlap_ratio, words
 
 
-STORE_SCHEMA_VERSION = "4"
+STORE_SCHEMA_VERSION = "5"
 
 
 @dataclass(frozen=True)

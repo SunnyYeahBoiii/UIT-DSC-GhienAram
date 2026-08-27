@@ -6,6 +6,7 @@ from typing import Any
 
 from .answer_style import generation_plan
 from .generation import Candidate
+from .quality import analyze_answer_quality, normalized_document_numbers
 from .retrieval import Evidence, retrieval_confidence
 from .text import citations, length_prior, numbers, overlap_ratio, split_sentences, words
 
@@ -69,7 +70,9 @@ def score_candidates(
     for candidate in candidates:
         generation_details = dict(candidate.details)
         active_evidence = (candidate_evidence_by_source or {}).get(candidate.source, evidence)
-        evidence_text = "\n".join(item.chunk.text for item in active_evidence)
+        evidence_text = str(generation_details.get("_visible_evidence_text") or "\n".join(
+            item.chunk.text for item in active_evidence
+        ))
         evidence_content = words(evidence_text, remove_stopwords=True)
         evidence_citations = citations(evidence_text)
         evidence_numbers = numbers(evidence_text)
@@ -84,6 +87,8 @@ def score_candidates(
         answer_content = words(candidate.answer, remove_stopwords=True)
         answer_citations = citations(candidate.answer)
         answer_numbers = numbers(candidate.answer)
+        answer_documents = normalized_document_numbers(candidate.answer)
+        evidence_documents = normalized_document_numbers(evidence_text)
         evidence_support = overlap_ratio(answer_content, evidence_content)
         query_coverage = overlap_ratio(query_content, answer_content)
         citation_precision = (
@@ -94,9 +99,39 @@ def score_candidates(
             len(answer_numbers & evidence_numbers) / len(answer_numbers)
             if answer_numbers else 1.0
         )
+        document_citation_precision = (
+            len(answer_documents & evidence_documents) / len(answer_documents)
+            if answer_documents else 1.0
+        )
         unsupported = 0.5 * (1 - citation_precision) + 0.5 * (1 - numeric_precision)
         word_count = len(words(candidate.answer))
         route = str(generation_details.get("route") or route_payload.get("route", "simple"))
+        visible_chunk_ids = {
+            str(item.get("chunk_id"))
+            for item in generation_details.get("evidence_manifest", [])
+            if isinstance(item, dict) and item.get("chunk_id")
+        }
+        document_texts: dict[str, list[str]] = {}
+        for active_item in active_evidence:
+            if visible_chunk_ids and active_item.chunk.chunk_id not in visible_chunk_ids:
+                continue
+            document_texts.setdefault(active_item.chunk.doc_id, []).append(active_item.chunk.text)
+        supported_documents = sum(
+            overlap_ratio(
+                answer_content,
+                words("\n".join(parts), remove_stopwords=True),
+            )
+            >= 0.18
+            for parts in document_texts.values()
+        )
+        expected_documents = min(
+            len(document_texts),
+            2 if route == "complex" else 1,
+        )
+        evidence_document_coverage = (
+            min(1.0, supported_documents / expected_documents)
+            if expected_documents else 0.0
+        )
         plan = generation_plan(question, route, config)
         length_score = length_prior(
             word_count,
@@ -115,9 +150,31 @@ def score_candidates(
         )
         fluency, fragment_ratio = _fluency_score(candidate.answer)
         truncated = float(bool(generation_details.get("truncated", False)))
+        quality = generation_details.get("quality")
+        if not isinstance(quality, dict):
+            quality = analyze_answer_quality(
+                question, candidate.answer, evidence_text, generation_details
+            )
+        intent_coverage = float(quality.get("intent_coverage", 1.0))
+        answer_scope = float(quality.get("answer_scope_coverage", 1.0))
+        evidence_scope = float(quality.get("evidence_scope_coverage", 1.0))
+        scope_score = min(answer_scope, evidence_scope)
+        relation_conflict = min(
+            1.0, float(len(quality.get("numeric_relation_conflicts", [])))
+        )
+        degenerate_repeat = float(bool(quality.get("degenerate_repeat", False)))
+        dangling = float(bool(quality.get("dangling_ending", False)))
+        quality_risk = min(
+            1.0,
+            0.36 * (1 - document_citation_precision)
+            + 0.22 * relation_conflict
+            + 0.22 * degenerate_repeat
+            + 0.10 * dangling
+            + 0.10 * (1 - intent_coverage),
+        )
         fallback_prior = (
             source_priors.get("qwen3.5-2b", 0.0)
-            if candidate.source == "qwen3.5-2b-agentic"
+            if candidate.source.startswith("qwen3.5-2b-")
             else 0.0
         )
         source_prior = float(source_priors.get(candidate.source, fallback_prior))
@@ -130,11 +187,20 @@ def score_candidates(
             + float(weights["legal_semantic"]) * semantic
             + float(weights["length_prior"]) * length_score
             + float(weights.get("fluency", 0.18)) * fluency
+            + float(weights.get("intent_coverage", 0.0)) * intent_coverage
+            + float(weights.get("scope_coverage", 0.0)) * scope_score
+            + float(weights.get("evidence_document_coverage", 0.0))
+            * evidence_document_coverage
             + source_prior
             - float(weights["unsupported_penalty"]) * unsupported
             - float(weights["duplicate_penalty"]) * duplicate
             - float(weights.get("fragment_penalty", 0.14)) * fragment_ratio
             - float(weights.get("truncation_penalty", 0.18)) * truncated
+            - float(weights.get("document_citation_penalty", 0.0))
+            * (1 - document_citation_precision)
+            - float(weights.get("numeric_relation_penalty", 0.0)) * relation_conflict
+            - float(weights.get("degenerate_generation_penalty", 0.0)) * degenerate_repeat
+            - float(weights.get("dangling_ending_penalty", 0.0)) * dangling
             - float(weights.get("retrieval_risk_penalty", 0.08))
             * (1 - retrieval_score)
             * (unsupported + float(candidate.source.startswith("qwen")) * 0.15)
@@ -143,13 +209,14 @@ def score_candidates(
             score = -1.0
         candidate.score = score
         candidate.details = {
-            **{key: value for key, value in generation_details.items() if not key.startswith("_precomputed_")},
+            **{key: value for key, value in generation_details.items() if not key.startswith("_")},
             "evidence_support": evidence_support,
             "evidence_trust": evidence_trust,
             "retrieval_confidence": retrieval_score,
             "query_coverage": query_coverage,
             "citation_precision": citation_precision,
             "numeric_precision": numeric_precision,
+            "document_citation_precision": document_citation_precision,
             "legal_semantic": semantic,
             "length_prior": length_score,
             "unsupported": unsupported,
@@ -158,8 +225,32 @@ def score_candidates(
             "fragment_ratio": fragment_ratio,
             "source_prior": source_prior,
             "truncation_penalty_applied": truncated,
+            "intent_coverage": intent_coverage,
+            "scope_coverage": scope_score,
+            "evidence_document_coverage": evidence_document_coverage,
+            "supported_evidence_documents": supported_documents,
+            "numeric_relation_conflict": relation_conflict,
+            "degenerate_generation": degenerate_repeat,
+            "dangling_ending": dangling,
+            "quality_risk": quality_risk,
+            "quality": quality,
             "words": float(word_count),
         }
+    base_qwen = next(
+        (candidate for candidate in candidates if candidate.source == "qwen3.5-2b"),
+        None,
+    )
+    minimum_repair_gain = float(weights.get("repair_minimum_quality_gain", 0.04))
+    for candidate in candidates:
+        if candidate.source != "qwen3.5-2b-repair" or base_qwen is None:
+            continue
+        gain = float(base_qwen.details.get("quality_risk", 1.0)) - float(
+            candidate.details.get("quality_risk", 1.0)
+        )
+        candidate.details["repair_quality_gain"] = gain
+        if gain < minimum_repair_gain:
+            candidate.score -= float(weights.get("repair_non_improvement_penalty", 1.0))
+            candidate.details["repair_rejected_no_quality_gain"] = True
     ranked = sorted(candidates, key=lambda candidate: (-candidate.score, candidate.source))
     qwen_margin = float(weights.get("qwen_preference_margin", 0.04))
     qwen = next(

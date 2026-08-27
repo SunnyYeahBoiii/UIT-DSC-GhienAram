@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from legalqa.answer_style import build_answer_style_profile  # noqa: E402
 from legalqa.config import load_config  # noqa: E402
-from legalqa.data import load_qa, write_json  # noqa: E402
+from legalqa.data import load_qa, read_json, write_json  # noqa: E402
 from legalqa.fingerprint import corpus_content_fingerprint, sha256_file  # noqa: E402
 from legalqa.sqlite_store import build_sqlite_store, prepare_sqlite_weak_pairs  # noqa: E402
 from run_end_to_end import (  # noqa: E402
@@ -31,6 +31,55 @@ from run_end_to_end import (  # noqa: E402
     run_command,
     write_resolved_config,
 )
+
+
+def _resolve_training_files(
+    data_root: Path, prepared_root: Path
+) -> tuple[Path, Path, dict[str, int]]:
+    """Read only train_clean.json; derive QLoRA targets in writable working storage."""
+    clean_path = data_root / "train_clean.json"
+    if not clean_path.is_file():
+        raise FileNotFoundError(
+            f"Thiếu đúng file {clean_path}. Không dùng thay bằng train.json "
+            "hoặc train_clean_qlora.json; hãy attach dataset chứa train_clean.json "
+            "cạnh public-official.json."
+        )
+    quality_path = data_root / "training_quality.json"
+    if not quality_path.is_file():
+        raise FileNotFoundError(
+            f"Thiếu {quality_path}; cần danh sách mẫu loại khỏi fine-tuning, "
+            "không tự dùng tập dữ liệu khác."
+        )
+    raw = read_json(clean_path)
+    if not isinstance(raw, dict):
+        raise ValueError("train_clean.json phải là JSON Object theo question_id.")
+    # Validate all questions/answers and duplicate IDs before preparing any output.
+    load_qa(clean_path, require_answers=True)
+    quality = read_json(quality_path)
+    if not isinstance(quality, dict) or not isinstance(quality.get("qlora_excluded_ids"), list):
+        raise ValueError("training_quality.json cần qlora_excluded_ids dạng danh sách.")
+    declared = quality["qlora_excluded_ids"]
+    if any(not isinstance(value, (str, int)) or isinstance(value, bool) for value in declared):
+        raise ValueError("qlora_excluded_ids chỉ được chứa ID chuỗi hoặc số nguyên.")
+    excluded_ids = {str(value) for value in declared}
+    unknown_ids = sorted(excluded_ids - set(raw))
+    if unknown_ids:
+        raise RuntimeError(
+            "training_quality.json không khớp train_clean.json; "
+            f"ID loại không tồn tại: {unknown_ids[:10]}"
+        )
+    qlora_records = {key: value for key, value in raw.items() if key not in excluded_ids}
+    if not qlora_records:
+        raise RuntimeError("Tập QLoRA rỗng.")
+    qlora_path = prepared_root / "qlora_train.json"
+    if qlora_path.resolve().is_relative_to(data_root.resolve()):
+        raise ValueError("prepared_root phải nằm ngoài dataset đầu vào để không ghi đè dữ liệu.")
+    write_json(qlora_path, qlora_records)
+    return clean_path, qlora_path, {
+        "full_records": len(raw),
+        "qlora_records": len(qlora_records),
+        "excluded_records": len(excluded_ids),
+    }
 
 
 def _latest_checkpoint_step(root: Path) -> int | None:
@@ -206,6 +255,50 @@ def _package_adapter(adapter_dir: Path, output: Path) -> None:
     os.replace(temporary, output)
 
 
+def _prepare_training_resume(
+    input_root: Path,
+    working: Path,
+    adapter_output: Path,
+    scope_metadata: dict,
+    resume_input: Path | None,
+    auto_resume: bool,
+) -> None:
+    """Validate data identity before copying or relabelling any training state."""
+    def validate_scope(root: Path) -> None:
+        scope_path = root / "qlora_scope.json"
+        try:
+            previous = json.loads(scope_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise RuntimeError(f"Không đọc được QLoRA scope: {scope_path}") from error
+        if previous != scope_metadata:
+            raise RuntimeError(
+                "QLoRA resume state không khớp scope/hash dữ liệu hiện tại. "
+                "Checkpoint tạo từ train cũ không được phép resume; hãy train mới "
+                "trong working directory mới và tắt AUTO_RESUME_TRAINING. "
+                f"expected={scope_metadata}; found={previous}; input={root}"
+            )
+
+    # Never overwrite metadata on an old local run, even without attached recovery.
+    if adapter_output.exists() and any(adapter_output.iterdir()):
+        if not auto_resume and resume_input is None:
+            raise RuntimeError(
+                f"Train mới cần working directory mới; không ghi đè state: {adapter_output}"
+            )
+        validate_scope(adapter_output)
+    if resume_input is None and auto_resume:
+        resume_input = _find_resume_root(input_root, scope_metadata["train_scope"])
+        if resume_input is None:
+            resume_input = _find_resume_bundle(input_root, scope_metadata["train_scope"])
+    if resume_input is not None:
+        if not resume_input.exists():
+            raise FileNotFoundError(f"RESUME_INPUT không tồn tại: {resume_input}")
+        if resume_input.is_file():
+            resume_input = _extract_recovery_bundle(resume_input, working)
+        validate_scope(resume_input)
+        _copy_resume(resume_input, adapter_output)
+    write_json(adapter_output / "qlora_scope.json", scope_metadata)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Official-train evidence-grounded QLoRA for Qwen3.5-2B"
@@ -231,6 +324,10 @@ def main() -> None:
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--resume-input", default=None, help="Thư mục training state hoặc qlora_recovery_latest.zip")
+    parser.add_argument(
+        "--no-auto-resume", action="store_true",
+        help="Không tự tìm checkpoint; train mới cần working directory mới. RESUME_INPUT rõ ràng vẫn được ưu tiên.",
+    )
     parser.add_argument(
         "--max-runtime-hours",
         type=float,
@@ -262,9 +359,16 @@ def main() -> None:
 
     public_path = find_unique_file(input_root, "public-official.json")
     data_root = public_path.parent
-    train_path = data_root / "train.json"
-    if not train_path.is_file():
-        raise FileNotFoundError(f"Thiếu official train.json: {train_path}")
+    train_path, qlora_train_path, training_data_counts = _resolve_training_files(
+        data_root, working / "prepared_train"
+    )
+    print(
+        "[QLoRA data] "
+        f"input={train_path} ({training_data_counts['full_records']:,}); "
+        f"prepared_qlora={qlora_train_path} ({training_data_counts['qlora_records']:,}); "
+        f"excluded={training_data_counts['excluded_records']:,}",
+        flush=True,
+    )
     corpus_path = (
         data_root / "selected-contexts"
         if (data_root / "selected-contexts").is_dir()
@@ -294,7 +398,7 @@ def main() -> None:
             sys.executable,
             str(PROJECT / "scripts" / "prepare_selector_dev.py"),
             "--train",
-            str(train_path),
+            str(qlora_train_path),
             "--output",
             str(split_dir),
             "--dev-size",
@@ -327,7 +431,7 @@ def main() -> None:
         config, corpus_path, database, force=args.force_index
     )
     pairs_dir = working / "pairs"
-    training_file = train_split if args.train_scope == "split" else train_path
+    training_file = train_split if args.train_scope == "split" else qlora_train_path
     train_pairs = pairs_dir / (
         "selector_train_pairs.jsonl" if args.train_scope == "split" else "official_full_train_pairs.jsonl"
     )
@@ -346,21 +450,18 @@ def main() -> None:
         if args.train_scope == "split"
         else "qwen-official-lora-full"
     )
-    resume_input = Path(args.resume_input) if args.resume_input else _find_resume_root(input_root, args.train_scope)
-    if resume_input is None:
-        resume_input = _find_resume_bundle(input_root, args.train_scope)
-    if resume_input and resume_input.is_file():
-        resume_input = _extract_recovery_bundle(resume_input, working)
-    if resume_input:
-        scope_path = resume_input / "qlora_scope.json"
-        if not scope_path.is_file() or json.loads(scope_path.read_text(encoding="utf-8")).get(
-            "train_scope"
-        ) != args.train_scope:
-            raise RuntimeError(
-                f"QLoRA resume state không khớp train_scope={args.train_scope}: {resume_input}"
-            )
-        _copy_resume(resume_input, adapter_output)
-    write_json(adapter_output / "qlora_scope.json", {"train_scope": args.train_scope})
+    scope_metadata = {
+        "schema": "legalqa-qlora-scope-v2",
+        "train_scope": args.train_scope,
+        "training_data_sha256": sha256_file(training_file),
+        "qlora_source_sha256": sha256_file(qlora_train_path),
+        "full_clean_sha256": sha256_file(train_path),
+    }
+    _prepare_training_resume(
+        input_root, working, adapter_output, scope_metadata,
+        Path(args.resume_input) if args.resume_input else None,
+        auto_resume=not args.no_auto_resume,
+    )
     recovery_output = (
         Path(args.recovery_output)
         if args.recovery_output
@@ -399,7 +500,7 @@ def main() -> None:
         "--save-total-limit",
         str(args.save_total_limit),
         "--resume-from-checkpoint",
-        "auto",
+        "auto" if not args.no_auto_resume or args.resume_input else "none",
         "--recovery-output",
         str(recovery_output),
     ]
@@ -422,8 +523,13 @@ def main() -> None:
     manifest = {
         "mode": "official_train_evidence_grounded_qlora",
         "inputs": {
-            "train": str(train_path),
-            "train_sha256": sha256_file(train_path),
+            "train": str(training_file),
+            "train_sha256": sha256_file(training_file),
+            "full_clean_train": str(train_path),
+            "full_clean_train_sha256": sha256_file(train_path),
+            "qlora_source_train": str(qlora_train_path),
+            "qlora_source_train_sha256": sha256_file(qlora_train_path),
+            "training_data_counts": training_data_counts,
             "corpus": str(corpus_path),
             "corpus_sha256": corpus_content_fingerprint(corpus_path),
         },

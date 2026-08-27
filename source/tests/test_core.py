@@ -141,11 +141,15 @@ def test_source_contract_matches_runtime_and_notebooks():
         "schema": "legalqa-source-contract-v1",
         "release": "0.9.2-v5007",
         "agentic_namespace": "agentic-v3",
-        "cache_schema": "inference-v7-agentic-error-isolation",
+        "cache_schema": "inference-v8-quality-repair-windowed-rerank",
         "selector_schema": SELECTION_WEIGHTS_SCHEMA,
         "adapter_alias_policy": "sha256-dedupe-v1",
         "source_alias_policy": "sha256-dedupe-v1",
         "qlora_recovery_schema": "legalqa-qlora-recovery-v1",
+        "qlora_data_schema": "train-clean-input-v2",
+        "inference_quality_schema": "guarded-v5007-repair-v1",
+        "dense_index_schema": "global-dense-v2-structured-headings",
+        "sqlite_store_schema": "5",
         "inference_pause_schema": "inference-runtime-pause-v1",
         "offline_wheel_profile": "hf-stack-2026-08-v1",
         "offline_wheel_count": 12,
@@ -155,6 +159,12 @@ def test_source_contract_matches_runtime_and_notebooks():
     ).read_text(encoding="utf-8")
     assert contract["cache_schema"] in (
         project / "kaggle" / "run_inference_only.py"
+    ).read_text(encoding="utf-8")
+    assert contract["dense_index_schema"] in (
+        project / "src" / "legalqa" / "dense_store.py"
+    ).read_text(encoding="utf-8")
+    assert f'STORE_SCHEMA_VERSION = "{contract["sqlite_store_schema"]}"' in (
+        project / "src" / "legalqa" / "sqlite_store.py"
     ).read_text(encoding="utf-8")
     wheels = list((project / "wheelhouse").glob("*.whl"))
     assert len(wheels) == contract["offline_wheel_count"]
@@ -294,6 +304,153 @@ def test_qlora_recovery_bundle_keeps_latest_full_trainer_state(tmp_path):
     assert "checkpoint-40/scheduler.pt" in names
     assert "checkpoint-40/rng_state.pth" in names
     assert not any(name.startswith("checkpoint-20/") for name in names)
+
+
+def test_qlora_runner_resolves_clean_full_and_filtered_training_data(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle" / "run_qwen_qlora.py"
+    spec = importlib.util.spec_from_file_location("qlora_clean_data_contract", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    full = {
+        "1": {"question": "Câu hỏi một?", "answer": "Câu trả lời một."},
+        "2": {"question": "Câu hỏi hai?", "answer": "Câu trả lời hai."},
+        "3": {"question": "Câu hỏi ba?", "answer": "Câu trả lời ba."},
+    }
+    data_root = tmp_path / "input"
+    prepared_root = tmp_path / "working"
+    qlora = {key: value for key, value in full.items() if key != "2"}
+    write_json(data_root / "train_clean.json", full)
+    write_json(
+        data_root / "training_quality.json",
+        {"qlora_excluded_ids": ["2"]},
+    )
+    original = (data_root / "train_clean.json").read_bytes()
+
+    full_path, qlora_path, counts = module._resolve_training_files(data_root, prepared_root)
+    assert full_path.name == "train_clean.json"
+    assert qlora_path == prepared_root / "qlora_train.json"
+    assert json.loads(qlora_path.read_text(encoding="utf-8")) == qlora
+    assert (data_root / "train_clean.json").read_bytes() == original
+    assert counts == {
+        "full_records": 3,
+        "qlora_records": 2,
+        "excluded_records": 1,
+    }
+
+    # Even invalid alternative input names must not be loaded.
+    write_json(data_root / "train_clean_qlora.json", {"wrong": "invalid"})
+    write_json(data_root / "train.json", {"old": "invalid"})
+    first_output = qlora_path.read_bytes()
+    module._resolve_training_files(data_root, prepared_root)
+    assert qlora_path.read_bytes() == first_output
+
+    write_json(data_root / "training_quality.json", {"qlora_excluded_ids": ["not-in-clean"]})
+    with pytest.raises(RuntimeError, match="không khớp"):
+        module._resolve_training_files(data_root, prepared_root)
+    assert qlora_path.read_bytes() == first_output
+
+
+def test_qlora_runner_requires_exact_train_clean_and_quality_without_fallback(tmp_path):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    path = project / "kaggle" / "run_qwen_qlora.py"
+    spec = importlib.util.spec_from_file_location("qlora_clean_data_required", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    data_root = tmp_path / "input"
+    prepared_root = tmp_path / "working"
+    payload = {"1": {"question": "Câu hỏi?", "answer": "Câu trả lời."}}
+    write_json(data_root / "train.json", payload)
+    write_json(data_root / "train_clean_qlora.json", payload)
+    with pytest.raises(FileNotFoundError, match="Thiếu đúng file.*train_clean.json"):
+        module._resolve_training_files(data_root, prepared_root)
+
+    write_json(data_root / "train_clean.json", payload)
+    with pytest.raises(FileNotFoundError, match="training_quality"):
+        module._resolve_training_files(data_root, prepared_root)
+    write_json(data_root / "training_quality.json", {"qlora_excluded_ids": []})
+    full_path, _, counts = module._resolve_training_files(data_root, prepared_root)
+    assert full_path == data_root / "train_clean.json"
+    assert counts["excluded_records"] == 0
+    with pytest.raises(ValueError, match="ngoài dataset"):
+        module._resolve_training_files(data_root, data_root / "prepared")
+    write_json(data_root / "training_quality.json", {"qlora_excluded_ids": ["1"]})
+    with pytest.raises(RuntimeError, match="QLoRA rỗng"):
+        module._resolve_training_files(data_root, prepared_root)
+
+
+def test_qlora_clean_resume_does_not_discover_old_state_or_overwrite_metadata(tmp_path, monkeypatch):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "qlora_clean_resume_guard", project / "kaggle" / "run_qwen_qlora.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    scope = {"schema": "legalqa-qlora-scope-v2", "train_scope": "full",
+             "training_data_sha256": "new-data"}
+    adapter = tmp_path / "working" / "adapter"
+
+    def unexpected_discovery(*args):
+        pytest.fail("AUTO_RESUME_TRAINING=False must not discover attached checkpoints")
+
+    monkeypatch.setattr(module, "_find_resume_root", unexpected_discovery)
+    monkeypatch.setattr(module, "_find_resume_bundle", unexpected_discovery)
+    module._prepare_training_resume(tmp_path, adapter.parent, adapter, scope, None, False)
+    assert json.loads((adapter / "qlora_scope.json").read_text(encoding="utf-8")) == scope
+    with pytest.raises(RuntimeError, match="working directory mới"):
+        module._prepare_training_resume(tmp_path, adapter.parent, adapter, scope, None, False)
+
+    old = {"train_scope": "full"}
+    write_json(adapter / "qlora_scope.json", old)
+    with pytest.raises(RuntimeError, match="không khớp scope/hash"):
+        module._prepare_training_resume(tmp_path, adapter.parent, adapter, scope, None, True)
+    assert json.loads((adapter / "qlora_scope.json").read_text(encoding="utf-8")) == old
+
+
+def test_qlora_clean_resume_accepts_matching_explicit_state(tmp_path, monkeypatch):
+    import importlib.util
+
+    project = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "qlora_matching_clean_resume", project / "kaggle" / "run_qwen_qlora.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    scope = {"schema": "legalqa-qlora-scope-v2", "train_scope": "split",
+             "training_data_sha256": "same-data"}
+    resume = tmp_path / "attached"
+    adapter = tmp_path / "working" / "adapter"
+    write_json(resume / "qlora_scope.json", scope)
+    copies = []
+    monkeypatch.setattr(module, "_copy_resume", lambda source, target: copies.append((source, target)))
+    module._prepare_training_resume(tmp_path, adapter.parent, adapter, scope, resume, False)
+    assert copies == [(resume, adapter)]
+
+    write_json(resume / "qlora_scope.json", {"train_scope": "split"})
+    with pytest.raises(RuntimeError, match="không khớp scope/hash"):
+        module._prepare_training_resume(tmp_path, adapter.parent, adapter, scope, resume, True)
+    assert len(copies) == 1
+
+
+def test_qlora_notebook_selects_clean_source_and_wires_resume_switch():
+    project = Path(__file__).resolve().parents[1]
+    notebook = json.loads((project / "kaggle" / "legalqa_dsc2026_v9_qlora_t4.ipynb").read_text(encoding="utf-8"))
+    parameters = "".join(notebook["cells"][1]["source"])
+    setup = "".join(notebook["cells"][2]["source"])
+    launch = "".join(notebook["cells"][3]["source"])
+    assert "AUTO_RESUME_TRAINING = False" in parameters
+    assert "'qlora_data_schema': 'train-clean-input-v2'" in setup
+    assert "if not AUTO_RESUME_TRAINING:\n    command.append('--no-auto-resume')" in launch
 
 
 def test_qlora_recovery_zip_extracts_and_resumes_without_path_traversal(tmp_path):
@@ -1620,7 +1777,7 @@ def test_attached_dense_and_train_memory_are_validated_before_models(tmp_path):
         json.dumps(
             {
                 "status": "complete",
-                "schema": "global-dense-v1",
+                    "schema": module.DENSE_INDEX_SCHEMA,
                 "identity": "dense-test",
                 "chunks": 2,
                 "dimension": 3,

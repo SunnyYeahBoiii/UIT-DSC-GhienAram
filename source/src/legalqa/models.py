@@ -9,6 +9,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from .config import require_local_model
+from .text import legal_tokens
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,35 @@ class GenerationResult:
     generated_tokens: int
     terminated_by_eos: bool
     truncated: bool
+    stop_reason: str | None = None
+
+
+class TandemRepeatStoppingCriteria:
+    """Stop only a clear three-cycle token loop; legal phrase reuse remains allowed."""
+
+    def __init__(self, torch_module, prompt_length: int, minimum: int = 8, maximum: int = 40) -> None:
+        self.torch = torch_module
+        self.prompt_length = int(prompt_length)
+        self.minimum = int(minimum)
+        self.maximum = int(maximum)
+        self.stopped = False
+
+    def __call__(self, input_ids, scores, **kwargs):
+        decisions = []
+        for row in input_ids:
+            generated = row[self.prompt_length :].tolist()
+            repeated = False
+            maximum = min(self.maximum, len(generated) // 3)
+            for size in range(self.minimum, maximum + 1):
+                if (
+                    generated[-size:] == generated[-2 * size : -size]
+                    and generated[-size:] == generated[-3 * size : -2 * size]
+                ):
+                    repeated = True
+                    break
+            decisions.append(repeated)
+        self.stopped = self.stopped or any(decisions)
+        return self.torch.tensor(decisions, dtype=self.torch.bool, device=input_ids.device)
 
 
 def _torch():
@@ -129,20 +159,96 @@ class CrossEncoderReranker:
     def score_pairs(self, pairs: list[tuple[str, str]]) -> list[float]:
         if not pairs:
             return []
+        runtime = self.config["runtime"]
+        max_length = int(runtime.get("reranker_max_length", 1536))
+        max_windows = max(1, int(runtime.get("reranker_max_windows", 1)))
+        stride = max(0, int(runtime.get("reranker_window_stride", 96)))
+        expanded: list[tuple[str, str]] = []
+        owners: list[int] = []
+        for owner, (question, passage) in enumerate(pairs):
+            windows = self._query_aware_windows(
+                question,
+                passage,
+                max_length=max_length,
+                stride=stride,
+                maximum=max_windows,
+            )
+            for window in windows:
+                expanded.append((question, window))
+                owners.append(owner)
+        flat_scores = self._score_flat_pairs(expanded, max_length=max_length)
+        grouped: list[list[float]] = [[] for _ in pairs]
+        for owner, score in zip(owners, flat_scores):
+            grouped[owner].append(score)
+        aggregation = str(runtime.get("reranker_window_aggregation", "max")).casefold()
+        if aggregation == "top2_mean":
+            return [
+                sum(sorted(values, reverse=True)[:2]) / min(2, len(values))
+                for values in grouped
+            ]
+        return [max(values) for values in grouped]
+
+    def _query_aware_windows(
+        self,
+        question: str,
+        passage: str,
+        *,
+        max_length: int,
+        stride: int,
+        maximum: int,
+    ) -> list[str]:
+        """Token windows preserve the complete query and inspect later passage sections."""
+        question_ids = self.tokenizer.encode(question, add_special_tokens=False)
+        special = (
+            int(self.tokenizer.num_special_tokens_to_add(pair=True))
+            if hasattr(self.tokenizer, "num_special_tokens_to_add")
+            else 3
+        )
+        passage_budget = max(64, max_length - len(question_ids) - special)
+        passage_ids = self.tokenizer.encode(passage, add_special_tokens=False)
+        if len(passage_ids) <= passage_budget:
+            return [passage]
+        step = max(1, passage_budget - min(stride, passage_budget - 1))
+        candidates: list[tuple[float, int, str]] = []
+        query_terms = set(legal_tokens(question))
+        for start in range(0, len(passage_ids), step):
+            token_slice = passage_ids[start : start + passage_budget]
+            if not token_slice:
+                break
+            window = self.tokenizer.decode(token_slice, skip_special_tokens=True).strip()
+            window_terms = set(legal_tokens(window))
+            overlap = len(query_terms & window_terms) / max(1, len(query_terms))
+            candidates.append((overlap, start, window))
+            if start + passage_budget >= len(passage_ids):
+                break
+        # Keep the highest-overlap sections; original position breaks ties and
+        # makes the operation deterministic. The first window is retained as a
+        # document/title anchor when room remains.
+        chosen = sorted(candidates, key=lambda item: (-item[0], item[1]))[:maximum]
+        if maximum > 1 and candidates and all(item[1] != 0 for item in chosen):
+            chosen[-1] = candidates[0]
+        chosen.sort(key=lambda item: item[1])
+        return [item[2] for item in chosen]
+
+    def _score_flat_pairs(
+        self,
+        pairs: list[tuple[str, str]],
+        *,
+        max_length: int,
+    ) -> list[float]:
         scores: list[float] = []
         batch_size = int(
             self.config["runtime"].get(
                 "reranker_batch_size", self.config["runtime"].get("batch_size", 4)
             )
         )
-        max_length = int(self.config["runtime"].get("reranker_max_length", 1536))
         for start in range(0, len(pairs), batch_size):
             batch = pairs[start : start + batch_size]
             encoded = self.tokenizer(
                 [pair[0] for pair in batch],
                 [pair[1] for pair in batch],
                 padding=True,
-                truncation=True,
+                truncation="only_second",
                 max_length=max_length,
                 return_tensors="pt",
             )
@@ -163,6 +269,7 @@ class QwenTextGenerator:
 
         torch = _torch()
         self.config = config
+        self.transformers = transformers
         self.path = require_local_model(config, "generator")
         self.device = resolve_device(config)
         kwargs = {
@@ -235,6 +342,17 @@ class QwenTextGenerator:
             "pad_token_id": getattr(self.processor.tokenizer, "pad_token_id", None),
             "eos_token_id": getattr(self.processor.tokenizer, "eos_token_id", None),
         }
+        repeat_stopper = None
+        if bool(cfg.get("stop_on_tandem_repeat", True)):
+            repeat_stopper = TandemRepeatStoppingCriteria(
+                self.torch,
+                int(encoded["input_ids"].shape[1]),
+                minimum=int(cfg.get("repeat_stop_min_block_tokens", 8)),
+                maximum=int(cfg.get("repeat_stop_max_block_tokens", 40)),
+            )
+            generation_kwargs["stopping_criteria"] = self.transformers.StoppingCriteriaList(
+                [repeat_stopper]
+            )
         if generation_kwargs["do_sample"]:
             generation_kwargs.update(
                 temperature=float(cfg.get("temperature", 0.7)),
@@ -256,7 +374,8 @@ class QwenTextGenerator:
         )
         truncated = generated_tokens >= token_limit and not terminated_by_eos
         text = self.processor.decode(answer_ids, skip_special_tokens=True).strip()
-        return GenerationResult(text, generated_tokens, terminated_by_eos, truncated)
+        stop_reason = "tandem_repeat" if repeat_stopper is not None and repeat_stopper.stopped else None
+        return GenerationResult(text, generated_tokens, terminated_by_eos, truncated, stop_reason)
 
     def generate(self, system: str, user: str) -> str:
         return self.generate_with_metadata(system, user).text

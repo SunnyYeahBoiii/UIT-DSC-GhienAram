@@ -16,6 +16,7 @@ from .generation import (
     extractive_candidate,
     make_qwen_agentic_candidate,
     make_qwen_candidate,
+    make_qwen_repair_candidate,
     make_train_memory_candidate,
 )
 from .index import LegalIndex
@@ -29,6 +30,7 @@ from .models import (
 )
 from .retrieval import Evidence, HybridRetriever, retrieval_confidence
 from .recovery import RecoveryManager
+from .quality import analyze_answer_quality, scope_coverage
 from .text import citations, document_numbers
 from .verifier import score_candidates
 
@@ -251,6 +253,10 @@ def _should_run_agentic(
             return True, "temporal/complex legal cue"
         if explicit_citation and relation_signal:
             return True, "explicit citation with relation signal"
+    evidence_text = "\n".join(item.chunk.text for item in evidence)
+    scope_score, missing_anchors = scope_coverage(question, evidence_text)
+    if missing_anchors and scope_score < 1.0:
+        return True, f"missing scope anchors={','.join(missing_anchors)}"
     return False, f"simple/high-confidence={confidence:.3f}"
 
 
@@ -323,6 +329,9 @@ def generate_from_evidence(
     agentic_eligible_count = 0
     agentic_generated_count = 0
     agentic_failed_count = 0
+    repair_eligible_count = 0
+    repair_generated_count = 0
+    repair_failed_count = 0
     if config["generation"].get("extractive_enabled", True):
         for item in questions:
             candidates_by_id[item.question_id].append(
@@ -354,6 +363,8 @@ def generate_from_evidence(
             if _candidate_key(item, evidence_by_id[item.question_id], "qwen", qwen_namespace) not in cached
         ]
         completed = len(questions) - len(missing)
+        repair_completed = 0
+        repair_total = 0
         generator = None
         consecutive_errors = 0
         try:
@@ -403,11 +414,151 @@ def generate_from_evidence(
                             f"Qwen dừng tại question_id={item.question_id} sau "
                             f"{consecutive_errors} lỗi liên tiếp; cache đã hoàn thành={completed}."
                         ) from exc
+
+            generation_cfg = config.get("generation", {})
+            if bool(generation_cfg.get("selective_repair_enabled", True)):
+                repairable_reasons = {
+                    "degenerate_repeat",
+                    "dangling_ending",
+                    "unsupported_document_citation",
+                    "numeric_relation_conflict",
+                    "truncated_missing_requirement",
+                    "multi_part_missing_requirement",
+                }
+                eligible_repairs: list[tuple[int, Any, Candidate, list[str]]] = []
+                for item in questions:
+                    base = next(
+                        (
+                            candidate
+                            for candidate in candidates_by_id[item.question_id]
+                            if candidate.source == "qwen3.5-2b"
+                        ),
+                        None,
+                    )
+                    if base is None:
+                        continue
+                    evidence_text = str(
+                        base.details.get("_visible_evidence_text")
+                        or "\n".join(
+                            evidence.chunk.text for evidence in evidence_by_id[item.question_id]
+                        )
+                    )
+                    quality = base.details.get("quality")
+                    if not isinstance(quality, dict):
+                        quality = analyze_answer_quality(
+                            item.question, base.answer, evidence_text, base.details
+                        )
+                        base.details["quality"] = quality
+                    reasons = [
+                        reason for reason in quality.get("repair_reasons", [])
+                        if reason in repairable_reasons
+                    ]
+                    if not reasons:
+                        continue
+                    priority = (
+                        100 * int("degenerate_repeat" in reasons)
+                        + 70 * int("unsupported_document_citation" in reasons)
+                        + 60 * int("numeric_relation_conflict" in reasons)
+                        + 50 * int("dangling_ending" in reasons)
+                        + 30 * len(reasons)
+                    )
+                    eligible_repairs.append((priority, item, base, reasons))
+                eligible_repairs.sort(key=lambda row: (-row[0], row[1].question_id))
+                repair_limit = max(0, int(generation_cfg.get("repair_max_questions", 220)))
+                if repair_limit:
+                    eligible_repairs = eligible_repairs[:repair_limit]
+                repair_eligible_count = len(eligible_repairs)
+                repair_total = repair_eligible_count
+                print(
+                    f"[Qwen-repair] quality gate selected {repair_total:,}/{len(questions):,} questions",
+                    flush=True,
+                )
+                repair_path = candidate_cache_dir / "qwen_repair.jsonl"
+                repair_cache = _load_candidate_cache(repair_path, include_metadata=True)
+                repair_entries: list[tuple[Any, Candidate, str]] = []
+                for _, item, base, _ in eligible_repairs:
+                    base_hash = hashlib.sha256(base.answer.encode("utf-8")).hexdigest()[:16]
+                    namespace = f"{qwen_namespace}::repair-v1::{base_hash}"
+                    key = _candidate_key(
+                        item, evidence_by_id[item.question_id], "qwen-repair", namespace
+                    )
+                    repair_entries.append((item, base, key))
+                missing_repairs = [
+                    entry for entry in repair_entries if entry[2] not in repair_cache
+                ]
+                repair_completed = repair_total - len(missing_repairs)
+                if missing_repairs and generator is None:
+                    _check_runtime_budget(
+                        config, "qwen_repair", repair_completed, repair_total, recovery
+                    )
+                    generator = QwenTextGenerator(config)
+                consecutive_repair_errors = 0
+                for item, base, key in repair_entries:
+                    if key in repair_cache:
+                        entry = repair_cache[key]
+                        candidates_by_id[item.question_id].append(
+                            Candidate(
+                                "qwen3.5-2b-repair",
+                                entry["answer"],
+                                details=entry.get("metadata", {}),
+                            )
+                        )
+                        repair_generated_count += 1
+                        continue
+                    _check_runtime_budget(
+                        config, "qwen_repair", repair_completed, repair_total, recovery
+                    )
+                    try:
+                        candidate = make_qwen_repair_candidate(
+                            generator,
+                            item.question,
+                            base,
+                            evidence_by_id[item.question_id],
+                            config,
+                            retrieval_diagnostics.get(item.question_id),
+                        )
+                        candidates_by_id[item.question_id].append(candidate)
+                        _append_candidate(
+                            repair_path,
+                            key,
+                            item.question_id,
+                            candidate.answer,
+                            candidate.details,
+                        )
+                        repair_cache[key] = {
+                            "answer": candidate.answer,
+                            "metadata": candidate.details,
+                        }
+                        repair_generated_count += 1
+                        consecutive_repair_errors = 0
+                    except Exception as exc:
+                        errors.setdefault(item.question_id, []).append(f"Qwen-repair: {exc}")
+                        repair_failed_count += 1
+                        consecutive_repair_errors += 1
+                        if _fatal_generation_error(exc):
+                            raise RuntimeError(
+                                "Qwen-repair gặp lỗi GPU nghiêm trọng; đã lưu recovery."
+                            ) from exc
+                    finally:
+                        repair_completed += 1
+                        if recovery:
+                            recovery.snapshot(
+                                "qwen_repair", repair_completed, repair_total
+                            )
+                    if repair_completed % 25 == 0:
+                        print(
+                            f"[Qwen-repair] processed {repair_completed:,}/{repair_total:,}",
+                            flush=True,
+                        )
         finally:
             if config["runtime"].get("unload_after_stage", True):
                 unload_model(generator, "Qwen")
             if recovery:
                 recovery.snapshot("qwen", completed, len(questions), force=True)
+                if repair_total:
+                    recovery.snapshot(
+                        "qwen_repair", repair_completed, repair_total, force=True
+                    )
 
     if config["generation"].get("agentic_enabled", False) and model_paths.get("generator"):
         if agentic_search_fn is None:
@@ -556,13 +707,17 @@ def generate_from_evidence(
                     active_evidence = _candidate_evidence(
                         evidence_by_id[item.question_id], candidate
                     )
-                    evidence_key = tuple(evidence.chunk.chunk_id for evidence in active_evidence)
+                    visible_text = str(
+                        candidate.details.get("_visible_evidence_text")
+                        or "\n".join(evidence.chunk.text for evidence in active_evidence)
+                    )
+                    evidence_key = (
+                        hashlib.sha256(visible_text.encode("utf-8")).hexdigest(),
+                    )
                     candidate_evidence_keys[id(candidate)] = evidence_key
                     if evidence_key not in evidence_index:
                         evidence_index[evidence_key] = len(evidence_texts)
-                        evidence_texts.append(
-                            "\n".join(evidence.chunk.text for evidence in active_evidence)
-                        )
+                        evidence_texts.append(visible_text)
             if semantic_entries:
                 print(
                     f"[ViLegalBERT] batching {len(semantic_entries):,} candidates and "
@@ -634,6 +789,7 @@ def generate_from_evidence(
         recovery.snapshot("selection", len(questions), len(questions), force=True)
     selected_counts: dict[str, int] = {}
     route_counts: dict[str, int] = {}
+    selected_quality_flags: dict[str, int] = {}
     truncated_qwen = 0
     for trace in traces:
         selected_counts[trace["selected"]] = selected_counts.get(trace["selected"], 0) + 1
@@ -644,6 +800,26 @@ def generate_from_evidence(
             and bool(candidate.get("details", {}).get("truncated", False))
             for candidate in trace["candidates"]
         )
+        selected_candidate = next(
+            candidate
+            for candidate in trace["candidates"]
+            if candidate["source"] == trace["selected"]
+        )
+        selected_quality = selected_candidate.get("details", {}).get("quality", {})
+        for flag in (
+            "degenerate_repeat",
+            "dangling_ending",
+        ):
+            if bool(selected_quality.get(flag, False)):
+                selected_quality_flags[flag] = selected_quality_flags.get(flag, 0) + 1
+        for flag in (
+            "unsupported_document_citations",
+            "numeric_relation_conflicts",
+            "missing_requirements",
+            "missing_evidence_anchors",
+        ):
+            if selected_quality.get(flag):
+                selected_quality_flags[flag] = selected_quality_flags.get(flag, 0) + 1
     return {
         "questions": len(questions),
         "predictions": str(target.resolve()),
@@ -654,7 +830,13 @@ def generate_from_evidence(
             "generated_or_cached": agentic_generated_count,
             "failed": agentic_failed_count,
         },
+        "repair": {
+            "eligible": repair_eligible_count,
+            "generated_or_cached": repair_generated_count,
+            "failed": repair_failed_count,
+        },
         "selected_sources": selected_counts,
         "routes": route_counts,
         "qwen_truncated": truncated_qwen,
+        "selected_quality_flags": selected_quality_flags,
     }

@@ -36,9 +36,14 @@ def test_public_v5007_runtime_does_not_enable_regressed_v93_features() -> None:
     assert config["retrieval"]["agentic_bm25_top_k"] == 60
     assert config["generation"]["agentic_max_tool_calls"] == 2
     assert config["generation"]["agentic_evidence_per_call"] == 3
-    assert "agentic_force_first_search" not in config["generation"]
+    assert config["generation"]["agentic_force_first_search"] is True
     assert "style_target_min_ratio" not in config["generation"]
     assert "oracle_policy" not in config["selection"]
+    assert config["generation"]["quality_recipe"] == "guarded-v5007-repair-v1"
+    assert config["generation"]["selective_repair_enabled"] is True
+    assert config["generation"]["repair_max_questions"] == 220
+    assert config["runtime"]["reranker_max_windows"] == 3
+    assert config["selection"]["document_citation_penalty"] >= 0.40
 
     notebook = json.loads(
         (PROJECT / "kaggle" / "legalqa_dsc2026_inference_only_t4.ipynb").read_text(
