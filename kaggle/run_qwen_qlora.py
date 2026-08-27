@@ -102,6 +102,13 @@ def main() -> None:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--resume-input", default=None)
     parser.add_argument("--force-index", action="store_true")
+    parser.add_argument(
+        "--reshuffle-split-per-epoch",
+        action="store_true",
+        help="mỗi epoch trộn lại pool train+dev cắt theo --reshuffle-dev-ratio (mặc định 0.15); "
+        "chỉ dùng khi chấp nhận mất leakage-safe của grouped-dev ở train_scope=split.",
+    )
+    parser.add_argument("--reshuffle-dev-ratio", type=float, default=0.15)
     args = parser.parse_args()
     if not 300 <= args.dev_size <= 500:
         raise ValueError("--dev-size phải nằm trong [300, 500] cho selector experiment.")
@@ -259,6 +266,15 @@ def main() -> None:
         )
     if args.max_train_samples:
         command.extend(["--max-train-samples", str(args.max_train_samples)])
+    if args.reshuffle_split_per_epoch:
+        if args.train_scope != "split":
+            raise ValueError(
+                "--reshuffle-split-per-epoch chỉ có ý nghĩa với train_scope=split "
+                "(scope=full vốn đã train trên toàn bộ dữ liệu, không còn dev để trộn)."
+            )
+        command.extend(
+            ["--reshuffle-split-per-epoch", "--reshuffle-dev-ratio", str(args.reshuffle_dev_ratio)]
+        )
     run_command(command)
 
     adapter_zip = working / "qwen_qlora_adapter.zip"
@@ -275,6 +291,8 @@ def main() -> None:
         "dev_size_requested": args.dev_size,
         "dev_size": actual_dev_size,
         "train_scope": args.train_scope,
+        "reshuffle_split_per_epoch": bool(args.reshuffle_split_per_epoch),
+        "reshuffle_dev_ratio": args.reshuffle_dev_ratio if args.reshuffle_split_per_epoch else None,
         "index": index_report,
         "train_pairs": train_pair_report,
         "dev_pairs": dev_pair_report,

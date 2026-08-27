@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -153,6 +154,24 @@ def extractive_candidate(
     )
 
 
+def _min_new_tokens(plan: dict, config: dict) -> int:
+    """Sàn token theo target_words của style plan.
+
+    Submission trước cho thấy model dừng sớm ~0.55x target (median 191 từ so
+    với reference p50 312 từ), kéo recall của METEOR/ROUGE-L xuống. Ép sàn
+    bằng min_new_tokens của HF generate thay vì sửa text sau sinh.
+    """
+    generation = config.get("generation", {})
+    ratio = float(generation.get("min_new_tokens_target_ratio", 0.0))
+    if ratio <= 0:
+        return 0
+    floor_words = max(int(plan["target_words"] * ratio), int(plan.get("minimum_words", 0)))
+    tokens_per_word = float(generation.get("tokens_per_vietnamese_word", 1.65))
+    limit = int(plan["max_new_tokens"])
+    # Chừa đệm để không ép model vào trần bị cắt giữa câu
+    return max(0, min(math.ceil(floor_words * tokens_per_word) + 8, limit - 16))
+
+
 def make_qwen_candidate(
     generator,
     question: str,
@@ -167,6 +186,7 @@ def make_qwen_candidate(
         SYSTEM_PROMPT,
         qwen_user_prompt(question, evidence, config, retrieval_diagnostics),
         max_new_tokens=token_limit,
+        min_new_tokens=_min_new_tokens(plan, config),
     )
     answer = clean_answer(result.text)
     if not answer:
@@ -352,6 +372,9 @@ def make_qwen_agentic_candidate(
             AGENTIC_SYSTEM_PROMPT if allow_tool else SYSTEM_PROMPT,
             prompt,
             max_new_tokens=token_limit,
+            # Chỉ ép sàn độ dài ở lượt trả lời cuối; lượt tool-call bị ép dài
+            # sẽ đẻ ra văn bản rác quanh nhãn TRA_CUU.
+            min_new_tokens=0 if allow_tool else _min_new_tokens(plan, config),
         )
         generated_tokens += result.generated_tokens
         # Gán (không OR) giống terminated_by_eos: câu trả lời cuối luôn đến từ

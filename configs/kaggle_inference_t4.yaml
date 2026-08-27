@@ -61,6 +61,9 @@ retrieval:
   rerank_top_k: 24
   evidence_top_k: 5
   simple_evidence_top_k: 4
+  # Sàn tương đối (× top score) cho evidence route simple — khớp complex_min_score_ratio.
+  # Không có sàn, slot bị lấp bằng chunk ~0.02 điểm chỉ để đủ top_k (audit v7: 11/41 slot rác).
+  simple_min_score_ratio: 0.42
   complex_evidence_top_k: 6
   complex_max_documents: 4
   complex_diversity_bonus: 0.04
@@ -88,7 +91,10 @@ retrieval:
   train_memory_build_block: 128
   train_memory_checkpoint_every: 512
   train_memory_fewshot_examples: 2
-  train_memory_fewshot_threshold: 0.70
+  # Submission try1 có fewshot_examples=0 trên mọi item => top-4 similarity
+  # chưa bao giờ chạm 0.70. Hạ ngưỡng để few-shot văn phong thực sự vào prompt;
+  # nếu vẫn còn nhiều item =0, hạ tiếp theo phân bố similarity đo được.
+  train_memory_fewshot_threshold: 0.55
   train_memory_fewshot_chars: 3200
   train_memory_candidate_enabled: true
   train_memory_candidate_threshold: 0.86
@@ -146,7 +152,12 @@ generation:
   temperature: 0.7
   top_p: 0.9
   repetition_penalty: 1.1
-  no_repeat_ngram_size: 5
+  # Audit submission try1: loop vẫn xảy ra dù ngram=5 vì model lặp bằng cách
+  # biến đổi từ ("gặp xe đi nhanh/chậm/dừng" chỉ chia sẻ 3-gram). Hạ xuống 4.
+  no_repeat_ngram_size: 4
+  # Model dừng sớm ~0.55x target (median 191 từ vs reference p50 312) làm rớt
+  # recall METEOR/ROUGE-L; ép sàn token = target*ratio qua min_new_tokens.
+  min_new_tokens_target_ratio: 0.75
   min_answer_words: 35
   target_answer_words: 180
   simple_target_answer_words: 140

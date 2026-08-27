@@ -176,14 +176,17 @@ class QwenTextGenerator:
                 "Transformers hiện tại chưa có AutoModelForMultimodalLM. "
                 "Hãy cài bản Transformers mới theo requirements.txt."
             )
-        model_kwargs = {**kwargs, "dtype": resolve_dtype(config)}
+        adapter_path = config.get("paths", {}).get("models", {}).get("generator_adapter")
+        model_kwargs = {**kwargs}
+        # LoRA áp được lên base ở precision bất kỳ; base 2B (~4.5GB BF16) không
+        # cần quantize khi infer — NF4 chỉ thêm nhiễu, load theo dtype config.
+        model_kwargs["dtype"] = resolve_dtype(config)
         if self.device.startswith("cuda"):
             device_index = int(self.device.split(":", 1)[1]) if ":" in self.device else 0
             model_kwargs["device_map"] = {"": device_index}
         self.model = auto_class.from_pretrained(str(self.path), **model_kwargs).eval()
         if not self.device.startswith("cuda"):
             self.model.to(self.device)
-        adapter_path = config.get("paths", {}).get("models", {}).get("generator_adapter")
         if adapter_path:
             try:
                 from peft import PeftModel
@@ -198,6 +201,7 @@ class QwenTextGenerator:
         user: str,
         *,
         max_new_tokens: int | None = None,
+        min_new_tokens: int = 0,
     ) -> GenerationResult:
         messages = [
             {"role": "system", "content": system},
@@ -212,7 +216,6 @@ class QwenTextGenerator:
         try:
             encoded = self.processor.apply_chat_template(
                 messages,
-                enable_thinking=False,
                 **template_kwargs,
             )
         except TypeError:
@@ -230,6 +233,7 @@ class QwenTextGenerator:
         token_limit = int(max_new_tokens or cfg["max_new_tokens"])
         generation_kwargs: dict[str, Any] = {
             "max_new_tokens": token_limit,
+            "min_new_tokens": max(0, int(min_new_tokens)),
             "do_sample": bool(cfg.get("do_sample", False)),
             "repetition_penalty": float(cfg.get("repetition_penalty", 1.0)),
             "no_repeat_ngram_size": int(cfg.get("no_repeat_ngram_size", 5)),

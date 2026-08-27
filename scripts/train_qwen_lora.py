@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class ChatDataset(torch.utils.data.Dataset):
         require_evidence=True,
     ):
         self.items = []
+        self.ids = []
         self.skipped_without_evidence = 0
         evidence_by_id = evidence_by_id or {}
         for row in rows:
@@ -75,12 +77,23 @@ class ChatDataset(torch.utils.data.Dataset):
             if labels and all(label == -100 for label in labels):
                 continue
             self.items.append({"input_ids": full_ids, "attention_mask": [1] * len(full_ids), "labels": labels})
+            self.ids.append(row.question_id)
 
     def __len__(self):
         return len(self.items)
 
     def __getitem__(self, index):
         return self.items[index]
+
+
+def reshuffle_split(ids: list[str], dev_ratio: float, seed: int, epoch: int) -> tuple[list[str], list[str]]:
+    """Mỗi epoch trộn lại pool train+dev theo seed+epoch — cùng công thức với train_qwen_sft_lora.py
+    (không import được vì file đó lại import CausalCollator từ đây -> vòng)."""
+    rng = random.Random(seed + epoch)
+    pool = list(ids)
+    rng.shuffle(pool)
+    dev_count = min(len(pool) - 1, max(1, round(len(pool) * dev_ratio)))
+    return pool[dev_count:], pool[:dev_count]
 
 
 class CausalCollator:
@@ -121,6 +134,18 @@ def main():
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument("--max-train-samples", type=int, default=None)
+    parser.add_argument(
+        "--reshuffle-split-per-epoch",
+        action="store_true",
+        help="mỗi epoch trộn lại pool train+dev và cắt lại theo --reshuffle-dev-ratio; "
+        "LƯU Ý: với split-scope selector thì dev grouped sẽ dần lọt vào train -> mất bảo đảm leakage-safe.",
+    )
+    parser.add_argument(
+        "--reshuffle-dev-ratio",
+        type=float,
+        default=0.15,
+        help="tỉ lệ dev khi cắt lại pool mỗi epoch (chỉ dùng với --reshuffle-split-per-epoch).",
+    )
     parser.add_argument("--checkpoint-steps", type=int, default=20)
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument(
@@ -228,27 +253,82 @@ def main():
     train_file = Path(args.train_file) if args.train_file else data_dir / "train.json"
     dev_file = Path(args.dev_file) if args.dev_file else data_dir / "dev.json"
     train_rows = load_qa(train_file, True)
-    if args.max_train_samples:
+    if not args.reshuffle_split_per_epoch and args.max_train_samples:
         train_rows = train_rows[: args.max_train_samples]
-    train = ChatDataset(
-        train_rows,
-        tokenizer,
-        args.max_length,
-        evidence_by_id,
-        args.max_target_tokens,
-        args.max_evidence_chars,
-        args.require_evidence,
-    )
     dev_rows = load_qa(dev_file, True) if dev_file.is_file() else []
-    dev = ChatDataset(
-        dev_rows,
-        tokenizer,
-        args.max_length,
-        dev_evidence_by_id,
-        args.max_target_tokens,
-        args.max_evidence_chars,
-        args.require_evidence,
-    )
+
+    if args.reshuffle_split_per_epoch:
+        if not dev_rows:
+            raise RuntimeError("--reshuffle-split-per-epoch cần --dev-file: pool = train + dev mới trộn được.")
+        if not 0.05 <= args.reshuffle_dev_ratio <= 0.4:
+            raise ValueError("--reshuffle-dev-ratio phải nằm trong [0.05, 0.4].")
+        print(
+            "[QLoRA reshuffle] CẢNH BÁO: dev sẽ luân phiên vào train qua các epoch — với "
+            "train_scope=split thì grouped-dev selector mất bảo đảm leakage-safe (chỉ dùng khi "
+            "đã hiểu hệ quả).",
+            flush=True,
+        )
+        # Pool token hoá một lần; mỗi epoch chỉ gán lại items/ids theo split mới.
+        # Evidence train (--pairs) và dev (--dev-pairs) gộp chung vì câu nào cũng có thể
+        # ở vai train hoặc dev tuỳ epoch — cả hai đều là chuỗi căn cứ pháp lý cùng dạng.
+        pool_evidence = {**evidence_by_id, **dev_evidence_by_id}
+        pool_rows = [*train_rows, *dev_rows]
+        pool = ChatDataset(
+            pool_rows,
+            tokenizer,
+            args.max_length,
+            pool_evidence,
+            args.max_target_tokens,
+            args.max_evidence_chars,
+            args.require_evidence,
+        )
+        item_by_id = dict(zip(pool.ids, pool.items))
+        seed = int(config["seed"])
+        missing_evidence = sum(1 for row in pool_rows if row.question_id not in pool_evidence)
+        if missing_evidence:
+            print(
+                f"[QLoRA reshuffle] {missing_evidence}/{len(pool_rows)} câu pool thiếu evidence "
+                "(--pairs/--dev-pairs chưa phủ hết pool) -> bị bỏ ở MỌI epoch.",
+                flush=True,
+            )
+        # Dataset rỗng làm shell; callback gán nội dung từng epoch.
+        train = ChatDataset([], tokenizer, args.max_length, {}, args.max_target_tokens, args.max_evidence_chars, False)
+        dev = ChatDataset([], tokenizer, args.max_length, {}, args.max_target_tokens, args.max_evidence_chars, False)
+
+        def _assign_split(epoch: int) -> None:
+            train_ids, dev_ids = reshuffle_split(pool.ids, args.reshuffle_dev_ratio, seed, epoch)
+            if args.max_train_samples:
+                train_ids = train_ids[: args.max_train_samples]
+            train.items = [item_by_id[q] for q in train_ids]
+            train.ids = train_ids
+            dev.items = [item_by_id[q] for q in dev_ids]
+            dev.ids = dev_ids
+
+        _assign_split(0)
+        print(
+            f"[QLoRA reshuffle] pool={len(item_by_id)} câu, dev_ratio={args.reshuffle_dev_ratio} | "
+            f"epoch 1: train={len(train)} dev={len(dev)} (mỗi epoch cắt lại cặp mới)",
+            flush=True,
+        )
+    else:
+        train = ChatDataset(
+            train_rows,
+            tokenizer,
+            args.max_length,
+            evidence_by_id,
+            args.max_target_tokens,
+            args.max_evidence_chars,
+            args.require_evidence,
+        )
+        dev = ChatDataset(
+            dev_rows,
+            tokenizer,
+            args.max_length,
+            dev_evidence_by_id,
+            args.max_target_tokens,
+            args.max_evidence_chars,
+            args.require_evidence,
+        )
     if not train:
         raise RuntimeError(
             "QLoRA không có sample hợp lệ; kiểm tra --train-file/--pairs/--require-evidence."
@@ -270,6 +350,8 @@ def main():
         "load_in_4bit": args.load_in_4bit,
         "max_evidence_chars": args.max_evidence_chars,
         "require_evidence": args.require_evidence,
+        "reshuffle_split_per_epoch": bool(args.reshuffle_split_per_epoch),
+        "reshuffle_dev_ratio": args.reshuffle_dev_ratio if args.reshuffle_split_per_epoch else None,
     }
     if resume_checkpoint:
         previous_signature_path = Path(resume_checkpoint).parent / "resume_signature.json"
@@ -317,6 +399,18 @@ def main():
         eval_dataset=dev if len(dev) else None,
         data_collator=CausalCollator(tokenizer),
     )
+    if args.reshuffle_split_per_epoch:
+
+        class _ReshuffleCallback(transformers.TrainerCallback):
+            """Đổi split đầu mỗi epoch; QLoRA không có bước chọn checkpoint theo METEOR nên
+            không cần dump dev file như SFT — eval_loss chỉ để quan sát."""
+
+            def on_epoch_begin(self, args, state, control, **kwargs):
+                # state.epoch == chỉ số epoch đang bắt đầu (0-based): suy từ state nên resume
+                # giữa chừng vẫn tái tạo đúng split của epoch đó.
+                _assign_split(round(state.epoch))
+
+        trainer.add_callback(_ReshuffleCallback())
     trainer.train(resume_from_checkpoint=resume_checkpoint)
     model.save_pretrained(args.output, safe_serialization=True)
     tokenizer.save_pretrained(args.output)

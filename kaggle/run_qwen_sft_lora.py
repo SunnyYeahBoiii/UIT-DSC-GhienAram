@@ -39,13 +39,20 @@ from run_end_to_end import (  # noqa: E402
 
 
 def _find_resume_root(input_root: Path) -> Path | None:
-    candidates = sorted(
-        {
-            path.parent
-            for path in input_root.rglob("resume_signature.json")
-            if any(child.is_dir() and child.name.startswith("checkpoint-") for child in path.parent.iterdir())
-        }
-    )
+    candidates = []
+    for path in input_root.rglob("resume_signature.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        # Signature QLoRA có pairs_sha256/max_evidence_chars, thiếu epoch_subset_size của SFT —
+        # loại để không copy nhầm state QLoRA làm SFT resume (sẽ fail signature check).
+        if "epoch_subset_size" not in payload or "pairs_sha256" in payload:
+            continue
+        parent = path.parent
+        if any(child.is_dir() and child.name.startswith("checkpoint-") for child in parent.iterdir()):
+            candidates.append(parent)
+    candidates = sorted(set(candidates))
     if len(candidates) > 1:
         raise RuntimeError(f"Có nhiều SFT training state để resume: {candidates}")
     return candidates[0] if candidates else None
@@ -108,21 +115,21 @@ def main() -> None:
     parser.add_argument("--epochs", type=float, default=5.0)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--grad-accum", type=int, default=16)
-    parser.add_argument("--max-length", type=int, default=3072)
     parser.add_argument(
         "--max-context-chars",
         type=int,
-        default=3500,
-        help="ngân sách ký tự evidence riêng cho SFT, forward cho cả train và select_best_sft_checkpoint",
+        default=24000,
+        help="ngân sách ký tự evidence cho SFT, mặc định khớp max_context_chars lúc inference; "
+        "trần token suy ra tự động từ giá trị này, forward cho cả train và select_best_sft_checkpoint",
     )
     parser.add_argument("--max-target-tokens", type=int, default=700)
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument(
-        "--backend",
-        choices=("transformers", "unsloth"),
-        default="transformers",
-        help="unsloth cần internet để pip install trước khi chạy notebook; adapter sinh ra vẫn là "
-        "PEFT chuẩn nên select_best_sft_checkpoint.py/inference không cần đổi gì.",
+        "--load-adapters",
+        default=None,
+        help="thư mục chứa adapter_model.safetensors + adapter_config.json (QLoRA cũ) để warm-start "
+        "LoRA weights trước khi SFT; weights được giữ lại trong các checkpoint SFT nên lần resume "
+        "sau không cần truyền lại.",
     )
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument(
@@ -133,6 +140,12 @@ def main() -> None:
         "để trống = mỗi epoch dùng đúng cùng --max-train-samples câu như cũ.",
     )
     parser.add_argument("--max-eval-samples", type=int, default=None)
+    parser.add_argument(
+        "--reshuffle-split-per-epoch",
+        action="store_true",
+        help="mỗi epoch trộn lại pool train+dev cắt theo --dev-ratio; evidence sẽ build cho TOÀN bộ "
+        "pool (bỏ các cap) vì câu nào cũng có thể vào train hoặc dev ở epoch bất kỳ.",
+    )
     parser.add_argument("--print-limit", type=int, default=5, help="số câu in chi tiết ref/pred khi chọn epoch")
     parser.add_argument("--resume-input", default=None)
     parser.add_argument(
@@ -242,18 +255,27 @@ def main() -> None:
     # Chỉ build evidence cho đúng tập câu hỏi thật sự dùng ở downstream (train đã cắt theo
     # --max-train-samples + dev đã cắt theo --max-eval-samples) — tránh chạy full RAG
     # (dense encode + rerank) trên toàn bộ train_sft.json khi chỉ đang smoke-test vài chục câu.
+    # Với --reshuffle-split-per-epoch thì KHÔNG cắt: mỗi epoch trộn lại pool nên câu nào cũng
+    # có thể rơi vào train hoặc dev — thiếu evidence là bị bỏ oan khỏi mọi epoch.
     train_for_evidence = load_qa(train_split, require_answers=False)
-    train_pool_size = args.train_pool_samples or args.max_train_samples
-    if train_pool_size:
-        train_for_evidence = train_for_evidence[:train_pool_size]
     dev_for_evidence = load_qa(dev_split, require_answers=False)
-    if args.max_eval_samples:
-        # PHẢI cùng seed + cùng thứ tự sort-rồi-shuffle với select_best_sft_checkpoint.py
-        # (xem shuffle ở đó khi cắt --max-eval-samples), nếu không 2 bên chọn ra 2 tập N câu
-        # khác nhau -> lúc eval thiếu evidence cho câu được chọn, bị skip oan.
-        dev_for_evidence = sorted(dev_for_evidence, key=lambda row: row.question_id)
-        random.Random(int(config["seed"])).shuffle(dev_for_evidence)
-        dev_for_evidence = dev_for_evidence[: args.max_eval_samples]
+    if args.reshuffle_split_per_epoch:
+        print(
+            f"[SFT reshuffle] build evidence cho toàn pool {len(train_for_evidence) + len(dev_for_evidence)} câu "
+            "(bỏ qua --max-train-samples/--max-eval-samples lúc build evidence)",
+            flush=True,
+        )
+    else:
+        train_pool_size = args.train_pool_samples or args.max_train_samples
+        if train_pool_size:
+            train_for_evidence = train_for_evidence[:train_pool_size]
+        if args.max_eval_samples:
+            # PHẢI cùng seed + cùng thứ tự sort-rồi-shuffle với select_best_sft_checkpoint.py
+            # (xem shuffle ở đó khi cắt --max-eval-samples), nếu không 2 bên chọn ra 2 tập N câu
+            # khác nhau -> lúc eval thiếu evidence cho câu được chọn, bị skip oan.
+            dev_for_evidence = sorted(dev_for_evidence, key=lambda row: row.question_id)
+            random.Random(int(config["seed"])).shuffle(dev_for_evidence)
+            dev_for_evidence = dev_for_evidence[: args.max_eval_samples]
     seen_ids = set()
     evidence_records = []
     for record in (*train_for_evidence, *dev_for_evidence):
@@ -290,8 +312,6 @@ def main() -> None:
             str(args.learning_rate),
             "--grad-accum",
             str(args.grad_accum),
-            "--max-length",
-            str(args.max_length),
             "--max-target-tokens",
             str(args.max_target_tokens),
             "--evidence",
@@ -301,13 +321,14 @@ def main() -> None:
             "--lora-r",
             str(args.lora_r),
             "--load-in-4bit",
-            "--backend",
-            args.backend,
+            *(["--load-adapters", str(args.load_adapters)] if args.load_adapters else []),
             "--resume-from-checkpoint",
             "auto",
             *(["--max-train-samples", str(args.max_train_samples)] if args.max_train_samples else []),
             *(["--train-pool-samples", str(args.train_pool_samples)] if args.train_pool_samples else []),
             *(["--max-eval-samples", str(args.max_eval_samples)] if args.max_eval_samples else []),
+            *(["--reshuffle-split-per-epoch"] if args.reshuffle_split_per_epoch else []),
+            *(["--reshuffle-dev-ratio", str(args.dev_ratio)] if args.reshuffle_split_per_epoch else []),
         ]
     )
 
@@ -353,6 +374,7 @@ def main() -> None:
         },
         "environment": environment,
         "split": split_info,
+        "reshuffle_split_per_epoch": bool(args.reshuffle_split_per_epoch),
         "epoch_selection": selection_report,
         "adapter_zip": str(adapter_zip.resolve()),
         "elapsed_hours": (time.time() - started) / 3600,

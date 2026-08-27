@@ -101,8 +101,8 @@ def main() -> None:
     parser.add_argument(
         "--max-context-chars",
         type=int,
-        default=3500,
-        help="PHẢI khớp --max-context-chars lúc train, không thì METEOR đo sai prompt model chưa từng thấy",
+        default=24000,
+        help="PHẢI khớp --max-context-chars lúc train (mặc định đã khớp 24000), không thì METEOR đo sai prompt model chưa từng thấy",
     )
     parser.add_argument("--max-new-tokens", type=int, default=700)
     parser.add_argument("--max-eval-samples", type=int, default=None, help="giới hạn số câu dev để sinh nhanh hơn")
@@ -128,18 +128,17 @@ def main() -> None:
     if not checkpoints:
         raise FileNotFoundError(f"Không tìm thấy checkpoint-* dưới {root}.")
 
-    dev_rows = load_qa(Path(args.dev_file), True)
+    default_dev_rows = load_qa(Path(args.dev_file), True)
     if args.max_eval_samples:
         # dev_rows đến từ deterministic_split rồi sorted theo question_id — lấy N câu
         # đầu tiên sẽ không đại diện (thiên theo thứ tự id); shuffle theo seed config
         # trước khi cắt để mẫu smoke-test thực sự ngẫu nhiên nhưng vẫn tái lập được.
         rng = random.Random(int(config["seed"]))
-        dev_rows = sorted(dev_rows, key=lambda row: row.question_id)
-        rng.shuffle(dev_rows)
-        dev_rows = dev_rows[: args.max_eval_samples]
-    if not dev_rows:
+        default_dev_rows = sorted(default_dev_rows, key=lambda row: row.question_id)
+        rng.shuffle(default_dev_rows)
+        default_dev_rows = default_dev_rows[: args.max_eval_samples]
+    if not default_dev_rows:
         raise RuntimeError(f"Dev file rỗng: {args.dev_file}")
-    references = {row.question_id: row.answer for row in dev_rows}
 
     import transformers
     from peft import PeftModel
@@ -173,6 +172,20 @@ def main() -> None:
     results = []
     peft_model = None
     for checkpoint in checkpoints:
+        # train_qwen_sft_lora.py --reshuffle-split-per-epoch dump dev của từng epoch ra
+        # dev_sft_step<N>.json — checkpoint nào thi trên dev của epoch nó; kiểu cũ (một dev
+        # cố định cho mọi epoch) thì không có file này và rơi về --dev-file chung.
+        step = int(checkpoint.name.split("-")[-1])
+        epoch_dev_path = root / f"dev_sft_step{step}.json"
+        if epoch_dev_path.is_file():
+            dev_rows = load_qa(epoch_dev_path, True)
+            dev_file_used = str(epoch_dev_path)
+        else:
+            dev_rows = default_dev_rows
+            dev_file_used = str(args.dev_file)
+        references = {row.question_id: row.answer for row in dev_rows}
+        if not dev_rows:
+            raise RuntimeError(f"Dev file rỗng: {dev_file_used}")
         if peft_model is None:
             peft_model = PeftModel.from_pretrained(base_model, str(checkpoint), adapter_name=checkpoint.name)
         else:
@@ -200,6 +213,8 @@ def main() -> None:
                 "epoch": trainer_state.get("epoch"),
                 "meteor": scores["meteor"],
                 "rouge_l_f1": scores["rouge_l_f1"],
+                "dev_file": dev_file_used,
+                "dev_samples": len(dev_rows),
                 "dev_predictions_file": str(predictions_path),
             }
         )
@@ -236,7 +251,8 @@ def main() -> None:
 
     report = {
         "note": scores["note"],
-        "eval_samples": len(dev_rows),
+        "eval_samples": best["dev_samples"],
+        "per_checkpoint_dev": True,
         "results": results,
         "best": best,
         "best_output": str(best_output.resolve()),

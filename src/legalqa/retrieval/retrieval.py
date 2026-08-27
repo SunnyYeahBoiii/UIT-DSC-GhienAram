@@ -218,15 +218,16 @@ def deduplicate_and_merge_evidence(
             )
         merged.append(candidate)
 
+    # Sàn điểm phải lọc TRƯỚC khi phân nhánh: đặt dưới nhánh diversity khiến
+    # simple route (prefer_document_diversity=False) bị bỏ rác điểm thấp.
+    top_score = max((item.score for item in merged), default=0.0)
+    if top_score > 0.0 and minimum_score_ratio > 0.0:
+        floor = top_score * max(0.0, minimum_score_ratio)
+        merged = [item for item in merged if item.score >= floor]
     if not prefer_document_diversity:
         return merged[:limit]
     selected: list[Evidence] = []
-    top_score = max((item.score for item in merged), default=0.0)
-    remaining = [
-        item
-        for item in merged
-        if top_score <= 0.0 or item.score >= top_score * max(0.0, minimum_score_ratio)
-    ]
+    remaining = list(merged)
     seen_docs: set[str] = set()
     while remaining and len(selected) < limit:
         allowed = [

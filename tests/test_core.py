@@ -572,6 +572,24 @@ def test_complex_evidence_diversity_never_forces_weak_documents():
     assert [item.chunk.chunk_id for item in selected] == ["a1", "a2"]
 
 
+def test_evidence_score_floor_applies_without_document_diversity():
+    # Simple route từng bị nhét rác điểm thấp đủ top_k vì bộ lọc ratio
+    # chỉ nằm dưới nhánh diversity — khoá hành vi này bằng test.
+    evidence = [
+        Evidence(Chunk("a1", "a", "A", "", "Quy định chính.", {}), 1.0),
+        Evidence(Chunk("a2", "a", "A", "", "Rác gần đúng.", {}), 0.30),
+        Evidence(Chunk("a3", "a", "A", "", "Rác vô quan.", {}), 0.02),
+    ]
+    selected = deduplicate_and_merge_evidence(
+        evidence, 3, prefer_document_diversity=False, minimum_score_ratio=0.42,
+    )
+    assert [item.chunk.chunk_id for item in selected] == ["a1"]
+    no_floor = deduplicate_and_merge_evidence(
+        evidence, 3, prefer_document_diversity=False,
+    )
+    assert len(no_floor) == 3
+
+
 def test_selector_hard_rejects_bartpho_and_prefers_fluent_qwen(tmp_path):
     config = minimal_config(tmp_path)
     config["selection"].update(
@@ -818,7 +836,7 @@ def test_agentic_candidate_issues_tool_call_then_answers(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             self.calls += 1
             if self.calls == 1:
                 assert "CÔNG CỤ TRA CỨU" in user
@@ -848,7 +866,7 @@ def test_agentic_candidate_skips_tool_section_when_search_fn_missing(tmp_path):
     seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Người lao động có quyền nghỉ phép.", "Luật", "Điều 1", {}), 0.9)]
 
     class FakeGenerator:
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             assert "CÔNG CỤ TRA CỨU" not in user
             return GenerationResult("Theo Điều 1, người lao động được nghỉ phép.", 10, True, False)
 
@@ -865,7 +883,7 @@ def test_agentic_candidate_raises_when_model_ignores_tool_call_limit(tmp_path):
     seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
 
     class FakeGenerator:
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             return GenerationResult("TRA_CUU: gì đó", 5, True, False)
 
     with pytest.raises(RuntimeError):
@@ -877,7 +895,7 @@ def test_agentic_candidate_raises_on_empty_tool_query(tmp_path):
     seed_evidence = [Evidence(Chunk("c1", "d1", "Điều 1. Nội dung.", "Luật", "Điều 1", {}), 0.9)]
 
     class FakeGenerator:
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             return GenerationResult("TRA_CUU:", 3, True, False)
 
     with pytest.raises(RuntimeError):
@@ -901,7 +919,7 @@ def test_agentic_candidate_prioritizes_tool_evidence_within_context_budget(tmp_p
             self.calls = 0
             self.prompts: list[str] = []
 
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             self.calls += 1
             self.prompts.append(user)
             if self.calls == 1:
@@ -936,7 +954,7 @@ def test_agentic_tool_evidence_caps_chunks_per_document(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             self.calls += 1
             if self.calls == 1:
                 return GenerationResult("TRA_CUU: mức phạt", 5, True, False)
@@ -980,7 +998,7 @@ def test_agentic_tool_evidence_merges_adjacent_windows(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             self.calls += 1
             if self.calls < 3:
                 return GenerationResult(f"TRA_CUU: truy vấn {self.calls}", 5, True, False)
@@ -1010,7 +1028,7 @@ def test_agentic_candidate_blocks_repeated_query_and_forces_final_answer(tmp_pat
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             self.calls += 1
             if self.calls <= 2:
                 return GenerationResult("TRA_CUU: mức phạt chậm đóng", 5, True, False)
@@ -1040,7 +1058,7 @@ def test_agentic_query_dedup_normalizes_vietnamese_d_stroke(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        def generate_with_metadata(self, system, user, *, max_new_tokens=None):
+        def generate_with_metadata(self, system, user, *, max_new_tokens=None, min_new_tokens=0):
             self.calls += 1
             outputs = (
                 "TRA_CUU: Điều kiện áp dụng",

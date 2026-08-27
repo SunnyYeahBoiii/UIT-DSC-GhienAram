@@ -693,7 +693,14 @@ def retrieve_sqlite_batch(
                 pool = [item for item in combined if item.chunk.doc_id == main_doc]
                 limit = int(retrieval_cfg.get("simple_evidence_top_k", 4))
                 selected = deduplicate_and_merge_evidence(
-                    pool, limit, prefer_document_diversity=False
+                    pool,
+                    limit,
+                    prefer_document_diversity=False,
+                    # Không có sàn này thì 4 slot bị nhét đầy bằng chunk rác
+                    # (score ~0.02) chỉ để "đủ top_k", nhiễu prompt sinh câu trả lời.
+                    minimum_score_ratio=float(
+                        retrieval_cfg.get("simple_min_score_ratio", 0.42)
+                    ),
                 )
             else:
                 limit = int(retrieval_cfg.get("complex_evidence_top_k", 8))
