@@ -1,0 +1,45 @@
+{
+  "schema": "legalqa-v5007-real-baseline-v1",
+  "created_at": "2026-09-04",
+  "git_branch": "v5007-real",
+  "baseline_score": {
+    "metric": "public_meteor",
+    "value": 0.5007
+  },
+  "archives": [
+    {
+      "file": "artifacts/original_archives/05_selector_calibration.zip",
+      "bytes": 385618073,
+      "sha256": "41CF789B6175FC7464F873A6CC1A3E0DB039339D0A764F88229AD656BA6DA7B0",
+      "comparison": "content-identical-to-previous-selector-after-normalizing-expanded-nested-zips"
+    },
+    {
+      "file": "artifacts/original_archives/ALL_TRAINING_05.zip",
+      "bytes": 845930938,
+      "sha256": "D339AB77F6E30C7A8E86FE640A98D3B02383A9B9190723F4A38BAD05880F78C0",
+      "comparison": "content-identical-to-previous-training-output-after-normalizing-expanded-adapter-zip"
+    },
+    {
+      "file": "artifacts/original_archives/legalqa_dense_index05.zip",
+      "bytes": 406989547,
+      "sha256": "2D12CB1967EC84B660C51F7C7C9B8A58CDC21042CE9F5022A8AC0A599B7C036E",
+      "comparison": "all-three-files-byte-identical-to-previous-dense-index"
+    },
+    {
+      "file": "artifacts/original_archives/source_05_inference.zip",
+      "bytes": 84153287,
+      "sha256": "44A52EBF5C307B5B715774FA467E04B98373BA8809B0CD6D089479E0AF024FC5",
+      "comparison": "92-of-92-files-identical-to-Downloads-source_05.zip-but-not-exact-final-runtime-revision"
+    }
+  ],
+  "verified_runtime_artifacts": {
+    "dense_schema": "global-dense-v1",
+    "dense_identity": "b5c6eadb46ee7aceab44b8643fa8a5beefde5420c02cf2146e0fd30e38eccf23",
+    "sqlite_schema": 4,
+    "chunks": 215267,
+    "selector_sha256": "85A00E46E988B013741AB94C0B5BCF4777B6909AFF4D2B3B60D00664F06ADA38",
+    "full_adapter_identity": "3b3907596eeaaf1bbe95aebcd23c9ae4489a2fec45f464a2b25354d844dc2d03",
+    "run_fingerprint": "de25e0c7228918c3"
+  },
+  "source_note": "The extracted source is preserved exactly from source_05_inference.zip. Runtime logs prove the final scoring run used a nearby revision with additional max-runtime, auto-resume, and required-artifact CLI guards."
+}

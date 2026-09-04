@@ -3,71 +3,33 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
-from .data import Chunk, load_qa, write_json
-from .generation import (
+from .core.data import Chunk, load_qa, write_json
+from .generation.generation import (
     Candidate,
     extractive_candidate,
     make_qwen_agentic_candidate,
     make_qwen_candidate,
     make_train_memory_candidate,
 )
-from .index import LegalIndex
-from .legal_graph import asks_for_current_law, has_complex_cue
-from .models import (
+from .retrieval.index import LegalIndex
+from .retrieval.legal_graph import asks_for_current_law, has_complex_cue
+from .core.models import (
     CrossEncoderReranker,
     DenseEncoder,
     LegalSemanticEncoder,
     QwenTextGenerator,
     unload_model,
 )
-from .retrieval import Evidence, HybridRetriever, retrieval_confidence
-from .recovery import RecoveryManager
-from .text import citations, document_numbers
-from .verifier import score_candidates
-
-
-class InferencePaused(Exception):
-    """Signal a clean, checkpointed pause before the notebook runtime limit."""
-
-    def __init__(self, stage: str, completed: int, total: int) -> None:
-        self.stage = str(stage)
-        self.completed = int(completed)
-        self.total = int(total)
-        super().__init__(
-            f"Inference paused safely at stage={self.stage}: "
-            f"{self.completed}/{self.total} completed."
-        )
-
-
-def _check_runtime_budget(
-    config: dict[str, Any],
-    stage: str,
-    completed: int,
-    total: int,
-    recovery: RecoveryManager | None,
-) -> None:
-    """Stop only at a question/stage boundary, after persisting resumable state."""
-    raw_deadline = config.get("runtime", {}).get("stop_at_unix")
-    if raw_deadline in (None, "", 0, 0.0):
-        return
-    try:
-        deadline = float(raw_deadline)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"runtime.stop_at_unix is invalid: {raw_deadline!r}") from exc
-    if not np.isfinite(deadline) or deadline <= 0:
-        raise ValueError(f"runtime.stop_at_unix must be a positive finite timestamp: {deadline!r}")
-    if time.time() < deadline:
-        return
-    if recovery:
-        recovery.snapshot(stage, completed, total, force=True)
-    raise InferencePaused(stage, completed, total)
+from .retrieval.retrieval import Evidence, HybridRetriever, retrieval_confidence
+from .core.recovery import RecoveryManager
+from .core.text import citations, document_numbers
+from .generation.verifier import score_candidates
 
 
 def _candidate_key(question, evidence: list[Evidence], source: str, cache_namespace: str | None) -> str:
@@ -357,8 +319,6 @@ def generate_from_evidence(
         generator = None
         consecutive_errors = 0
         try:
-            if missing:
-                _check_runtime_budget(config, "qwen", completed, len(questions), recovery)
             generator = QwenTextGenerator(config) if missing else None
             for item in questions:
                 key = _candidate_key(
@@ -371,7 +331,6 @@ def generate_from_evidence(
                         Candidate("qwen3.5-2b", entry["answer"], details=entry.get("metadata", {}))
                     )
                     continue
-                _check_runtime_budget(config, "qwen", completed, len(questions), recovery)
                 try:
                     candidate = make_qwen_candidate(
                         generator,
@@ -455,10 +414,6 @@ def generate_from_evidence(
             generator = None
             consecutive_errors = 0
             try:
-                if missing:
-                    _check_runtime_budget(
-                        config, "qwen_agentic", completed, len(eligible), recovery
-                    )
                 generator = QwenTextGenerator(config) if missing else None
                 for item, gate_reason in eligible:
                     key = _candidate_key(
@@ -474,9 +429,6 @@ def generate_from_evidence(
                         )
                         agentic_generated_count += 1
                         continue
-                    _check_runtime_budget(
-                        config, "qwen_agentic", completed, len(eligible), recovery
-                    )
                     try:
                         candidate = make_qwen_agentic_candidate(
                             generator,
@@ -541,7 +493,6 @@ def generate_from_evidence(
                 if recovery:
                     recovery.snapshot("qwen_agentic", completed, len(eligible), force=True)
 
-    _check_runtime_budget(config, "verifier", 0, len(questions), recovery)
     semantic_encoder = None
     if model_paths.get("verifier") and float(config["selection"].get("legal_semantic", 0.0)) > 0:
         try:

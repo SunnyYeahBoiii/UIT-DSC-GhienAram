@@ -21,13 +21,13 @@ for stream in (sys.stdout, sys.stderr):
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.budget import count_system_budget  # noqa: E402
-from legalqa.config import load_config  # noqa: E402
-from legalqa.data import deterministic_split, load_qa, qa_as_object, write_json  # noqa: E402
+from legalqa.core.budget import count_system_budget  # noqa: E402
+from legalqa.core.config import load_config  # noqa: E402
+from legalqa.core.data import deterministic_split, load_qa, qa_as_object, write_json  # noqa: E402
 from legalqa.pipeline import generate_from_evidence  # noqa: E402
-from legalqa.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
-from legalqa.sqlite_store import build_sqlite_store, prepare_sqlite_weak_pairs  # noqa: E402
-from legalqa.submission import create_submission  # noqa: E402
+from legalqa.storage.sqlite_retrieval import retrieve_sqlite_batch, sqlite_bm25_search_fn  # noqa: E402
+from legalqa.storage.sqlite_store import build_sqlite_store, prepare_sqlite_weak_pairs  # noqa: E402
+from legalqa.core.submission import create_submission  # noqa: E402
 
 
 MODEL_ALIASES = {

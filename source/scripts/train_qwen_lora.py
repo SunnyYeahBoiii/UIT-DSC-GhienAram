@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-import time
-import zipfile
 from pathlib import Path
 
 import torch
@@ -19,82 +16,11 @@ for stream in (sys.stdout, sys.stderr):
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.config import load_config, require_local_model  # noqa: E402
-from legalqa.data import load_qa  # noqa: E402
-from legalqa.fingerprint import sha256_file  # noqa: E402
-from legalqa.prompts import SYSTEM_PROMPT  # noqa: E402
-
-
-def _latest_valid_checkpoint(root: Path) -> Path | None:
-    candidates: list[tuple[int, Path]] = []
-    if not root.is_dir():
-        return None
-    for child in root.iterdir():
-        if not child.is_dir() or not child.name.startswith("checkpoint-"):
-            continue
-        try:
-            step = int(child.name.removeprefix("checkpoint-"))
-        except ValueError:
-            continue
-        required_state = ("trainer_state.json", "optimizer.pt", "scheduler.pt", "rng_state.pth")
-        has_adapter = (child / "adapter_model.safetensors").is_file() or (
-            child / "adapter_model.bin"
-        ).is_file()
-        if has_adapter and all((child / name).is_file() for name in required_state):
-            candidates.append((step, child))
-    return max(candidates, default=(0, None), key=lambda item: item[0])[1]
-
-
-def create_qlora_recovery_bundle(output_dir: Path, recovery_output: Path) -> dict:
-    """Atomically package the latest resumable Trainer state for another session."""
-    output_dir = output_dir.resolve()
-    checkpoint = _latest_valid_checkpoint(output_dir)
-    if checkpoint is None:
-        raise FileNotFoundError(f"Không có checkpoint Trainer hợp lệ trong {output_dir}")
-    signature = output_dir / "resume_signature.json"
-    if not signature.is_file():
-        raise FileNotFoundError(f"Checkpoint thiếu resume_signature.json: {output_dir}")
-    try:
-        state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"trainer_state.json hỏng trong {checkpoint}: {error}") from error
-    manifest = {
-        "schema": "legalqa-qlora-recovery-v1",
-        "checkpoint": checkpoint.name,
-        "global_step": int(state.get("global_step", checkpoint.name.removeprefix("checkpoint-"))),
-        "created_at_unix": time.time(),
-    }
-    recovery_output = recovery_output.resolve()
-    recovery_output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = recovery_output.with_name(f".{recovery_output.name}.tmp")
-    if temporary.exists():
-        temporary.unlink()
-    try:
-        # ZIP_STORED is intentional: safetensors/optimizer files barely compress,
-        # while Kaggle needs this operation to finish well before the hard timeout.
-        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_STORED) as archive:
-            archive.writestr(
-                "recovery_manifest.json",
-                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-            )
-            for metadata_name in (
-                "resume_signature.json",
-                "qlora_scope.json",
-                "training_paused.json",
-            ):
-                metadata = output_dir / metadata_name
-                if metadata.is_file():
-                    archive.write(metadata, metadata_name)
-            for path in sorted(checkpoint.rglob("*")):
-                if path.is_file():
-                    archive.write(path, path.relative_to(output_dir).as_posix())
-        os.replace(temporary, recovery_output)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-    manifest["path"] = str(recovery_output)
-    manifest["bytes"] = recovery_output.stat().st_size
-    return manifest
+from legalqa.core.config import load_config, require_local_model  # noqa: E402
+from legalqa.core.data import load_qa  # noqa: E402
+from legalqa.core.fingerprint import sha256_file  # noqa: E402
+from legalqa.generation.generation import clean_answer  # noqa: E402
+from legalqa.generation.prompts import SYSTEM_PROMPT  # noqa: E402
 
 
 class ChatDataset(torch.utils.data.Dataset):
@@ -131,7 +57,8 @@ class ChatDataset(torch.utils.data.Dataset):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user},
             ]
-            full_messages = prompt_messages + [{"role": "assistant", "content": row.answer}]
+            target_answer = clean_answer(row.answer, question=row.question)
+            full_messages = prompt_messages + [{"role": "assistant", "content": target_answer}]
             prompt = tokenizer.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
             full = tokenizer.apply_chat_template(full_messages, tokenize=False, add_generation_prompt=False)
             prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
@@ -173,7 +100,6 @@ class CausalCollator:
 
 
 def main():
-    script_started = time.monotonic()
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(PROJECT / "configs" / "p0.yaml"))
     parser.add_argument("--epochs", type=float, default=3.0)
@@ -198,17 +124,6 @@ def main():
     parser.add_argument("--checkpoint-steps", type=int, default=20)
     parser.add_argument("--save-total-limit", type=int, default=2)
     parser.add_argument(
-        "--max-runtime-hours",
-        type=float,
-        default=0.0,
-        help="Dừng an toàn sau số giờ này (0 = không giới hạn), lưu checkpoint đầy đủ trước khi thoát.",
-    )
-    parser.add_argument(
-        "--recovery-output",
-        default=None,
-        help="ZIP recovery nguyên tử chứa checkpoint mới nhất; dùng để resume ở Kaggle session sau.",
-    )
-    parser.add_argument(
         "--resume-from-checkpoint",
         default="auto",
         help="auto, none, hoặc đường dẫn checkpoint; Trainer khôi phục model/optimizer/scheduler/RNG.",
@@ -217,8 +132,6 @@ def main():
     args = parser.parse_args()
     if args.checkpoint_steps < 1 or args.save_total_limit < 1:
         raise ValueError("checkpoint-steps và save-total-limit phải >= 1.")
-    if args.max_runtime_hours < 0:
-        raise ValueError("max-runtime-hours phải >= 0.")
     config = load_config(args.config)
 
     import transformers
@@ -376,46 +289,6 @@ def main():
         json.dumps(run_signature, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    for stale_marker in (output / "training_complete.json", output / "training_paused.json"):
-        stale_marker.unlink(missing_ok=True)
-
-    recovery_output = Path(args.recovery_output) if args.recovery_output else output.parent / "qlora_recovery_latest.zip"
-
-    class RuntimeBudgetCallback(transformers.TrainerCallback):
-        def __init__(self):
-            self.pause_requested = False
-            self.pause_reason = None
-
-        def on_step_end(self, training_args, state, control, **kwargs):
-            if args.max_runtime_hours <= 0 or self.pause_requested:
-                return control
-            elapsed_hours = (time.monotonic() - script_started) / 3600
-            if elapsed_hours >= args.max_runtime_hours:
-                self.pause_requested = True
-                self.pause_reason = (
-                    f"runtime_budget_reached:{elapsed_hours:.4f}>={args.max_runtime_hours:.4f}h"
-                )
-                # Trainer will save model, optimizer, scheduler, scaler and RNG
-                # before honoring should_training_stop.
-                control.should_save = True
-                control.should_training_stop = True
-                print(
-                    f"[Qwen checkpoint] Đã tới ngân sách {args.max_runtime_hours:.2f}h; "
-                    f"dừng an toàn tại optimizer step {state.global_step}.",
-                    flush=True,
-                )
-            return control
-
-        def on_save(self, training_args, state, control, **kwargs):
-            recovery = create_qlora_recovery_bundle(output, recovery_output)
-            print(
-                f"[Qwen recovery] step={recovery['global_step']} -> {recovery_output} "
-                f"({recovery['bytes'] / (1024 ** 2):.1f} MiB)",
-                flush=True,
-            )
-            return control
-
-    runtime_callback = RuntimeBudgetCallback()
     training_args = transformers.TrainingArguments(
         output_dir=args.output,
         num_train_epochs=args.epochs,
@@ -443,39 +316,13 @@ def main():
         train_dataset=train,
         eval_dataset=dev if len(dev) else None,
         data_collator=CausalCollator(tokenizer),
-        callbacks=[runtime_callback],
     )
     trainer.train(resume_from_checkpoint=resume_checkpoint)
-    paused = bool(
-        runtime_callback.pause_requested
-        and trainer.state.max_steps > 0
-        and trainer.state.global_step < trainer.state.max_steps
-    )
-    if paused:
-        pause_payload = {
-            "status": "paused",
-            "reason": runtime_callback.pause_reason,
-            "global_step": trainer.state.global_step,
-            "max_steps": trainer.state.max_steps,
-            "resumed_from": str(resume_checkpoint) if resume_checkpoint else None,
-            "elapsed_hours": (time.monotonic() - script_started) / 3600,
-            "recovery_zip": str(recovery_output.resolve()),
-        }
-        (output / "training_paused.json").write_text(
-            json.dumps(pause_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        # Rebuild once so training_paused.json is also present in the atomic ZIP.
-        create_qlora_recovery_bundle(output, recovery_output)
-        print(json.dumps(pause_payload, ensure_ascii=False), flush=True)
-        return
-
     model.save_pretrained(args.output, safe_serialization=True)
     tokenizer.save_pretrained(args.output)
     (output / "training_complete.json").write_text(
         json.dumps(
             {
-                "status": "complete",
                 "train": len(train),
                 "dev": len(dev),
                 "global_step": trainer.state.global_step,

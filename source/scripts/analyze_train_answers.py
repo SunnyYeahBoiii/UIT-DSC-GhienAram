@@ -9,8 +9,8 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.answer_style import build_answer_style_profile  # noqa: E402
-from legalqa.data import load_qa, write_json  # noqa: E402
+from legalqa.generation.answer_style import build_answer_style_profile  # noqa: E402
+from legalqa.core.data import load_qa, write_json  # noqa: E402
 
 
 def main() -> None:

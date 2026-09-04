@@ -12,8 +12,8 @@ from typing import Any
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
-from legalqa.submission import validate_submission  # noqa: E402
-from legalqa.zero_train import (  # noqa: E402
+from legalqa.core.submission import validate_submission  # noqa: E402
+from legalqa.training.zero_train import (  # noqa: E402
     KNNThresholds,
     answer_hash,
     conservative_postprocess,

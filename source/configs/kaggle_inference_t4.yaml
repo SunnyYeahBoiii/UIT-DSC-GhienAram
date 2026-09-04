@@ -39,8 +39,11 @@ corpus:
 retrieval:
   global_dense_enabled: true
   bm25_top_k: 140
-  # Raw FTS5 pool for each tool call; legal reranking below returns only top 12.
-  agentic_bm25_top_k: 60
+  # Pool FTS5 thô cho mỗi lượt tool-call: rộng hơn số đoạn thực sự dùng để
+  # bước chọn đa dạng văn bản (agentic_max_per_document) có đủ hậu bị sau
+  # lọc trùng chunk đã thấy; legal reranking bên dưới chỉ trả top
+  # agentic_return_top_k.
+  agentic_bm25_top_k: 80
   agentic_return_top_k: 12
   agentic_graph_documents: 3
   agentic_graph_chunks_per_document: 1
@@ -107,32 +110,51 @@ generation:
   qwen_enabled: true
   bartpho_enabled: false
   extractive_enabled: true
-  # Chỉ chạy Agentic Qwen cho Complex, retrieval yếu hoặc có tín hiệu pháp lý
-  # cần mở rộng; không chạy lượt sinh thứ hai cho toàn bộ câu hỏi.
+  # Vòng lặp tool-call: model có thể tự phát truy vấn "TRA_CUU: ..." để BM25
+  # (SQLite FTS5) tra thêm căn cứ giữa các lượt sinh. Gate chỉ chạy cho câu
+  # Complex, retrieval yếu hoặc có tín hiệu pháp lý cần mở rộng — chi phí
+  # thêm chỉ phát sinh trên phần câu hỏi thật sự cần thêm bằng chứng.
   agentic_enabled: true
   agentic_routes: ["complex"]
   agentic_confidence_below: 0.45
   agentic_on_legal_cues: true
-  agentic_max_tool_calls: 2
-  agentic_evidence_per_call: 3
+  # 3 lượt tra cứu: lượt 1 thường tra chủ đề chính, lượt 2/3 mới tra số hiệu
+  # văn bản hoặc điều khoản dẫn chiếu — 2 lượt cũ hay bỏ dở chuỗi này. Chi
+  # phí chỉ phát sinh khi model thật sự gọi tiếp (vòng lặp dừng ngay khi
+  # model trả lời).
+  agentic_max_tool_calls: 3
+  agentic_evidence_per_call: 4
+  # BM25 top thường trả nhiều window liền kề của cùng văn bản; cap 2 chunk/
+  # văn bản giữ đa dạng cho câu complex (window liền kề đã được gộp text).
+  agentic_max_per_document: 2
   agentic_max_query_chars: 240
   agentic_warn_after_nonfatal_errors: 3
-  max_context_chars: 18000
-  max_new_tokens: 900
-  simple_max_new_tokens: 512
-  complex_max_new_tokens: 900
+  # Tỉ lệ max_context_chars dành riêng cho căn cứ tool-call tìm thêm; phần
+  # còn lại bảo đảm căn cứ retrieval ban đầu không bị đẩy hết ra khỏi prompt
+  # ở các lượt sau khi pool tool-call cộng dồn.
+  agentic_tool_context_share: 0.45
+  # Đủ chỗ cho ~6 căn cứ ban đầu (có thể đã gộp window, mỗi đoạn tới ~8k ký
+  # tự) + ~4 đoạn tool-call; prompt vẫn xa giới hạn context của Qwen 2B.
+  max_context_chars: 24000
+  # p90 độ dài thật của train.json (đo bằng build_answer_style_profile) lên
+  # tới ~576-619 từ tuỳ question_type; cap 512 cũ cắt cụt phần lớn câu trả
+  # lời dài trước khi chạm target đã học. Nâng cap để không tự chặn dưới p90.
+  max_new_tokens: 1300
+  simple_max_new_tokens: 1050
+  complex_max_new_tokens: 1300
   do_sample: false
   temperature: 0.7
   top_p: 0.9
-  repetition_penalty: 1.03
+  repetition_penalty: 1.1
+  no_repeat_ngram_size: 5
   min_answer_words: 35
   target_answer_words: 180
   simple_target_answer_words: 140
   complex_target_answer_words: 260
-  max_answer_words: 700
+  max_answer_words: 760
   style_min_group_size: 20
   style_floor_words: 35
-  style_ceiling_words: 700
+  style_ceiling_words: 760
   tokens_per_vietnamese_word: 1.65
   compact_generated_answers: true
   hard_trim_generated_answers: false
@@ -153,7 +175,10 @@ selection:
   qwen_preference_margin: 0.06
   source_priors:
     qwen3.5-2b: 0.08
-    qwen3.5-2b-agentic: 0.08
+    # Agentic được verifier chấm trên tập căn cứ mở rộng (initial + tool-call)
+    # nên citation/numeric precision của nó đáng tin hơn chút khi bảng điểm
+    # sát nhau; ưu tiên nhẹ thay vì để hoà với qwen thường.
+    qwen3.5-2b-agentic: 0.10
     extractive: -0.03
     train-memory: 0.00
 

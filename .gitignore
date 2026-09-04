@@ -4,3 +4,8 @@
 
 # macOS
 .DS_Store
+
+# Local Python test/runtime caches (không thuộc source artifact gốc)
+__pycache__/
+*.py[cod]
+.pytest_cache/

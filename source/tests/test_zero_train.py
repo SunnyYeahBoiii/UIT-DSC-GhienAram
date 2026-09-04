@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from legalqa.zero_train import (
+from legalqa.training.zero_train import (
     KNNThresholds,
     capitalize_first_letter,
     close_truncated_answer,
