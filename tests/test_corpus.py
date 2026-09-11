@@ -74,3 +74,19 @@ def test_title_ghep_dong_chu_de():
     )
     assert doc.title == "THÔNG TƯ QUY ĐỊNH VỀ KHÁM BỆNH"
     assert doc.number == "1/2020/TT-BYT"
+
+
+def test_dewrap_gop_so_khoan_dung_mot_minh():
+    """Dòng chỉ có "1." rồi "\\n\\n" — số khoản không bao giờ là đoạn riêng, phải nối."""
+    from legalqa.corpus import dewrap_passage
+
+    assert dewrap_passage("Điều 32. A\n\n1.\n\nCăn cứ vào") == "Điều 32. A\n\n1. Căn cứ vào"
+    assert dewrap_passage("Mở đầu\n\na)\n\nNội dung") == "Mở đầu\n\na) Nội dung"
+
+
+def test_dewrap_khong_gop_khoan_binh_thuong():
+    """Khoản đã có nội dung cùng dòng thì giữ nguyên ranh giới đoạn."""
+    from legalqa.corpus import dewrap_passage
+
+    raw = "Điều 1. A\n\n1. Khoản một\n\n2. Khoản hai"
+    assert dewrap_passage(raw) == raw

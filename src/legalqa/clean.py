@@ -1,7 +1,7 @@
 """Làm sạch Reference answer trước khi SFT.
 
 18,5% reference answer chứa caption ảnh crawl — model học sẽ sinh hallucination.
-0,9% chứa link reference ("tại đây") —噪声 biên tập.
+0,9% chứa link reference ("tại đây") — nhiễu biên tập.
 Phải giữ nguyên `[...]` — trích luật lược bỏ hợp lệ, không phải noise.
 """
 from __future__ import annotations
@@ -21,10 +21,9 @@ _DOWNLOAD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Question bị lặp nguyên văn trong answer —.detect bằng cách check
-# question xuất hiệnverbatim trong answer
+# Question bị lặp nguyên văn trong answer — nhận ra bằng cách khớp chính question
 def _verbatim_question_pattern(question: str) -> re.Pattern[str]:
-    """Tạo regex khớp questionverbatim trong answer."""
+    """Tạo regex khớp nguyên văn question trong answer."""
     escaped = re.escape(question.strip())
     return re.compile(escaped, re.IGNORECASE)
 

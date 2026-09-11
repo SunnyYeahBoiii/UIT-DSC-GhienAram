@@ -211,3 +211,46 @@ Sau khi sửa (MULTILINE + ghép dòng chủ đề viết hoa ngay sau loại v�
 Thêm `Document.number` (số hiệu `27/2017/TT-BLĐTBXH`) — bắt được **91,4%**. Đây là
 khoá để đối chiếu Citation với Document trong legal graph (ADR-0002: chỉ mở rộng graph
 khi Citation gọi tên một văn bản cụ thể).
+
+### Dòng chỉ chứa số khoản
+
+Sau khi gỡ `\r`, còn một dạng phân mảnh nữa dùng `\n\n` thuần: dòng chỉ chứa mỗi
+dấu đánh số rồi xuống dòng.
+
+```
+Điều 32. Trách nhiệm của người bị khiếu nại
+\n\n 1. \n\n Căn cứ vào quyết định giải quyết khiếu nại...
+```
+
+Đo: **3.606/334.524 = 1,1%** số dòng không rỗng. Một dấu đánh số đứng một mình không
+bao giờ là đoạn riêng, nên `LONE_MARKER_RE` nối chắc chắn đúng.
+
+Đánh đổi đã đo: trong 1.500 Document có 11 ca dạng `số khoản` + `Điều N`. 9/11 là trích
+dẫn trong khoản sửa đổi (`23.` + `Điều 31 được sửa đổi, bổ sung như sau`) — gộp lại là
+đúng, vì để tách chúng tạo **heading giả** cắt vụn Điều thật. 2/11 là heading thật bị
+mất. Toàn corpus: số Điều tách được 159.242 → 159.136 (−106). Chấp nhận: bớt heading
+giả đáng giá hơn giữ 2 heading thật trên 159 nghìn.
+
+## 12. Chạy clean toàn bộ — `scripts/clean_data.py`
+
+Materialize sẵn để bước index/SFT không parse lại 8.532 file JSON.
+Đầu ra vào `data/clean/` (nằm trong `.gitignore`).
+
+```
+== CORPUS ==                              == TRAIN ==
+  file                8.532                 vào                 7.000
+  Document ghi ra     8.512                 answer bị sửa       1.495 = 21,4%
+  Điều tách được    159.136                 loại (ngắn/cụt)        54
+  Document không Điều 1.271 = 14,9%         trùng question         17
+  có số hiệu          7.732 = 90,8%         giữ                 6.929
+  thiếu Slug          1.105 = 13,0%
+  wrap mềm \r  4.407.012 -> 0
+```
+
+`corpus.jsonl` 482,7 MB — mỗi dòng một Document: `doc_id`, `title`, `number`, `slug`,
+`link`, `passage` (đã gỡ wrap), `articles` (`[số, heading, start, end]`).
+
+`train_sft.jsonl` 6.929 mẫu — khớp ngưỡng nghiệm thu 6.900–6.950 của V10_BUILD_SPEC.
+Trùng question thì giữ bản answer dài nhất (bản ngắn thường là trích lược).
+
+Xác minh trên 179 Document lấy ngẫu nhiên: 0 offset Điều sai, 0 ký tự `\r` còn sót.

@@ -19,6 +19,13 @@ from typing import Iterator
 WRAP_RE = re.compile(r"[ \t]*\r\n*[ \t]*")
 ENDPUNCT = ".:;?!…"
 
+# Dòng chỉ chứa mỗi số khoản/điểm ("1.", "a)") rồi xuống dòng — 1,1% số dòng.
+# Một dấu đánh số đứng một mình không bao giờ là đoạn riêng, nên nối chắc chắn đúng.
+# Trường hợp này dùng "\n\n" thuần nên vòng gỡ \r ở trên không bắt được.
+LONE_MARKER_RE = re.compile(
+    r"^([ \t]*(?:\d{1,3}[a-zđ]?|[a-zđ])[.)])[ \t]*\n\s*\n[ \t]*(?=\S)", re.MULTILINE
+)
+
 # Điều đứng đầu dòng: "Điều 12.", "Điều 12a.", "Điều 12 ." — bắt cả biến thể thiếu dấu chấm
 DIEU_RE = re.compile(r"^[ \t]*(Điều\s+(\d+[a-zđ]?))\s*[.\-:]?\s*", re.MULTILINE)
 
@@ -105,23 +112,23 @@ def dewrap_passage(passage: str) -> str:
     đều trỏ vào Passage sau bước này. Nếu không gỡ, 75,7% tiêu đề Điều bị cắt đôi
     ("Điều 2. Tổ chức" | "thực hiện") nên Article.heading và Document.title đều sai.
     """
-    if "\r" not in passage:
-        return passage
+    if "\r" in passage:
+        out: list[str] = []
+        pos = 0
+        for m in WRAP_RE.finditer(passage):
+            out.append(passage[pos : m.start()])
+            pos = m.end()
+            prev = out[-1][-1] if out[-1] else ""
+            nxt = passage[pos] if pos < len(passage) else ""
+            # Wrap sau dấu kết câu + trước chữ hoa/số = ngắt đoạn thật bị wrap kèm, giữ lại
+            if prev in ENDPUNCT and (nxt.isupper() or nxt.isdigit()):
+                out.append("\n\n")
+            elif prev:
+                out.append(" ")
+        out.append(passage[pos:])
+        passage = "".join(out)
 
-    out: list[str] = []
-    pos = 0
-    for m in WRAP_RE.finditer(passage):
-        out.append(passage[pos : m.start()])
-        pos = m.end()
-        prev = out[-1][-1] if out[-1] else ""
-        nxt = passage[pos] if pos < len(passage) else ""
-        # Wrap sau dấu kết câu + trước chữ hoa/số = ngắt đoạn thật bị wrap kèm, giữ lại
-        if prev in ENDPUNCT and (nxt.isupper() or nxt.isdigit()):
-            out.append("\n\n")
-        elif prev:
-            out.append(" ")
-    out.append(passage[pos:])
-    return "".join(out)
+    return LONE_MARKER_RE.sub(r"\1 ", passage)
 
 
 def title_from_slug(slug: str) -> str:
