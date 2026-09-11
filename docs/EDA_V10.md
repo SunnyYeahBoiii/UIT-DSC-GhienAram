@@ -458,8 +458,14 @@ bảng bị-sửa-nhiều-nhất với 87 Điều, trong đó 223 cạnh đến 
 có 37 Điều, **mỗi Điều sửa một luật khác nhau**; lấy một mục tiêu chung cho cả văn bản
 (heading Điều 1 = Luật GTĐB) thì toàn bộ 37 Điều đổ vào một luật.
 
-Đo quy mô: **72 văn bản** khai mục tiêu khác nhau theo từng Điều, **3.308/5.760 cạnh
-(57%) gán nhầm chỗ**.
+Đo quy mô: **72 văn bản** khai mục tiêu khác nhau theo từng Điều, phủ 3.308/5.760 cạnh.
+
+> **Đính chính.** Con số "57% cạnh gán nhầm" ở bản trước là sai đại lượng: 3.308 là số
+> cạnh **thuộc nhóm có nguy cơ**, không phải số cạnh **sai** — phần lớn trong nhóm vẫn
+> trúng vì mục tiêu chung tình cờ trùng mục tiêu của Điều. Dựng cả hai bản rồi so từng
+> cạnh: 4.013 cạnh giống nhau, 1.129 bộ ba `(nguồn, Điều nguồn, khoản)` **đổi hẳn văn bản
+> đích** = **19,6%** gán nhầm thật, 169 bộ ba bị bỏ vì tra trượt. Sai rải trên 72 văn bản
+> nguồn, đỉnh là 158 cạnh (Luật GTĐB), không phải một văn bản gánh hết.
 
 Sửa: mục tiêu lấy từ heading của chính Điều đang đọc; chỉ Điều nào không tự khai mới
 dùng mục tiêu chung ở tiêu đề. Và khi Điều có khai mà tra trượt thì **bỏ hẳn**, không rơi
@@ -469,9 +475,76 @@ Kết quả: cạnh 5.760 → 5.299, cặp (văn bản, Điều) 4.183 → **4.3
 đúng chỗ thay vì dồn một chỗ). Luật GTĐB 87 → 43 Điều, 223 → 43 cạnh từ văn bản đó. Văn
 bản "37 luật quy hoạch" giờ trỏ vào 24 văn bản khác nhau.
 
-Ca 166937 không đổi qua cả ba vòng vá.
+### 14.7 Mốc Điều giả cắt đôi Điều thật
 
-### 14.7 Công cụ xem
+Lỗi nằm ở `parse_articles`, không ở graph, nhưng chảy thẳng vào graph. Câu sửa đổi bị
+wrap xuống dòng đẩy chữ "Điều" ra đầu dòng:
+
+```
+2. Sửa đổi, bổ sung một số khoản của
+Điều 10 như sau:
+```
+
+`DIEU_RE` nhận `Điều 10` làm mốc mở Điều mới. Hậu quả kép: Điều 1 **bị cắt cụt** mất sạch
+khoản từ đó trở đi, và sinh ra một Article rác mang số Điều **của bản gốc**. Văn bản
+102693 (`LUẬT SỬA ĐỔI LUẬT KIỂM TOÁN NHÀ NƯỚC`) đẻ ra 4 Điều rác 10/11/64/69.
+
+Đo trên 159.137 Article, ký tự ngay sau số Điều:
+
+| sau số Điều | số ca | phán quyết |
+|---|---:|---|
+| `.` / `:` / `-` | 157.591 | Điều thật |
+| xuống dòng, hoặc chữ HOA (`Điều 34 Trách nhiệm của...`) | 839 | Điều thật, thiếu dấu chấm |
+| chữ **thường** (`Điều 10 như sau:`) | 377 | **mốc giả** — câu bị wrap |
+| `,` / `;` (`Điều 71, điểm b khoản 4 Điều 103`) | 244 | **mốc giả** — liệt kê |
+| `(` (`Điều 252 (tội chiếm đoạt chất ma túy)`) | 12 | **mốc giả** — liệt kê |
+
+Loại 633 mốc giả: Article 159.137 → **158.504**. Không đụng tới 2.950 Article nằm trong
+vùng ngoặc kép chưa đóng (214 Document) — đếm ngoặc cộng dồn lệch một cái là hỏng cả đuôi
+văn bản, rủi ro cao hơn lợi ích.
+
+### 14.8 Ba lỗi gán mục tiêu còn lại
+
+**a. Heading bị wrap cắt cụt.** `Điều 1. Sửa đổi, bổ sung một số điều của Nghị định số`
+— mất số hiệu. Chuỗi `"Nghị định số"` thành tập từ `{nghi, dinh, so}`, đủ 3 từ để qua
+chốt chặn §14.5 và khớp trúng Slug chứa `xo-so` = **Nghị định kinh doanh xổ số**. Hai vá:
+`_DUOI_SO_RE` phải cắt được cả khi `"số"` đứng cuối chuỗi, và chuỗi mục tiêu nghèo chữ
+được coi là **không khai** (rơi về mục tiêu chung ở tiêu đề) chứ không phải khai sai.
+
+Vá `_DUOI_SO_RE` làm lộ một lỗi có sẵn: `\s+số\s+.*$` cắt ngay ở `"một số điều"`, biến
+`"Nghị định quy định chi tiết một số điều của Luật Hóa chất"` thành `"Nghị định quy định
+chi tiết một"` — truy vấn ngắn đi thì khớp bừa dễ hơn (§14.5). Ràng lại: phần sau `"số"`
+phải mở đầu bằng chữ số.
+
+**b. Điều không khai mục tiêu, khoản thì có.** `Điều 12. Bãi bỏ một số văn bản thuộc lĩnh
+vực mỹ phẩm` không nêu văn bản nào, nhưng khoản 2 nêu: `Bãi bỏ một số quy định của Thông
+tư số 06/2011/TT-BYT`. Kế thừa mục tiêu của Điều 1 là gán sang hẳn văn bản khác.
+
+Chỉ nhận dạng **số hiệu** đứng sau `"của"`. Dạng tên bắt luôn cả văn bản được nhắc vì lý
+do khác (`theo mẫu tại Nghị định X`): đo được 106 ca lệch, so với 19 ca ở dạng số hiệu.
+Và chỉ dùng khi Điều **không** khai — Điều có khai thì số hiệu trong khoản thường là chú
+thích lịch sử: `khoản 5 Điều 10 (được sửa đổi theo ... của Thông tư số 26/2017/TT-NHNN)`,
+tin nó là gán nhầm ngược lại.
+
+**c. Rải một khoản ra mọi mục tiêu.** Văn bản khai nhiều mục tiêu ở tiêu đề mà Điều không
+tự khai: cũ gán khoản đó cho *tất cả* mục tiêu. Chỉ đúng khi cả phần sửa đổi gói trong
+**một** Điều; nhiều Điều thì mỗi Điều ứng một mục tiêu riêng, rải là chắc chắn sinh cạnh
+sai. 254 khoản bị chặn.
+
+Kết quả cuối, sau cả vá `parse_articles` lẫn ba vá trên:
+
+| | trước phiên | sau |
+|---|---:|---:|
+| Article toàn corpus | 159.137 | **158.504** |
+| cạnh Amendment | 5.299 | **5.231** |
+| cặp (đích, Điều) | 4.345 | **4.306** |
+| văn bản nguồn / đích | — | 267 / 367 |
+| đích nhận nhiều nhất | 223 | **139** |
+
+Ca `26667` Điều 127 (Luật Các tổ chức tín dụng, sửa bởi khoản 20 Điều 1 văn bản 157517)
+giữ nguyên qua cả bốn vòng vá.
+
+### 14.9 Công cụ xem
 
 `scripts/dump_graph.py` xuất graph ra `window.GRAPH` (~5,4 MB, 495 văn bản có cạnh) cho
 một trang xem: tìm văn bản, liệt kê Điều bị sửa, mở ra nguyên văn khoản sửa, bấm sang

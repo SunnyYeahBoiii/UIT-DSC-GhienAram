@@ -68,10 +68,21 @@ KHOAN_AMEND_RE = re.compile(
     r"^(\d{1,3})\.\s*((?:Sửa đổi|Bổ sung|Bãi bỏ|Thay thế)[^\n]{0,200})", re.MULTILINE
 )
 KHOAN_BAT_DAU_RE = re.compile(r"^(\d{1,3})\.\s", re.MULTILINE)
+# Văn bản đích khai ngay trong câu khoản: "...của Thông tư số 06/2011/TT-BYT". Chỉ nhận
+# dạng SỐ HIỆU sau "của" — dạng tên thì bắt cả văn bản được nhắc vì lý do khác
+# ("theo mẫu tại Nghị định X"), đo được 106 ca lệch so với 19 ca ở dạng số hiệu.
+KHOAN_DICH_RE = re.compile(rf"\bcủa\s+(?:{_LOAI})\s+(?:số\s+)?({SO_HIEU})")
 DIEU_TRONG_CAU_RE = re.compile(r"Điều\s+(\d{1,3}[a-zđ]?)")
 
-# Đuôi "số 12/2020/TT-BGTVT ngày 29 tháng 5 năm 2020 của Bộ trưởng..." trong tên mục tiêu
-_DUOI_SO_RE = re.compile(r"\s+(?:số|SỐ)\s+.*$")
+# Đuôi "số 12/2020/TT-BGTVT ngày 29 tháng 5 năm 2020 của Bộ trưởng..." trong tên mục tiêu.
+# Hai ràng buộc, mỗi cái vá một lỗi đo được:
+#   `(?:\s+\d\S*.*)?` — phần sau "số" PHẢI mở đầu bằng chữ số. Thiếu nó thì "Nghị định
+#   quy định chi tiết một số điều của Luật Hóa chất" bị cắt còn "Nghị định quy định chi
+#   tiết một", làm truy vấn ngắn đi và khớp bừa (4.067 khoản dính).
+#   `?` (cả cụm là tuỳ chọn) — heading bị wrap cắt cụt ngay sau chữ "số" ("...của Nghị
+#   định số") thì "số" đứng cuối. Không cắt thì tập từ thành {nghi, dinh, so}, đủ 3 từ
+#   để qua guard và khớp trúng Slug có "xo-so", tức `Nghị định kinh doanh xổ số`.
+_DUOI_SO_RE = re.compile(r"\s+(?:số|SỐ)(?:\s+\d\S*.*)?$")
 
 # Một văn bản sửa nhiều luật cùng lúc: "LUẬT THUẾ GIÁ TRỊ GIA TĂNG, LUẬT THUẾ TIÊU THỤ
 # ĐẶC BIỆT VÀ LUẬT QUẢN LÝ THUẾ" = 3 mục tiêu. Chỉ cắt ở tên loại đứng ngay sau "," hoặc
@@ -195,6 +206,9 @@ class LegalGraph:
         self._amend = defaultdict(list)
         for d in docs:
             chung = self._amend_target(d)
+            n_dieu_sua = sum(
+                1 for a in d.articles if KHOAN_AMEND_RE.search(d.passage[a.start : a.end])
+            )
             for art in d.articles:
                 # Mục tiêu khai theo TỪNG ĐIỀU mới là mục tiêu đúng: "LUẬT SỬA ĐỔI 37 LUẬT
                 # LIÊN QUAN ĐẾN QUY HOẠCH" có 37 Điều, mỗi Điều sửa một luật khác nhau.
@@ -203,15 +217,34 @@ class LegalGraph:
                 # Điều tự khai mục tiêu thì lấy đúng của nó, KỂ CẢ khi tra trượt: rơi về
                 # mục tiêu chung là gán nhầm hẳn sang văn bản khác, tệ hơn mất cạnh.
                 hm = HEADING_AMEND_RE.match(art.heading)
-                targets = self._muc_tieu(d, hm.group(1)) if hm else chung
-                if not targets:
-                    continue
+                khai = hm is not None and not _cum_nghe(hm.group(1))
+                targets = self._muc_tieu(d, hm.group(1)) if khai else chung
                 body = d.passage[art.start : art.end]
                 for m in KHOAN_AMEND_RE.finditer(body):
+                    # Điều không tự khai mục tiêu mà khoản có nêu số hiệu ngay sau "của"
+                    # thì tin khoản: "Điều 12. Bãi bỏ một số văn bản thuộc lĩnh vực mỹ
+                    # phẩm / 2. Bãi bỏ ... của Thông tư số 06/2011/TT-BYT" — kế thừa mục
+                    # tiêu của Điều 1 là gán sang hẳn văn bản khác.
+                    # Chỉ dùng khi Điều KHÔNG khai: Điều có khai thì số hiệu trong khoản
+                    # thường là chú thích lịch sử "(được sửa đổi theo ... của Thông tư
+                    # số 26/2017/TT-NHNN)", tin nó là gán nhầm ngược lại.
+                    tg = targets
+                    if not khai:
+                        cm = KHOAN_DICH_RE.search(m.group(2))
+                        t = self._by_number.get(cm.group(1)) if cm else None
+                        if t and t != d.doc_id:
+                            tg = [t]
+                    # Nhiều mục tiêu mà Điều không khai: chỉ rải ra mọi mục tiêu khi cả
+                    # văn bản gói trọn phần sửa đổi trong MỘT Điều. Nhiều Điều thì mỗi
+                    # Điều ứng một mục tiêu riêng, rải là chắc chắn sinh cạnh sai.
+                    if len(tg) > 1 and not khai and n_dieu_sua > 1:
+                        continue
+                    if not tg:
+                        continue
                     start = art.start + m.start()
                     end = art.start + _khoan_end(body, m.group(1), m.start())
                     dieu_list = dict.fromkeys(DIEU_TRONG_CAU_RE.findall(m.group(2)))
-                    for target in targets:
+                    for target in tg:
                       for dieu in dieu_list:
                         self._amend[(target, dieu)].append(
                             Amendment(
@@ -394,6 +427,19 @@ def _article_evidence(doc: Document | None, number: str) -> Evidence | None:
                 relation="Được dẫn chiếu",
             )
     return None
+
+
+def _cum_nghe(ten: str) -> bool:
+    """Chuỗi mục tiêu chỉ còn tên loại văn bản ("Nghị định số", "Thông tư") — heading bị
+    wrap cắt cụt mất tên riêng. Đây là KHÔNG KHAI chứ không phải khai sai: văn bản vẫn
+    khai đủ ở tiêu đề, nên phải rơi về mục tiêu chung thay vì bỏ cả Điều.
+
+    Có số hiệu là khai đủ, bất kể còn mấy chữ: "Nghị định số 43/2014/NĐ-CP ngày 15
+    tháng 5 năm 2014" bị `_DUOI_SO_RE` cắt còn "Nghị định" nhưng `resolve` tra bằng
+    kênh số hiệu, không đụng tới tập từ."""
+    if SO_HIEU_RE.search(ten):
+        return False
+    return len(_tu(_DUOI_SO_RE.sub("", ten))) < 3
 
 
 def _tach_muc_tieu(ten: str) -> list[str]:

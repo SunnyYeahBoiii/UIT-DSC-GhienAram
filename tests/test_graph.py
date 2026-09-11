@@ -263,3 +263,69 @@ def test_dieu_khai_muc_tieu_tra_truot_thi_bo_han():
     g = LegalGraph()
     g.build([a, sua])
     assert [x.src_article for x in g.amendments_of("A", "8")] == ["1"]
+
+
+def test_heading_cut_cut_thi_dung_muc_tieu_chung():
+    """"Điều 1. Sửa đổi, bổ sung một số điều của Nghị định số" — wrap cắt mất số hiệu.
+    Chuỗi còn lại thành tập từ {nghi, dinh, so}, đủ 3 từ để qua guard và khớp trúng
+    Slug có "xo-so" = Nghị định kinh doanh xổ số. Heading nghèo chữ là KHÔNG KHAI."""
+    a = _doc("A", "Nghi-dinh-113-2017-ND-CP-huong-dan-Luat-Hoa-chat-1",
+             "Số: 113/2017/NĐ-CP\n\nĐiều 9. Hóa chất\nNội dung.")
+    xs = _doc("X", "Nghi-dinh-kinh-doanh-xo-so-2016-2", "Điều 9. Xổ số\nNội dung.")
+    sua = _doc("S", "Nghi-dinh-82-2022-ND-CP-sua-doi-Nghi-dinh-113-2017-ND-CP-3",
+        "NGHỊ ĐỊNH SỬA ĐỔI, BỔ SUNG MỘT SỐ ĐIỀU CỦA NGHỊ ĐỊNH SỐ "
+        "113/2017/NĐ-CP NGÀY 09 THÁNG 10 NĂM 2017 CỦA CHÍNH PHỦ\n\n"
+        "Điều 1. Sửa đổi, bổ sung một số điều của Nghị định số\n"
+        "1. Sửa đổi Điều 9 như sau:\n“Nội dung mới.”\n")
+    g = LegalGraph(); g.build([a, xs, sua])
+    assert [x.src_article for x in g.amendments_of("A", "9")] == ["1"]
+    assert g.amendments_of("X", "9") == []
+
+
+def test_khoan_tu_khai_so_hieu_khi_dieu_khong_khai():
+    """"Điều 12. Bãi bỏ một số văn bản thuộc lĩnh vực mỹ phẩm" không khai mục tiêu.
+    Kế thừa mục tiêu Điều 1 là gán sang hẳn văn bản khác; khoản tự nêu số hiệu thì
+    tin khoản."""
+    a = _doc("A", "Nghi-dinh-dieu-kien-san-xuat-2016-1", "Điều 5. Điều kiện\nNội dung.")
+    b = _doc("B", "Thong-tu-06-2011-TT-BYT-quan-ly-my-pham-2",
+             "Số: 06/2011/TT-BYT\n\nĐiều 7. Mỹ phẩm\nNội dung.")
+    sua = _doc("S", "Nghi-dinh-sua-doi-quy-dinh-lien-quan-2018-3",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Nghị định điều kiện sản xuất\n"
+        "1. Sửa đổi Điều 5 như sau:\n“Nội dung mới.”\n"
+        "Điều 12. Bãi bỏ một số văn bản, quy định thuộc lĩnh vực mỹ phẩm\n"
+        "1. Bãi bỏ Điều 7 của Thông tư số 06/2011/TT-BYT ngày 25 tháng 01 năm 2011.\n")
+    g = LegalGraph(); g.build([a, b, sua])
+    assert [x.src_article for x in g.amendments_of("B", "7")] == ["12"]
+    assert [x.src_article for x in g.amendments_of("A", "5")] == ["1"]
+
+
+def test_khoan_khai_so_hieu_khong_de_lan_khi_dieu_da_khai():
+    """Điều đã khai mục tiêu thì số hiệu trong khoản thường là chú thích lịch sử:
+    "(được sửa đổi theo quy định tại khoản 3 Điều 1 của Thông tư số 26/2017/TT-NHNN)".
+    Tin nó là gán nhầm ngược lại."""
+    a = _doc("A", "Thong-tu-19-2016-TT-NHNN-hoat-dong-the-ngan-hang-1",
+             "Số: 19/2016/TT-NHNN\n\nĐiều 10. Thẻ\nNội dung.")
+    b = _doc("B", "Thong-tu-26-2017-TT-NHNN-sua-doi-Thong-tu-19-2016-2",
+             "Số: 26/2017/TT-NHNN\n\nĐiều 3. Khác\nNội dung.")
+    sua = _doc("S", "Thong-tu-28-2019-TT-NHNN-sua-doi-Thong-tu-19-2016-3",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Thông tư số 19/2016/TT-NHNN\n"
+        "1. Sửa đổi khoản 5 Điều 10 (được sửa đổi theo quy định tại khoản 3 Điều 1 "
+        "của Thông tư số 26/2017/TT-NHNN) như sau:\n“Nội dung mới.”\n")
+    g = LegalGraph(); g.build([a, b, sua])
+    assert [x.src_article for x in g.amendments_of("A", "10")] == ["1"]
+    assert g.amendments_of("B", "10") == []
+
+
+def test_khong_rai_moi_muc_tieu_khi_van_ban_co_nhieu_dieu_sua():
+    """Văn bản nhiều mục tiêu mà Điều không khai: rải khoản ra mọi mục tiêu là chắc
+    chắn sinh cạnh sai, vì mỗi Điều ứng một mục tiêu riêng."""
+    a = _doc("A", "Luat-thue-gia-tri-gia-tang-2008-1", "Điều 8. Thuế suất\nNội dung.")
+    b = _doc("B", "Luat-quan-ly-thue-2006-2", "Điều 8. Quản lý\nNội dung.")
+    sua = _doc("S", "Luat-sua-doi-cac-luat-ve-thue-2014-3",
+        "LUẬT SỬA ĐỔI, BỔ SUNG MỘT SỐ ĐIỀU CỦA LUẬT THUẾ GIÁ TRỊ GIA TĂNG "
+        "VÀ LUẬT QUẢN LÝ THUẾ\n\n"
+        "Điều 1. Nội dung\n1. Sửa đổi Điều 8 như sau:\n“Nội dung A.”\n"
+        "Điều 2. Nội dung khác\n1. Sửa đổi Điều 8 như sau:\n“Nội dung B.”\n")
+    g = LegalGraph(); g.build([a, b, sua])
+    assert g.amendments_of("A", "8") == []
+    assert g.amendments_of("B", "8") == []

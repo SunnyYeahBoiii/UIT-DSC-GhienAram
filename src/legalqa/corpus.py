@@ -32,6 +32,26 @@ LONE_MARKER_RE = re.compile(
 # Điều đứng đầu dòng: "Điều 12.", "Điều 12a.", "Điều 12 ." — bắt cả biến thể thiếu dấu chấm
 DIEU_RE = re.compile(r"^[ \t]*(Điều\s+(\d+[a-zđ]?))\s*[.\-:]?\s*", re.MULTILINE)
 
+# Ký tự ngay sau số Điều loại thẳng mốc giả. Hai nguồn mốc giả, đo trên 159.137 Article:
+#   "Điều 10 như sau:"          377 ca — câu "...một số khoản của\nĐiều 10 như sau:" bị
+#                               wrap xuống dòng, chữ "Điều" rơi vào đầu dòng.
+#   "Điều 71, điểm b khoản 4"   244 ca — liệt kê nhiều Điều trong một câu.
+#   "Điều 252 (tội chiếm đoạt)"  12 ca — liệt kê kèm chú thích.
+# Mỗi mốc giả cắt ĐÔI một Điều thật: văn bản 102693 mất sạch khoản 2-14 của Điều 1 và
+# đẻ ra 4 Điều rác mang số 10/11/64/69 của BẢN GỐC. Tên Điều thật luôn viết hoa hoặc
+# nằm ở dòng sau, nên "sau số là chữ thường" phân biệt sạch — 839 Điều thật thiếu dấu
+# chấm ("Điều 34 Trách nhiệm của...") vẫn giữ nguyên.
+_SAU_SO_LOAI = ",;("
+
+
+def _moc_that(passage: str, m: re.Match[str]) -> bool:
+    s = passage[m.end(2) :]
+    i = 0
+    while i < len(s) and s[i] in " \t":
+        i += 1
+    c = s[i : i + 1]
+    return not (c in _SAU_SO_LOAI or c.islower())
+
 # Slug thuvienphapluat luôn kết thúc bằng "-<id số>"; phần đầu là tên văn bản viết không dấu
 SLUG_TAIL_RE = re.compile(r"-\d+$")
 
@@ -220,7 +240,7 @@ def title_from_slug(slug: str) -> str:
 
 def parse_articles(passage: str) -> list[Article]:
     """Tách Passage thành các Điều. 15,9% Document không có Điều nào -> trả về []."""
-    marks = list(DIEU_RE.finditer(passage))
+    marks = [m for m in DIEU_RE.finditer(passage) if _moc_that(passage, m)]
     if not marks:
         return []
     out: list[Article] = []

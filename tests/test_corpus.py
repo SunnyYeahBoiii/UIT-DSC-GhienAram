@@ -129,3 +129,38 @@ def test_dong_bang_giua_noi_dung_khong_cat_dieu():
     p = f"Điều 1. Phạm vi\n{body}\nBảng 1\nmột hai ba bốn năm\n{body}"
     a = parse_articles(p)[-1]
     assert a.end == len(p)
+
+
+def test_bo_moc_dieu_gia_do_cau_bi_wrap():
+    """"...một số khoản của\nĐiều 10 như sau:" — chữ "Điều" rơi vào đầu dòng do wrap.
+    Nhận nó làm mốc thì Điều 1 bị cắt đôi, mất sạch khoản sau, và đẻ ra Điều rác mang
+    số của BẢN GỐC. Đo trên corpus: 377 ca kiểu này."""
+    p = (
+        "Điều 1. Sửa đổi, bổ sung một số điều của Luật Kiểm toán nhà nước\n"
+        "1. Bổ sung khoản 2a vào sau khoản 2 Điều 3 như sau:\n"
+        "“2a. Cơ quan, tổ chức có liên quan.”\n"
+        "2. Sửa đổi, bổ sung một số khoản của\n"
+        "Điều 10 như sau:\n"
+        "a) Sửa đổi khoản 3 như sau:\n"
+        "“3. Xem xét, quyết định việc kiểm toán.”\n"
+        "Điều 2. Hiệu lực thi hành\n"
+        "Luật này có hiệu lực từ 01/7/2020.\n"
+    )
+    arts = parse_articles(p)
+    assert [a.number for a in arts] == ["1", "2"]
+    # Điều 1 phải ôm trọn cả khoản 2 — đây là khoản bị mất khi nhận mốc giả
+    assert "Xem xét, quyết định việc kiểm toán" in p[arts[0].start : arts[0].end]
+
+
+def test_giu_dieu_that_thieu_dau_cham():
+    """"Điều 34 Trách nhiệm của Ủy ban nhân dân" — 839 Điều thật viết thiếu dấu chấm.
+    Luật loại mốc giả không được đụng vào nhóm này: tên Điều viết HOA hoặc ở dòng sau."""
+    p = "Điều 34 Trách nhiệm của Ủy ban\nNội dung.\nĐiều 35\n1. Khoản một.\n"
+    assert [a.number for a in parse_articles(p)] == ["34", "35"]
+
+
+def test_bo_moc_dieu_trong_liet_ke():
+    """"Điều 71, điểm b khoản 4 Điều 103 Luật Các tổ chức tín dụng" — 244 ca liệt kê
+    nhiều Điều trong một câu, không phải mốc mở Điều mới."""
+    p = "Điều 5. Bãi bỏ\nBãi bỏ các quy định sau:\nĐiều 71, điểm b khoản 4 Điều 103.\n"
+    assert [a.number for a in parse_articles(p)] == ["5"]
