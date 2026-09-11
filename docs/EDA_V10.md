@@ -293,3 +293,42 @@ EDA ban đầu ghi "1.125/8.532 Document không có Slug" như mất mát không
 
 `slug_from_link()` lấp đủ 1.105 Document thiếu trường `name`. Hệ quả: Document title
 rỗng (`"Văn bản 100050"`) **11,0% → 0,0%**.
+
+## 13. Chunk + Evidence trên corpus đã clean
+
+`scripts/build_chunks.py`, size 256 / stride 256, chạy trên `data/clean/corpus.jsonl`.
+
+| | |
+|---|---:|
+| Document | 8.512 (0 doc không sinh chunk) |
+| Chunk | 287.358 |
+| chunk/Document | p50 19, max 4.850 |
+| từ/chunk | p10 256, p50 256, p90 256 |
+
+Chunk giảm 287.741 → 287.358 (−383) so với lần đo trên dữ liệu chưa bỏ dòng trống:
+85.602 dòng `...` bị xoá làm hụt token từ. Assert `passage[start:end] == text` xanh
+287.358/287.358 — offset trỏ đúng vào Passage đã clean.
+
+### Điều mà Chunk chạm vào
+
+159.137 Điều: p50 **187 từ**, p90 638 từ, max 189.311.
+Chỉ 5,6% Điều dài hơn ngân sách 900 từ, nhưng Điều dài chứa nhiều Chunk hơn nên
+chúng hút **46,5% tổng Chunk**. 25,4% số Điều dài đó là Điều CUỐI của Document —
+Điều cuối nuốt luôn phần phụ lục/biểu mẫu phía sau vì `parse_articles` lấy
+`end = start của Điều kế tiếp`, Điều cuối thì `end = len(passage)`.
+
+### Evidence sinh từ Chunk đó
+
+| Tình huống | Chunk | % |
+|---|---:|---:|
+| Lấy trọn Điều (span ≤ 900 từ) | 119.337 | 41,5% |
+| Span > 900 từ → cắt cửa sổ, **vẫn giữ** `article_number` + heading | 133.702 | 46,5% |
+| Document không có Điều nào → đường lui | 25.720 | 9,0% |
+| Chunk nằm trước Điều đầu tiên → đường lui | 8.599 | 3,0% |
+
+từ/Evidence p10 394, p50 873, p90 929. Số Điều gộp p50 1, max 26.
+
+**Đường lui = 34.319 = 11,9%**, đúng bằng 9,0% + 3,0%. Con số 1,3% đo trước đó là
+**artefact lấy mẫu**: lấy 1 chunk ngẫu nhiên mỗi Document thì nghiêng về Document CÓ Điều
+và về vị trí giữa văn bản, bỏ sót cả 1.271 Document không Điều lẫn phần đầu mỗi văn bản.
+Không phải hồi quy.
