@@ -52,9 +52,10 @@ def main() -> None:
     p.add_argument("--pool", type=int, default=50, help="số chunk BM25 đưa vào rerank")
     p.add_argument("--n-cau", type=int, default=500)
     p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--gold", default="gold.jsonl", help="gold_warmup.jsonl = tập độc lập")
     a = p.parse_args()
 
-    gold = [json.loads(l) for l in (CLEAN_DIR / "gold.jsonl").open(encoding="utf-8")]
+    gold = [json.loads(l) for l in (CLEAN_DIR / a.gold).open(encoding="utf-8")]
     random.seed(0)  # cùng seed với eval_retrieval.py -> cùng tập câu, so được
     if a.n_cau < len(gold):
         gold = random.sample(gold, a.n_cau)

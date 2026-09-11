@@ -57,7 +57,8 @@ def main() -> None:
     n_mau = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
     pool = int(sys.argv[2]) if len(sys.argv) > 2 else 3000
 
-    gold = [json.loads(l) for l in (CLEAN_DIR / "gold.jsonl").open(encoding="utf-8")]
+    gold_file = os.environ.get("GOLD_FILE", "gold.jsonl")
+    gold = [json.loads(l) for l in (CLEAN_DIR / gold_file).open(encoding="utf-8")]
     random.seed(0)
     if n_mau < len(gold):
         gold = random.sample(gold, n_mau)

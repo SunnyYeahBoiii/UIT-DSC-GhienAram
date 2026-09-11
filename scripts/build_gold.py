@@ -30,6 +30,10 @@ from legalqa.graph import SO_HIEU_RE
 
 CLEAN_DIR = Path(os.environ.get("CLEAN_DIR", "data/clean"))
 TRAIN = Path(os.environ.get("TRAIN_JSON", "data/official/train.json"))
+# Tách tên file ra biến để dựng được gold cho warmup.json — 500 câu có Reference answer,
+# KHÔNG nằm trong train. Reranker zero-shot nên train không rò rỉ, nhưng mọi ngưỡng/pool
+# chốt trên train đều là chốt trên cùng một tập; warmup là tập độc lập để kiểm lại.
+GOLD_OUT = os.environ.get("GOLD_OUT", "gold.jsonl")
 
 # Cửa sổ 12 từ: EDA §3 đã đo bằng đúng con số này. Ngắn hơn thì khớp nhầm đoạn boilerplate
 # ("theo quy định của pháp luật"), dài hơn thì vỡ vì một dấu cách lệch.
@@ -52,6 +56,8 @@ def main() -> None:
 
     probes: dict[str, str] = {}
     for qid, v in qa.items():
+        if not v.get("answer"):
+            continue
         p = _probe(v["answer"])
         if p is not None:
             probes[p] = qid
@@ -87,13 +93,15 @@ def main() -> None:
     print(f"văn bản có số hiệu {len(by_number):,}")
 
     for qid, v in qa.items():
+        if not v.get("answer"):
+            continue
         for so in SO_HIEU_RE.findall(v["answer"]):
             did = by_number.get(so)
             if did:
                 gold[qid].add(did)
                 kenh[qid].add("so_hieu")
 
-    out = CLEAN_DIR / "gold.jsonl"
+    out = CLEAN_DIR / GOLD_OUT
     with out.open("w", encoding="utf-8") as f:
         for qid, docs in gold.items():
             f.write(
