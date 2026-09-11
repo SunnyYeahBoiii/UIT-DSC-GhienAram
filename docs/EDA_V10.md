@@ -363,3 +363,52 @@ Số Điều tách được không đổi (159.137), từ/Evidence p50 873 → 8
 Đường lui 11,9% → 27,9%. Tăng là **đúng**: 45.785 chunk nằm trong phụ lục trước đây
 mang `article_number` của Điều cuối, một nhãn sai. Chúng vẫn được index, chỉ không còn
 được quảng cáo là điều khoản.
+
+## 14. Legal graph — hai loại cạnh
+
+Đo trên 8.512 Document đã clean (`src/legalqa/graph.py`).
+
+### 14.1 Tra văn bản: hai kênh, không một
+
+| Kênh | Khoá | Phủ |
+|---|---|---|
+| Số hiệu | `Document.number` | 7.582 văn bản vào index |
+| Tên + năm | tập từ không dấu của Slug | 100% Document có Slug, 96,4% Slug có năm |
+
+Bắt buộc có kênh tên vì **9,2% Document (780) không có số hiệu**, trong đó có đúng cặp văn bản
+mà câu 166937 cần: `LUẬT CÁC TỔ CHỨC TÍN DỤNG` (26667) và bản sửa đổi 2017 (157517). Khoá
+(tập từ, năm) là duy nhất cho 98,6% Document (42 khoá đụng / 122 văn bản). Chấm điểm bằng
+số từ thừa ít nhất nên `Luật Các tổ chức tín dụng sửa đổi` + 2017 khớp Slug
+`Luat-sua-doi-...-2017` dù khác thứ tự từ.
+
+### 14.2 Cạnh Amendment
+
+| | |
+|---|---|
+| Văn bản sửa đổi nhận diện được | 349 (279 tiêu đề + 70 heading Điều) |
+| Trong đó tra được mục tiêu | 298 = 85,4% |
+| Văn bản thực sự sinh cạnh | 247 |
+| Cặp (văn bản, Điều) bị sửa | 3.664 |
+| Cạnh (khoản → Điều) | 5.105 |
+| Điều bị >1 khoản sửa | 812 |
+| Độ dài khoản sửa | p50 596 ký tự, p90 2.418, max 16.600 |
+
+Buộc mục tiêu mở đầu bằng tên loại văn bản là cần thiết: thiếu ràng buộc này, 448 tiêu đề
+khớp nhưng 109 trong đó trỏ vào tên **tổ chức** (`...ĐIỀU LỆ CỦA HỘI VẬT LIỆU XÂY DỰNG`) hoặc
+mục tiêu số nhiều (`CÁC NGHỊ ĐỊNH QUY ĐỊNH CHI TIẾT...`).
+
+Biên khoản cắt ở **khoản số liền sau**, không phải marker `^\d+\.` bất kỳ: phần sửa đổi trích
+nguyên văn bản gốc nên mang hệ đánh số riêng — khoản 20 của 157517 chứa dòng `5. Tổng mức dư
+nợ...`, cắt ở marker bất kỳ là mất đúng câu quan trọng nhất.
+
+### 14.3 Vì sao không tự vá bản gốc
+
+Corpus chỉ có **17 văn bản hợp nhất (0,2%)**, không có bản nào cho Luật Các TCTD — không có
+đường tắt lấy sẵn text sau sửa đổi. Tự ghép khoản/điểm thì sinh ra text luật không tồn tại và
+không thể phát hiện từ đầu ra. Quyết định: đưa **cả hai đoạn kèm nhãn quan hệ**
+(`Evidence.relation`), để model tự đối chiếu.
+
+Kiểm ca 166937 đầu-cuối: `resolve("Luật Các tổ chức tín dụng", 2010)` → 26667;
+`amendments_of("26667","127")` → `[('157517','1','20')]`; Evidence sinh thêm mang nhãn
+`Sửa đổi Điều 127 của LUẬT CÁC TỔ CHỨC TÍN DỤNG — khoản 20 Điều 1` và chứa trọn cả điểm b
+lẫn khoản 5 mới.

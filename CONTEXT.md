@@ -64,6 +64,18 @@ Tham chiếu tới vị trí bên trong một Document: Điều N, khoản N, đ
 vào trong, Legal relation trỏ ra ngoài.
 _Avoid_: reference, relation
 
+**Cross-reference**:
+Citation có kèm định danh văn bản đích: "Điều 5 Nghị định 100/2019/NĐ-CP". Trỏ vào một vị trí cụ thể
+của **Document khác** — không phải Citation (trỏ trong cùng Document) cũng không phải Legal relation
+(trỏ tới cả văn bản, không nêu vị trí). Một trong hai loại cạnh của legal graph — loại kia là
+Amendment.
+_Avoid_: citation, relation, link
+
+**Bare reference**:
+Tham chiếu chỉ nêu số hiệu văn bản, không nêu Điều nào. Chiếm phần lớn tham chiếu nhưng trỏ vào cả
+Document nên không dùng trực tiếp làm Evidence được.
+_Avoid_: citation, cross-reference
+
 ### Sinh câu trả lời
 
 **Candidate**:
@@ -79,3 +91,9 @@ _Avoid_: answer, candidate, final answer
 Thống kê phân phối của Reference answer (số từ, số câu, tỷ lệ liệt kê) dùng làm mục tiêu độ dài khi sinh.
 Là ràng buộc hình thức, không phải ràng buộc nội dung.
 _Avoid_: length plan, format spec
+
+**Amendment**:
+Quan hệ "khoản X Điều Y của văn bản A sửa đổi/bổ sung/bãi bỏ Điều Z của văn bản B". Khác Cross-reference ở
+chiều khai báo: chỉ A nói ra quan hệ, B không hề biết mình bị sửa — nên phải dựng sẵn cho cả corpus, không
+trích được lúc đọc prompt. Đơn vị hai đầu là (Document, Điều), không phải Document.
+_Avoid_: cross-reference, relation, sửa đổi

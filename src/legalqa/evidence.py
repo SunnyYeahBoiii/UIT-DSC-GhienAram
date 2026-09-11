@@ -17,6 +17,9 @@ class Evidence:
     doc_title: str
     article_number: str | None
     text: str
+    # Quan hệ với Evidence đã sinh ra nó ("Sửa đổi Điều 127 của ..."). Rỗng với
+    # Evidence gốc từ retrieval. Prompt dán nhãn này để model biết đoạn nào sửa đoạn nào.
+    relation: str = ""
 
 
 def expand_to_evidence(
