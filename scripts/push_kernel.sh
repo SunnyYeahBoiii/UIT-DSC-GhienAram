@@ -21,7 +21,7 @@ cat > "$DIR/kernel-metadata.json" <<'JSON'
   "is_private": true,
   "enable_gpu": true,
   "enable_internet": true,
-  "dataset_sources": ["sunny070306/official", "sunny070306/legalqa-v10-src"],
+  "dataset_sources": ["sunny070306/official", "sunny070306/legalqa-v10-src", "sunny070306/legalqa-warmup"],
   "competition_sources": [],
   "kernel_sources": [],
   "model_sources": []
