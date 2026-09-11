@@ -329,3 +329,44 @@ def test_khong_rai_moi_muc_tieu_khi_van_ban_co_nhieu_dieu_sua():
     g = LegalGraph(); g.build([a, b, sua])
     assert g.amendments_of("A", "8") == []
     assert g.amendments_of("B", "8") == []
+
+
+def test_khoan_dang_dao_ngu():
+    """"Điều 4 được sửa đổi, bổ sung như sau:" — động từ đứng SAU tên Điều. Thiếu nhánh
+    này thì 12 văn bản sửa đổi không sinh được cạnh nào, tổng 871 khoản bị bỏ."""
+    a = _doc("A", "Thong-tu-13-2010-TT-BNV-tuyen-dung-cong-chuc-1",
+             "Số: 13/2010/TT-BNV\n\nĐiều 4. Thi tuyển\nNội dung.")
+    sua = _doc("S", "Thong-tu-03-2019-TT-BNV-sua-doi-Thong-tu-13-2010-2",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Thông tư số 13/2010/TT-BNV\n"
+        "1. Điều 4 được sửa đổi, bổ sung như sau:\n“Nội dung mới.”\n")
+    g = LegalGraph(); g.build([a, sua])
+    assert [x.src_khoan for x in g.amendments_of("A", "4")] == ["1"]
+
+
+def test_dieu_dich_khai_o_heading_khoan_khong_neu():
+    """"Điều 1. Sửa đổi, bổ sung Điều 3 của Nghị định số 65/2022/NĐ-CP như sau:" rồi
+    khoản chỉ nói "Bổ sung khoản 1a như sau:" — Điều đích chỉ có ở heading."""
+    a = _doc("A", "Nghi-dinh-65-2022-ND-CP-chao-ban-trai-phieu-1",
+             "Số: 65/2022/NĐ-CP\n\nĐiều 3. Giải thích từ ngữ\nNội dung.")
+    sua = _doc("S", "Nghi-dinh-sua-doi-Nghi-dinh-65-2022-ND-CP-2",
+        "Điều 1. Sửa đổi, bổ sung Điều 3 của Nghị định số 65/2022/NĐ-CP như sau:\n"
+        "1. Bổ sung khoản 1a như sau:\n“1a. Nội dung.”\n"
+        "2. Sửa đổi điểm b khoản 3 như sau:\n“b) Nội dung.”\n")
+    g = LegalGraph(); g.build([a, sua])
+    assert [x.src_khoan for x in g.amendments_of("A", "3")] == ["1", "2"]
+
+
+def test_heading_khai_tron_khong_chia_khoan():
+    """"Điều 1. Bổ sung khoản 7 vào Điều 3 Nghị định số 56/2011/NĐ-CP như sau:" rồi viết
+    thẳng nội dung, không có khoản nào. 49 Điều kiểu này — cả Điều là một cạnh."""
+    a = _doc("A", "Nghi-dinh-56-2011-ND-CP-phu-cap-uu-dai-1",
+             "Số: 56/2011/NĐ-CP\n\nĐiều 3. Mức phụ cấp\nNội dung.")
+    sua = _doc("S", "Nghi-dinh-sua-doi-Nghi-dinh-56-2011-ND-CP-2",
+        "NGHỊ ĐỊNH SỬA ĐỔI, BỔ SUNG MỘT SỐ ĐIỀU CỦA NGHỊ ĐỊNH SỐ 56/2011/NĐ-CP\n\n"
+        "Điều 1. Bổ sung khoản 7 vào Điều 3 Nghị định số 56/2011/NĐ-CP như sau:\n"
+        "“7. Mức phụ cấp 40% áp dụng đối với công chức y tế.”\n"
+        "Điều 2. Tổ chức thực hiện\n1. Các cơ sở y tế công lập căn cứ quy định.\n")
+    g = LegalGraph(); g.build([a, sua])
+    (am,) = g.amendments_of("A", "3")
+    assert (am.src_article, am.src_khoan) == ("1", "")
+    assert "Mức phụ cấp 40%" in sua.passage[am.start : am.end]

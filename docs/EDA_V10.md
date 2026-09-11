@@ -544,6 +544,33 @@ Kết quả cuối, sau cả vá `parse_articles` lẫn ba vá trên:
 Ca `26667` Điều 127 (Luật Các tổ chức tín dụng, sửa bởi khoản 20 Điều 1 văn bản 157517)
 giữ nguyên qua cả bốn vòng vá.
 
+### 14.9 Phủ — graph đã chạm hết văn bản chưa?
+
+Hai câu hỏi khác nhau, tách ra mới trả lời được:
+
+**Tra cứu** phủ 100%: 8.512/8.512 Document vào được index theo tên, 7.582 (89,1%) có
+thêm số hiệu. Không văn bản nào vô hình với `resolve`.
+
+**Cạnh Amendment** chỉ tồn tại cho văn bản SỬA ĐỔI — 350/8.512 = 4,1% corpus. Bản gốc
+không sinh cạnh là đúng cấu trúc, không phải thiếu sót.
+
+| Vòng vá | Văn bản sửa sinh được cạnh | Cạnh | Cặp (đích, Điều) |
+|---|---|---|---|
+| sau `a78adee` | 249/350 = 71,1% | 5.231 | 4.306 |
+| + khoản đảo ngữ (`Điều 4 được sửa đổi…`), 871 khoản, mở khoá 12 văn bản | 261 = 74,6% | 5.918 | 4.816 |
+| + Điều đích khai ở heading (6 văn bản) + Điều không chia khoản (49 Điều) | **265 = 75,7%** | **5.971** | **4.851** |
+
+Cuối cùng: 5.971 cạnh, 4.851 cặp, 287 văn bản nguồn, 390 văn bản đích.
+
+85 văn bản sửa đổi còn lại không sinh cạnh, phân loại:
+
+- **~41 — văn bản đích KHÔNG có trong corpus.** Trần cứng, vá kiểu gì cũng không qua
+  được. 102693 sửa Luật Kiểm toán nhà nước 81/2015/QH13 và Luật Tố tụng hành chính
+  93/2015/QH13, cả hai đều vắng; 105589 sửa Thông tư 59/2021/TT-BQP, cũng vắng.
+- **24 — không khoản nào mang động từ sửa đổi.**
+- **20 — khoản có nhưng không nêu Điều nào.** Gồm 15586 (nhiều mục tiêu, cố ý chặn
+  fan-out ở §14.8c: đoán Điều i ↔ mục tiêu i là giả thiết chưa đo).
+
 ### 14.9 Công cụ xem
 
 `scripts/dump_graph.py` xuất graph ra `window.GRAPH` (~5,4 MB, 495 văn bản có cạnh) cho

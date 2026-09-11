@@ -63,11 +63,25 @@ HEADING_AMEND_RE = re.compile(
     rf"(?:một số điều của|của)\s+((?:{_LOAI})\b[^\n]+)"
 )
 
-# Khoản trong văn bản sửa đổi tự khai nó động tới Điều nào của bản gốc.
+# Khoản trong văn bản sửa đổi tự khai nó động tới Điều nào của bản gốc. Hai trật tự câu,
+# nhánh thứ hai là dạng bị động đảo ngữ ("Điều 4 được sửa đổi, bổ sung như sau:") — thiếu
+# nó thì 12 văn bản sửa đổi không sinh được cạnh nào.
 KHOAN_AMEND_RE = re.compile(
-    r"^(\d{1,3})\.\s*((?:Sửa đổi|Bổ sung|Bãi bỏ|Thay thế)[^\n]{0,200})", re.MULTILINE
+    r"^(\d{1,3})\.\s*("
+    r"(?:Sửa đổi|Bổ sung|Bãi bỏ|Thay thế)[^\n]{0,200}"
+    r"|(?:Điều|Điểm|Khoản)[^\n]{0,160}?được\s+(?:sửa đổi|bổ sung|bãi bỏ|thay thế)[^\n]{0,60}"
+    r")",
+    re.MULTILINE,
 )
 KHOAN_BAT_DAU_RE = re.compile(r"^(\d{1,3})\.\s", re.MULTILINE)
+# Điều ĐÍCH khai ngay ở heading, không ở khoản: "Điều 1. Sửa đổi, bổ sung Điều 3 của
+# Nghị định số 65/2022/NĐ-CP như sau:" rồi các khoản chỉ nói "Bổ sung khoản 1a như sau:".
+# 6 văn bản viết kiểu này, trước đây không sinh được cạnh nào.
+HEADING_DIEU_RE = re.compile(
+    r"^Điều\s+\d+[a-zđ]?\.\s*(?:Sửa đổi|Bổ sung|Thay thế|Bãi bỏ)[^\n]{0,60}?"
+    r"\bĐiều\s+(\d{1,3}[a-zđ]?)\b"
+)
+
 # Văn bản đích khai ngay trong câu khoản: "...của Thông tư số 06/2011/TT-BYT". Chỉ nhận
 # dạng SỐ HIỆU sau "của" — dạng tên thì bắt cả văn bản được nhắc vì lý do khác
 # ("theo mẫu tại Nghị định X"), đo được 106 ca lệch so với 19 ca ở dạng số hiệu.
@@ -220,6 +234,24 @@ class LegalGraph:
                 khai = hm is not None and not _cum_nghe(hm.group(1))
                 targets = self._muc_tieu(d, hm.group(1)) if khai else chung
                 body = d.passage[art.start : art.end]
+                # Điều khai trọn cả mục tiêu lẫn Điều đích ở heading rồi viết thẳng nội
+                # dung, không chia khoản: "Điều 1. Bổ sung khoản 7 vào Điều 3 Nghị định
+                # số 56/2011/NĐ-CP như sau:". 49 Điều kiểu này, cả Điều là một cạnh.
+                if targets and not KHOAN_AMEND_RE.search(body):
+                    dm = HEADING_DIEU_RE.match(art.heading)
+                    if dm:
+                        for target in targets:
+                            self._amend[(target, dm.group(1))].append(
+                                Amendment(
+                                    src_doc_id=d.doc_id,
+                                    src_article=art.number,
+                                    src_khoan="",
+                                    start=art.start,
+                                    end=art.end,
+                                    verb=art.heading,
+                                )
+                            )
+                    continue
                 for m in KHOAN_AMEND_RE.finditer(body):
                     # Điều không tự khai mục tiêu mà khoản có nêu số hiệu ngay sau "của"
                     # thì tin khoản: "Điều 12. Bãi bỏ một số văn bản thuộc lĩnh vực mỹ
@@ -244,6 +276,11 @@ class LegalGraph:
                     start = art.start + m.start()
                     end = art.start + _khoan_end(body, m.group(1), m.start())
                     dieu_list = dict.fromkeys(DIEU_TRONG_CAU_RE.findall(m.group(2)))
+                    if not dieu_list:
+                        # Khoản không nêu Điều thì Điều đích nằm ở heading của Điều nguồn
+                        dm = HEADING_DIEU_RE.match(art.heading)
+                        if dm:
+                            dieu_list = {dm.group(1): None}
                     for target in tg:
                       for dieu in dieu_list:
                         self._amend[(target, dieu)].append(
