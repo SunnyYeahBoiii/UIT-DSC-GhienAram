@@ -46,10 +46,13 @@ class Scored:
 class CrossEncoderReranker:
     """Chấm lại (query, chunk) bằng cross-encoder.
 
-    Không buộc vào một checkpoint cụ thể: `Vietnamese_Reranker` (568M, đã là
-    cross-encoder sẵn) dùng được ngay làm mốc, còn `ViLegalBERT` (135M, pretrain MLM
-    domain luật) phải fine-tune ra head trước — xem `scripts/train_reranker.py`.
-    Chênh 432M params đó đổi được sang generator to hơn.
+    Mặc định `AITeamVN/Vietnamese_Reranker` (XLM-R large, 567.755.777 params, head
+    hồi quy sẵn) — zero-shot, không train. Với Qwen 3B là 3,66B, còn trống 340M dưới
+    trần 4B.
+
+    Không buộc cứng vào checkpoint đó: `__init__` nhận đường dẫn bất kỳ, và `score`
+    đọc được cả head hồi quy (`num_labels=1`) lẫn head phân loại (`num_labels=2`),
+    nên đổi checkpoint không phải sửa code gọi.
     """
 
     def __init__(self, model_path: str, device: str | None = None, batch_size: int = 16) -> None:
