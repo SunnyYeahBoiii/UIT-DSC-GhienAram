@@ -1,77 +1,65 @@
-"""Test evidence — Chunk giữa Điều → Evidence chứa trọn Điều; không có Điều → đường lui."""
-from legalqa.corpus import Article, Document
-from legalqa.chunking import Chunk
+"""Test mở rộng Chunk -> Evidence theo ranh giới Điều."""
+from legalqa.chunking import Chunk, chunk_document
+from legalqa.corpus import Document, parse_articles
 from legalqa.evidence import expand_to_evidence
 
 
-def _make_doc_with_articles():
-    """Tạo Document có 2 Điều với nội dung đủ dài."""
-    passage = (
-        "Điều 1. Quy định chung\n"
-        + "Nội dung Điều 1. " * 50
-        + "\nĐiều 2. Quy định cụ thể\n"
-        + "Nội dung Điều 2. " * 50
-    )
-    doc = Document(doc_id="d1", passage=passage)
-    doc.articles = [
-        Article(number="1", heading="Điều 1. Quy định chung", start=0, end=passage.index("Điều 2")),
-        Article(
-            number="2",
-            heading="Điều 2. Quy định cụ thể",
-            start=passage.index("Điều 2"),
-            end=len(passage),
-        ),
-    ]
-    return doc
+def _doc(passage: str, doc_id: str = "d1") -> Document:
+    d = Document(doc_id=doc_id, passage=passage)
+    d.articles = parse_articles(passage)
+    return d
 
 
-def test_chunk_in_article_expands_to_full_article():
-    """Chunk nằm trong Điều 2 → Evidence chứa trọn Điều 2."""
-    doc = _make_doc_with_articles()
-    # Tạo chunk nằm trong Điều 2
-    art2_start = doc.articles[1].start
-    chunk = Chunk(chunk_id="d1:0", doc_id="d1", text="Nội dung Điều 2.", start=art2_start + 10, end=art2_start + 50)
+def _art(n: int, words: int) -> str:
+    return f"Điều {n}. Tiêu đề {n}\n" + " ".join(f"t{n}w{i}" for i in range(words)) + "\n"
+
+
+def test_chunk_trong_mot_dieu_lay_tron_dieu():
+    doc = _doc(_art(1, 300) + _art(2, 300))
+    chunk = [c for c in chunk_document(doc, size=40, stride=40) if c.start > 60][0]
     ev = expand_to_evidence(doc, chunk)
-    assert ev.article_number == "2"
-    assert "Điều 2. Quy định cụ thể" in ev.text
-    assert "Nội dung Điều 2." in ev.text
+    assert ev.article_number == "1"
+    assert ev.text.startswith("Điều 1.")
+    assert "Điều 2." not in ev.text
 
 
-def test_no_articles_uses_window():
-    """Document không có Điều nào → đường lui cửa sổ, không raise."""
-    passage = " ".join(f"word{i}" for i in range(500))
-    doc = Document(doc_id="d2", passage=passage)
-    # Không có articles
-    chunk = Chunk(chunk_id="d2:0", doc_id="d2", text="word250", start=passage.index("word250"), end=passage.index("word250") + 7)
+def test_chunk_vat_qua_hai_dieu_gop_ca_hai():
+    """44% Chunk vắt ranh giới Điều — phải gộp, không được rơi về fallback."""
+    doc = _doc(_art(1, 30) + _art(2, 30))
+    # Chunk đủ dài để phủ cả hai Điều
+    chunk = chunk_document(doc, size=256, stride=256)[0]
     ev = expand_to_evidence(doc, chunk)
-    assert ev.doc_id == "d2"
-    assert len(ev.text) > 0
+    assert ev.article_number == "1, 2"
+    assert "Điều 1." in ev.text and "Điều 2." in ev.text
 
 
-def test_long_article_trimmed():
-    """Article dài hơn max_words → cắt quanh chunk, giữ heading."""
-    doc = Document(doc_id="d3", passage="")
-    long_text = "Nội dung very long. " * 200  # ~2000 từ
-    full_passage = "Điều 1. Quy định.\n" + long_text
-    doc = Document(doc_id="d3", passage=full_passage)
-    doc.articles = [
-        Article(number="1", heading="Điều 1. Quy định.", start=0, end=len(full_passage)),
-    ]
-    # Chunk ở giữa
-    mid = len(full_passage) // 2
-    chunk = Chunk(chunk_id="d3:0", doc_id="d3", text="Nội dung", start=mid, end=mid + 10)
-    ev = expand_to_evidence(doc, chunk, max_words=100)
-    assert "Điều 1" in ev.text
-    assert len(ev.text.split()) <= 110  # heading + window
+def test_dieu_qua_dai_bi_cat_nhung_giu_heading():
+    doc = _doc(_art(7, 5000))
+    chunk = chunk_document(doc, size=256, stride=256)[4]
+    ev = expand_to_evidence(doc, chunk, max_words=200)
+    assert ev.article_number == "7"
+    assert ev.text.startswith("Điều 7.")
+    assert len(ev.text.split()) <= 400  # ngân sách + sai số ước lượng ký tự/từ
 
 
-def test_doc_title_used():
-    """Evidence.doc_title lấy từ doc.title, không phải slug thô."""
-    doc = Document(doc_id="d4", passage="Điều 1. Test\nNội dung test. " * 20, slug="Thong-tu-123-456")
-    doc.articles = [
-        Article(number="1", heading="Điều 1. Test", start=0, end=len(doc.passage)),
-    ]
-    chunk = Chunk(chunk_id="d4:0", doc_id="d4", text="Nội dung test", start=10, end=20)
+def test_document_khong_co_dieu_dung_duong_lui():
+    """15,9% Document không có Điều nào — không được raise."""
+    doc = _doc(" ".join(f"w{i}" for i in range(2000)))
+    assert doc.articles == []
+    chunk = chunk_document(doc)[3]
     ev = expand_to_evidence(doc, chunk)
-    # doc.title trả về fallback "Văn bản d4" vì passage không匹配 TITLE_LINE_RE
-    assert ev.doc_title != ""
+    assert ev.article_number is None
+    assert ev.text.strip()
+
+
+def test_passage_rong_khong_raise():
+    doc = _doc("   ")
+    ev = expand_to_evidence(doc, Chunk("x:0", "x", "", 0, 0))
+    assert ev.text == ""
+
+
+def test_doc_title_khong_bao_gio_la_slug_tho():
+    doc = Document(doc_id="d9", passage=_art(1, 50), slug="Thong-tu-17-2022-TT-BGTVT-abc-522401")
+    doc.articles = parse_articles(doc.passage)
+    ev = expand_to_evidence(doc, chunk_document(doc)[0])
+    assert "-" not in ev.doc_title or "Thông tư" in ev.doc_title

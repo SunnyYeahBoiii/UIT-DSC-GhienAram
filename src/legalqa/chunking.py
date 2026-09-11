@@ -63,7 +63,10 @@ def chunk_document(doc: Document, size: int = 256, stride: int = 256) -> list[Ch
         last_word_idx = word_idx + len(word_slice) - 1
         char_end = word_ends[last_word_idx]
 
-        chunk_text = " ".join(word_slice)
+        # Lấy nguyên văn theo offset thay vì " ".join(word_slice): Evidence mở rộng
+        # dựa vào start/end, và 95,8% Document dùng xuống dòng để phân khoản —
+        # normalize whitespace là mất cấu trúc đó.
+        chunk_text = doc.passage[char_start:char_end]
         chunks.append(
             Chunk(
                 chunk_id=f"{doc.doc_id}:{ordinal}",

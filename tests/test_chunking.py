@@ -70,3 +70,23 @@ def test_chunk_id_format():
     chunks = chunk_document(doc, size=256, stride=256)
     for i, c in enumerate(chunks):
         assert c.chunk_id == f"abc:{i}"
+
+
+def test_offset_giu_nguyen_van_whitespace():
+    """passage[start:end] == text ngay cả khi Passage có xuống dòng và space thừa.
+
+    Regression: bản đầu dùng " ".join(word_slice) nên normalize whitespace —
+    sai 287.716/287.741 chunk trên corpus thật vì văn bản luật xuống dòng dày.
+    """
+    passage = "Điều 1. Phạm vi\n\n1. Khoản một   nhiều   space\n2. Khoản hai\n" * 40
+    doc = _make_doc(passage)
+    for c in chunk_document(doc, size=64, stride=64):
+        assert passage[c.start : c.end] == c.text, f"{c.chunk_id} lệch offset"
+
+
+def test_offset_giu_xuong_dong():
+    """Chunk phải giữ ký tự xuống dòng — 95,8% Document phân khoản bằng đầu dòng."""
+    passage = "\n".join(f"{i}. Khoản số {i} nội dung" for i in range(1, 200))
+    doc = _make_doc(passage)
+    chunks = chunk_document(doc, size=64, stride=64)
+    assert any("\n" in c.text for c in chunks)

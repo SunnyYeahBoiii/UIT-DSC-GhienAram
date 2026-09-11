@@ -22,82 +22,71 @@ class Evidence:
 def expand_to_evidence(
     doc: Document, chunk: Chunk, *, max_words: int = 900
 ) -> Evidence:
-    """Mở rộng Chunk ra ranh giới Article chứa nó.
+    """Mở rộng Chunk ra trọn các Điều mà nó chạm vào.
 
-    Nếu Chunk nằm trong Article: lấy trọn text Article đó.
-    Nếu Article dài hơn max_words: cắt quanh Chunk, giữ heading.
-    Nếu Document không có Article nào (15,9%): lấy cửa sổ ±1 Chunk.
+    Chunk 256 từ thường dài hơn một Điều: đo trên 800 Document đầu, chỉ 56% Chunk
+    nằm trọn trong một Điều. Nên lấy TẤT CẢ Điều giao với Chunk thay vì đòi chứa trọn —
+    cắt nửa chừng một Điều làm mất chính đoạn mà 75,9% reference answer trích nguyên văn.
     """
-    # Tìm Article chứa chunk bằng so sánh offset
-    containing: Article | None = None
-    for art in doc.articles:
-        if art.start <= chunk.start and chunk.end <= art.end:
-            containing = art
-            break
+    touched = _touched_articles(doc, chunk)
 
-    if containing is not None:
-        article_text = doc.passage[containing.start : containing.end]
-        word_count = len(article_text.split())
-
-        if word_count <= max_words:
+    if touched:
+        start = touched[0].start
+        end = touched[-1].end
+        text = doc.passage[start:end]
+        number = ", ".join(a.number for a in touched)
+        if len(text.split()) <= max_words:
             return Evidence(
                 doc_id=doc.doc_id,
                 doc_title=doc.title,
-                article_number=containing.number,
-                text=article_text,
+                article_number=number,
+                text=text,
             )
+        # Span quá dài — cắt quanh Chunk, giữ heading của Điều đầu tiên
+        return _window_around_chunk(doc, chunk, touched[0], max_words, number)
 
-        # Article quá dài — cắt quanh Chunk, giữ heading
-        return _window_around_chunk(doc, chunk, containing, max_words)
+    # Document không có Điều nào (15,9% corpus) — đường lui: cửa sổ quanh Chunk
+    return _window_around_chunk(doc, chunk, None, max_words, None)
 
-    # Không có Article nào — đường lui: cửa sổ ±1 chunk
-    return _window_around_chunk(doc, chunk, None, max_words)
+
+def _touched_articles(doc: Document, chunk: Chunk) -> list[Article]:
+    """Các Điều giao với [chunk.start, chunk.end), theo thứ tự xuất hiện."""
+    return [
+        a for a in doc.articles if a.start < chunk.end and chunk.start < a.end
+    ]
 
 
 def _window_around_chunk(
-    doc: Document, chunk: Chunk, article: Article | None, max_words: int = 900
+    doc: Document,
+    chunk: Chunk,
+    article: Article | None,
+    max_words: int,
+    number: str | None,
 ) -> Evidence:
-    """Cắt cửa sổ quanh chunk, giữ heading của Article (nếu có).
+    """Cắt cửa sổ ký tự quanh Chunk, giữ heading của Điều (nếu có).
 
-    Heading của Article được tính vào max_words — nếu heading dài thì
-    cửa sổ co lại tương ứng.
+    Cắt theo offset ký tự chứ không qua split()/join(): 95,8% Document dùng xuống dòng
+    để phân khoản, normalize whitespace là mất cấu trúc model cần để trích đúng khoản.
     """
-    passage_words = doc.passage.split()
-    if not passage_words:
-        return Evidence(
-            doc_id=doc.doc_id,
-            doc_title=doc.title,
-            article_number=article.number if article else None,
-            text="",
-        )
+    if not doc.passage.strip():
+        return Evidence(doc.doc_id, doc.title, number, "")
 
-    heading = ""
-    heading_words = 0
-    if article is not None:
-        heading = article.heading + "\n"
-        heading_words = len(article.heading.split())
+    heading = f"{article.heading}\n" if article is not None else ""
+    budget = max(1, max_words - len(heading.split()))
 
-    chunk_word_start = _char_to_word_offset(doc.passage, chunk.start)
-    body_budget = max(1, max_words - heading_words)
-    half_window = body_budget // 2
+    # Ước lượng khoảng ký tự từ ngân sách từ: dùng mật độ ký tự/từ thật của Passage
+    words = doc.passage.split()
+    chars_per_word = len(doc.passage) / max(1, len(words))
+    half = int(budget * chars_per_word / 2)
 
-    w_start = max(0, chunk_word_start - half_window)
-    w_end = min(len(passage_words), w_start + body_budget)
-    # Đảm bảo chunk nằm trong window
-    if chunk_word_start < w_start:
-        w_start = max(0, chunk_word_start - half_window)
-        w_end = min(len(passage_words), w_start + body_budget)
-
-    selected_text = " ".join(passage_words[w_start:w_end])
+    center = (chunk.start + chunk.end) // 2
+    start = max(0, center - half)
+    end = min(len(doc.passage), start + int(budget * chars_per_word))
+    body = doc.passage[start:end]
 
     return Evidence(
         doc_id=doc.doc_id,
         doc_title=doc.title,
-        article_number=article.number if article else None,
-        text=heading + selected_text,
+        article_number=number,
+        text=heading + body,
     )
-
-
-def _char_to_word_offset(text: str, char_pos: int) -> int:
-    """Đếm số từ trước char_pos — cần cho mapping offset-sang-từ."""
-    return len(text[:char_pos].split())
