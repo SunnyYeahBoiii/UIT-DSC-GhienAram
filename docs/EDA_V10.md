@@ -332,3 +332,34 @@ từ/Evidence p10 394, p50 873, p90 929. Số Điều gộp p50 1, max 26.
 **artefact lấy mẫu**: lấy 1 chunk ngẫu nhiên mỗi Document thì nghiêng về Document CÓ Điều
 và về vị trí giữa văn bản, bỏ sót cả 1.271 Document không Điều lẫn phần đầu mỗi văn bản.
 Không phải hồi quy.
+
+### 13.1 Cắt phụ lục khỏi Điều cuối
+
+`parse_articles` cho Điều cuối `end = len(passage)` nên nó nuốt trọn phụ lục/biểu mẫu
+phía sau. `_cut_phu_luc` dừng biên tại marker phụ lục đứng trọn một dòng ngắn.
+
+Chọn ngưỡng bằng cách áp quy tắc lên **151.896 Điều GIỮA** — biên của chúng vốn đã đúng
+nên mọi lần dính đều là dương tính giả:
+
+| Quy tắc | Dương tính giả trên Điều giữa | Cắt được / 2.282 Điều cuối quá dài |
+|---|---:|---:|
+| marker ở đầu dòng | 0,81% | 83,7% |
+| + giữ ≥ 50 từ, bỏ ≥ 200 từ | **0,52%** | **83,1%** |
+
+Điều cuối quá dài: trung bình 6.920 → 817 từ.
+
+### 13.2 Ảnh hưởng lên Evidence
+
+| Tình huống | Trước | Sau |
+|---|---:|---:|
+| Lấy trọn Điều | 41,5% | **42,4%** |
+| Span > 900 từ → cắt cửa sổ | 46,5% | **29,8%** |
+| Document không có Điều | 9,0% | 9,0% |
+| Chunk trước Điều đầu tiên | 3,0% | 3,0% |
+| Chunk nằm trong phụ lục | *(gán nhãn Điều cuối — SAI)* | **15,9%** |
+
+Số Điều tách được không đổi (159.137), từ/Evidence p50 873 → 869.
+
+Đường lui 11,9% → 27,9%. Tăng là **đúng**: 45.785 chunk nằm trong phụ lục trước đây
+mang `article_number` của Điều cuối, một nhãn sai. Chúng vẫn được index, chỉ không còn
+được quảng cáo là điều khoản.

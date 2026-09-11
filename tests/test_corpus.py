@@ -1,5 +1,5 @@
 """Test corpus — title_from_slug và Document.title."""
-from legalqa.corpus import Document, title_from_slug
+from legalqa.corpus import Document, parse_articles, title_from_slug
 
 
 def test_title_from_slug_removes_tail_and_dashes():
@@ -111,3 +111,21 @@ def test_dewrap_khong_con_dong_trong_hay_space_thua():
     assert "\r" not in out
     assert "\n\n" not in out
     assert all(line == line.strip() and line for line in out.split("\n"))
+
+
+def test_dieu_cuoi_khong_nuot_phu_luc():
+    """Điều cuối phải dừng trước PHỤ LỤC, không lấy tới hết Passage."""
+    body = " ".join(f"nội dung {i}" for i in range(60))
+    phu_luc = " ".join(f"biểu mẫu {i}" for i in range(150))
+    p = f"Điều 1. Phạm vi\n{body}\nPHỤ LỤC I\n{phu_luc}"
+    a = parse_articles(p)[-1]
+    assert "PHỤ LỤC" not in p[a.start : a.end]
+    assert "nội dung 59" in p[a.start : a.end]
+
+
+def test_dong_bang_giua_noi_dung_khong_cat_dieu():
+    """Bỏ đi < 200 từ thì không phải phụ lục — chỉ là dòng "Bảng 1" giữa nội dung."""
+    body = " ".join(f"nội dung {i}" for i in range(60))
+    p = f"Điều 1. Phạm vi\n{body}\nBảng 1\nmột hai ba bốn năm\n{body}"
+    a = parse_articles(p)[-1]
+    assert a.end == len(p)

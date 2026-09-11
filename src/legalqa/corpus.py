@@ -79,6 +79,23 @@ TITLE_LINE_RE = re.compile(
     re.MULTILINE,
 )
 
+# Phụ lục / biểu mẫu đứng sau Điều CUỐI. `parse_articles` cho Điều cuối
+# `end = len(passage)` nên nó nuốt trọn phần này: 2.282 Điều cuối dài quá 900 từ,
+# trung bình 6.920 từ, max 189.311. Marker phải chiếm trọn một dòng ngắn để không
+# khớp nhầm giữa câu — đo trên 151.896 Điều GIỮA (biên vốn đã đúng) thì chỉ 0,52%
+# dính, tức rủi ro cắt nhầm nội dung thật ở mức đó.
+PHU_LUC_RE = re.compile(
+    r"^[ \t]*(?:PHỤ LỤC|Phụ lục|PHẦN PHỤ LỤC|MẪU SỐ|Mẫu số|DANH MỤC|Danh mục|"
+    r"BIỂU|Biểu số|BẢNG|Bảng|BIỂU MẪU)\b[^\n]{0,70}$",
+    re.MULTILINE,
+)
+
+# Hai chốt chặn quanh điểm cắt: giữ lại < 50 từ nghĩa là cắt sạch cả Điều, bỏ đi
+# < 200 từ nghĩa là chỉ một dòng "Bảng 1" lọt giữa nội dung chứ không phải phụ lục.
+# Thiếu hai chốt này tỷ lệ dính trên Điều giữa là 0,81% thay vì 0,52%.
+PHU_LUC_MIN_KEEP = 50
+PHU_LUC_MIN_DROP = 200
+
 # Số hiệu văn bản — khoá để đối chiếu Citation với Document trong legal graph
 DOC_NUMBER_RE = re.compile(r"\bSố:\s*([\w./\-]+)")
 
@@ -208,7 +225,10 @@ def parse_articles(passage: str) -> list[Article]:
         return []
     out: list[Article] = []
     for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(passage)
+        if i + 1 < len(marks):
+            end = marks[i + 1].start()
+        else:
+            end = _cut_phu_luc(passage, m.start())
         nl = passage.find("\n", m.start())
         heading = passage[m.start() : nl if nl != -1 else end]
         out.append(
@@ -245,3 +265,20 @@ def iter_documents(corpus_dir: Path) -> Iterator[Document]:
         doc = load_document(path)
         if doc is not None:
             yield doc
+
+
+def _cut_phu_luc(passage: str, art_start: int) -> int:
+    """Biên cuối của Điều CUỐI: dừng trước phụ lục thay vì nuốt tới hết Passage.
+
+    Phụ lục không thuộc Điều nào — để nó trong Điều cuối thì Evidence bị cắt cửa sổ
+    và model đọc biểu mẫu thay vì điều khoản. Cắt được 83,1% số Điều cuối quá dài,
+    trung bình 6.920 -> 817 từ.
+    """
+    tail = passage[art_start:]
+    for m in PHU_LUC_RE.finditer(tail):
+        if (
+            len(tail[: m.start()].split()) >= PHU_LUC_MIN_KEEP
+            and len(tail[m.start() :].split()) >= PHU_LUC_MIN_DROP
+        ):
+            return art_start + m.start()
+    return len(passage)
