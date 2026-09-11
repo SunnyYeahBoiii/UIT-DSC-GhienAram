@@ -165,3 +165,49 @@ python scripts/eda/corpus_stats.py        # mục 2
 python scripts/eda/verbatim_gold.py       # mục 3, sinh weak gold
 python scripts/eda/bm25_recall.py         # mục 4
 ```
+
+## 11. Wrap mềm của trình crawl — `\r\n\n`
+
+Passage là text crawl từ HTML, giữ nguyên ngắt dòng **trình bày** (dòng p50 = 34 ký tự,
+đúng bề rộng cột hiển thị) chứ không phải ngắt dòng **ngữ nghĩa**. Đo trên 797 Document:
+
+| Chỉ số | Giá trị |
+|---|---:|
+| Document chứa `\r` | 797/797 = 100% |
+| Số lần `\r\n\n` xuất hiện | 427.420 |
+| `\r\n\n` nối **giữa câu** | 93,9% |
+| `\n\n` thuần nối giữa câu | 50,7% |
+
+Kết luận: `\r` là dấu vết wrap mềm, gỡ được **xác định**. `\n\n` thuần thì mơ hồ
+(một nửa là ngắt đoạn thật, dùng để phân khoản) nên **giữ nguyên**.
+
+`dewrap_passage()` chạy trong `load_document()`, trước `parse_articles()` — mọi offset
+Article/Chunk/Evidence đều trỏ vào Passage sau bước này.
+
+### Tác động đo được (600 Document)
+
+| Chỉ số | Trước | Sau |
+|---|---:|---:|
+| Tiêu đề Điều bị cắt đôi (đo nghiêm: dòng sau bắt đầu chữ thường) | 62,3% | **0,2%** |
+| Số dòng | 623.526 | 304.873 (−51,1%) |
+| Số từ | 5.519.099 | 5.519.099 (không đổi) |
+| Số Điều nhận ra | 10.951 | 12.108 |
+
+26 ca còn sót đa số là trích dẫn `Điều 136 của Bộ luật này...` trong thân văn bản,
+không phải heading.
+
+Toàn corpus: Document không có Điều 15,9% → **14,9%**. Số Chunk giữ nguyên 287.741.
+
+### `Document.title` và `Document.number`
+
+`TITLE_LINE_RE` trước đây thiếu `re.MULTILINE` nên chỉ khớp đầu chuỗi — mà Passage
+luôn mở đầu bằng tên cơ quan ("BỘ LAO ĐỘNG - THƯƠNG BINH VÀ XÃ HỘI"), nên **100%
+Document rơi về đường lui Slug không dấu**. Đây chính là nguồn rò chuỗi kiểu
+`Thong-tu-27-2017-TT-BLDTBXH-dao-tao-lien-thong-...` vào prompt.
+
+Sau khi sửa (MULTILINE + ghép dòng chủ đề viết hoa ngay sau loại văn bản), đo trên
+800 Document: title lui về Slug **14,2%**.
+
+Thêm `Document.number` (số hiệu `27/2017/TT-BLĐTBXH`) — bắt được **91,4%**. Đây là
+khoá để đối chiếu Citation với Document trong legal graph (ADR-0002: chỉ mở rộng graph
+khi Citation gọi tên một văn bản cụ thể).

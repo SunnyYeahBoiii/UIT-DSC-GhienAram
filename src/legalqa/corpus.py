@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+# Crawl HTML để lại wrap mềm dưới dạng "\r\n\n": đo trên 797 Document thì 100%
+# Document chứa, 427.420 lần xuất hiện, 93,9% nối giữa câu. Ngược lại "\n\n" thuần chỉ
+# 50,7% nối giữa câu — mơ hồ nên giữ nguyên. Chỉ gỡ đúng loại có \r.
+WRAP_RE = re.compile(r"[ \t]*\r\n*[ \t]*")
+ENDPUNCT = ".:;?!…"
+
 # Điều đứng đầu dòng: "Điều 12.", "Điều 12a.", "Điều 12 ." — bắt cả biến thể thiếu dấu chấm
 DIEU_RE = re.compile(r"^[ \t]*(Điều\s+(\d+[a-zđ]?))\s*[.\-:]?\s*", re.MULTILINE)
 
@@ -34,12 +40,17 @@ SLUG_PREFIX = {
     "Luat": "Luật",
 }
 
-# Dòng đầu Passage thường là tiêu đề văn bản có dấu — nguồn tốt hơn Slug khi có
+# Tiêu đề văn bản nằm trên dòng RIÊNG giữa Passage (sau tên cơ quan, số hiệu, ngày),
+# không phải dòng đầu — nên bắt buộc MULTILINE. Thiếu nó thì 100% Document rơi về
+# đường lui Slug không dấu.
 TITLE_LINE_RE = re.compile(
-    r"^\s*((?:NGHỊ ĐỊNH|THÔNG TƯ|QUYẾT ĐỊNH|LUẬT|BỘ LUẬT|NGHỊ QUYẾT|PHÁP LỆNH|"
-    r"CÔNG VĂN|CHỈ THỊ|HIẾN PHÁP)[^\n]{0,200})",
-    re.IGNORECASE,
+    r"^[ \t]*((?:BỘ LUẬT|NGHỊ ĐỊNH|THÔNG TƯ LIÊN TỊCH|THÔNG TƯ|QUYẾT ĐỊNH|"
+    r"NGHỊ QUYẾT|PHÁP LỆNH|CÔNG VĂN|CHỈ THỊ|HIẾN PHÁP|LUẬT)[^\n]{0,200})$",
+    re.MULTILINE,
 )
+
+# Số hiệu văn bản — khoá để đối chiếu Citation với Document trong legal graph
+DOC_NUMBER_RE = re.compile(r"\bSố:\s*([\w./\-]+)")
 
 
 @dataclass(slots=True)
@@ -63,10 +74,54 @@ class Document:
     @property
     def title(self) -> str:
         """Document title có dấu. Ưu tiên dòng tiêu đề trong Passage, lùi về Slug."""
-        m = TITLE_LINE_RE.search(self.passage[:4000])
-        if m:
-            return re.sub(r"\s+", " ", m.group(1)).strip()
-        return title_from_slug(self.slug) or f"Văn bản {self.doc_id}"
+        head = self.passage[:4000]
+        m = TITLE_LINE_RE.search(head)
+        if not m:
+            return title_from_slug(self.slug) or f"Văn bản {self.doc_id}"
+
+        parts = [re.sub(r"\s+", " ", m.group(1)).strip()]
+        # Loại văn bản đứng một mình ("THÔNG TƯ") vô nghĩa với model — ghép dòng chủ đề
+        # viết hoa ngay sau ("QUY ĐỊNH ĐÀO TẠO LIÊN THÔNG..."), đó mới là tên thật.
+        for line in head[m.end() :].split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.isupper() and len(line) > 10:
+                parts.append(re.sub(r"\s+", " ", line))
+            break
+        return " ".join(parts)[:300]
+
+    @property
+    def number(self) -> str:
+        """Số hiệu văn bản ("27/2017/TT-BLĐTBXH"), rỗng nếu không có."""
+        m = DOC_NUMBER_RE.search(self.passage[:4000])
+        return m.group(1).strip(" .,;") if m else ""
+
+
+def dewrap_passage(passage: str) -> str:
+    """Gỡ wrap mềm của trình crawl, giữ ngắt đoạn thật.
+
+    Phải chạy TRƯỚC parse_articles và trước chunking: mọi offset Article/Chunk/Evidence
+    đều trỏ vào Passage sau bước này. Nếu không gỡ, 75,7% tiêu đề Điều bị cắt đôi
+    ("Điều 2. Tổ chức" | "thực hiện") nên Article.heading và Document.title đều sai.
+    """
+    if "\r" not in passage:
+        return passage
+
+    out: list[str] = []
+    pos = 0
+    for m in WRAP_RE.finditer(passage):
+        out.append(passage[pos : m.start()])
+        pos = m.end()
+        prev = out[-1][-1] if out[-1] else ""
+        nxt = passage[pos] if pos < len(passage) else ""
+        # Wrap sau dấu kết câu + trước chữ hoa/số = ngắt đoạn thật bị wrap kèm, giữ lại
+        if prev in ENDPUNCT and (nxt.isupper() or nxt.isdigit()):
+            out.append("\n\n")
+        elif prev:
+            out.append(" ")
+    out.append(passage[pos:])
+    return "".join(out)
 
 
 def title_from_slug(slug: str) -> str:
@@ -109,7 +164,7 @@ def parse_articles(passage: str) -> list[Article]:
 def load_document(path: Path) -> Document | None:
     """Đọc 1 file Document. Trả None nếu Passage rỗng (20/8.532 file)."""
     raw = json.loads(path.read_text(encoding="utf-8"))
-    passage = str(raw.get("passage") or "")
+    passage = dewrap_passage(str(raw.get("passage") or ""))
     if not passage.strip():
         return None
     doc = Document(
