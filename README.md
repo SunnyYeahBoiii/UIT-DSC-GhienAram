@@ -1,102 +1,66 @@
-# UIT DSC 2026 Task 2 — LegalQA v9.2 — gated agentic retrieval
+# UIT DSC 2026 Task 2 — LegalQA v10
 
-Pipeline offline cho Kaggle T4, chỉ dùng dữ liệu chính thức và các checkpoint mã nguồn mở đã được BTC phê duyệt. Tổng tham số runtime vẫn được runner kiểm tra phải nhỏ hơn 4B. BARTpho đã bị loại.
+Pipeline offline cho Kaggle T4: hỏi đáp pháp luật tiếng Việt dạng dài. Metric chính
+METEOR, phụ ROUGE-L. Tổng tham số runtime < 4B.
 
-Repository **không chứa** dữ liệu cuộc thi, model Hugging Face, dense index,
-checkpoint/adapter QLoRA, candidate cache, recovery ZIP hay submission. Hãy
-attach các artifact này thành Kaggle Dataset riêng và tuân thủ điều khoản của
-Ban Tổ chức.
+Repo **không chứa** dữ liệu cuộc thi, checkpoint, dense index, adapter QLoRA hay
+submission — xem `.gitignore`.
 
-## Nội dung thực tế
+v9.2 nằm ở nhánh `main`. v10 xây lại từ số 0 sau khi EDA chỉ ra lỗi nền móng.
 
-- `src/`: pipeline retrieval, generation, verifier và selector.
-- `scripts/`: build index, train, calibration, validation.
-- `kaggle/`: notebook và runner Kaggle T4.
-- `wheelhouse/`: 12 wheel cố định để cài hoàn toàn offline trên Kaggle.
-- `tests/`: kiểm thử hồi quy.
-- `configs/`, `server/`, `docs/`: cấu hình runner, server tham khảo, tài liệu audit/pipeline.
+## Vì sao xây lại
 
-## Những phần mới trong v9/v9.1
+v9.2 index **cả Document**. Document p50 = 4.828 từ (max 1.242.409), nên chuẩn hoá độ
+dài của BM25 pha loãng câu hỏi 19 từ. Đo recall trên 224 câu weak-gold:
 
-- Thống kê độ dài, số câu, kiểu mở đầu, tỷ lệ viện dẫn/liệt kê theo loại câu hỏi từ `train.json`; dùng p50/p75 làm mục tiêu và p90/p95 làm giới hạn.
-- Hậu xử lý Qwen theo ranh giới câu hoàn chỉnh, xóa câu lặp và log số từ trước/sau.
-- Exact dense kNN trên câu hỏi official train; dùng tối đa hai đáp án gần nhất làm ví dụ **văn phong**, không coi chúng là căn cứ.
-- Candidate `train-memory` chỉ được mở khi cosine vượt ngưỡng cao; ngưỡng này được hiệu chỉnh trên grouped-dev.
-- Candidate oracle và selector tuning trên 300–500 câu dev, giữ toàn bộ câu có cùng template ở cùng một phía để giảm leakage.
-- QLoRA Qwen3.5-2B bằng official answer và evidence truy hồi từ corpus; checkpoint chứa model/optimizer/scheduler/RNG và tự resume đúng `train_scope`.
-- Router v9.1 chỉ mở Complex khi có complex cue, retrieval thực sự yếu hoặc nhiều văn bản gần hòa điểm; quan hệ phổ biến trong corpus không còn tự kích hoạt Complex.
-- Mỗi graph hop được rerank và relevance-gate trước khi trở thành frontier của vòng sau; mặc định tối đa hai vòng, sáu evidence và bốn văn bản.
-- Document diversity dùng bonus nhỏ thay vì cưỡng ép kéo tài liệu điểm thấp vào evidence.
-- Style ceiling tăng lên 700 từ; mặc định chỉ xóa câu lặp, không hard-trim đáp án dài ở 520 từ.
+| Đơn vị index | R@1 | R@5 | R@10 | R@100 |
+|---|---:|---:|---:|---:|
+| Document (v9.2) | 22,3% | 42,0% | 50,9% | 76,3% |
+| Chunk 256/256 (v10) | **55,4%** | **83,0%** | **89,7%** | **97,8%** |
 
-## Agentic Search v9.2
+Bốn tầng phía sau của v9.2 (graph, agentic, memory, selector) đều ngồi sau trần cứng
+50,9% đó. Sửa đơn vị index đáng giá hơn mọi tầng cộng lại.
 
-- Chỉ chạy cho câu Complex, retrieval confidence thấp hoặc có tín hiệu
-  dẫn chiếu/thay thế/hiệu lực; không chạy cho toàn bộ câu hỏi.
-- Tối đa hai tool call, chặn truy vấn lặp và buộc sinh đáp án cuối.
-- Mỗi tool call dùng BM25 toàn cục rồi legal-rerank bằng số văn bản,
-  Điều/Khoản, quan hệ graph và trạng thái văn bản hiện hành.
-- Tool evidence chỉ thuộc candidate Agentic. Candidate Qwen thường,
-  extractive và train-memory không được hưởng điểm verifier từ evidence đó.
-- Lỗi tool-call không nghiêm trọng chỉ loại candidate Agentic của câu đó;
-  không cache lỗi và không tắt Agentic cho các câu sau. Sau ba lỗi liên
-  tiếp pipeline chỉ in cảnh báo. Lỗi GPU nghiêm trọng vẫn dừng an toàn để resume.
-- Selector calibration có prior riêng cho `qwen3.5-2b-agentic`.
+Chi tiết và các số đo khác: `docs/EDA_V10.md`.
 
-## Pipeline
+## Thiết kế
 
-```text
-Question
-  -> global BM25 + exact global dense
-  -> citation boosts + RRF + Vietnamese reranker
-  -> Simple/Complex router + legal relation graph
-  -> merged legal evidence
-  -> official-train question kNN
-       -> 0–2 style examples for Qwen
-       -> high-threshold memory candidate
-  -> evidence-grounded Qwen base/QLoRA + extractive candidate
-       -> gated Agentic Qwen for complex/low-confidence questions only
-       -> BM25 tool call + citation/temporal/relation legal-rerank
-  -> learned answer-length compaction
-  -> ViLegalBERT + confidence-aware selector
-  -> submission.zip
-```
+**Small-to-big.** Chunk 256 từ là đơn vị **tìm**; Evidence — mở rộng ra trọn các Điều mà
+Chunk chạm vào — là đơn vị **sinh**. Lý do ở `docs/adr/0001`.
 
-Chi tiết nằm trong [docs/PIPELINE_V9.md](docs/PIPELINE_V9.md). Hướng dẫn Kaggle nằm trong [kaggle/README_INFERENCE_ONLY_T4.md](kaggle/README_INFERENCE_ONLY_T4.md).
+**Giữ legal graph, bỏ phần còn lại.** Agentic tool-call, multi-candidate selector,
+train-memory đều bị loại; graph chỉ mở rộng khi Citation gọi tên một văn bản cụ thể,
+không gate theo số quan hệ (93,1% Document chứa "căn cứ" nên đếm quan hệ là vô nghĩa).
+Lý do ở `docs/adr/0002`.
 
-## Thứ tự chạy khuyến nghị
+**Làm sạch dữ liệu trước.** Passage crawl từ HTML mang wrap mềm `\r\n\n` — 100% Document
+có, 93,9% nối giữa câu. Không gỡ thì 62,3% tiêu đề Điều bị cắt đôi. Gỡ xong còn 0,2%.
 
-1. Import `kaggle/legalqa_dsc2026_inference_only_t4.ipynb`, đặt `DENSE_INDEX_ONLY=True`; lưu `/kaggle/working/legalqa_dense_index` thành Dataset. Thư mục này chứa cả global corpus dense index và official train-memory.
-2. Import `kaggle/legalqa_dsc2026_v9_qlora_t4.ipynb`, đặt `TRAIN_SCOPE='split'`; lưu toàn bộ `/kaggle/working/legalqa_qlora` để giữ checkpoint và adapter split.
-3. Attach dense index và completed split adapter; chạy `kaggle/legalqa_dsc2026_v9_selector_calibration_t4.ipynb` bằng source v9.2. Lưu `tuned_selection.yaml` cùng báo cáo candidate oracle. Không dùng trace/trọng số calibration từ Agentic cũ vì candidate evidence và prior đã thay đổi.
-4. Chạy lại notebook QLoRA với `TRAIN_SCOPE='full'`. Không attach state `split` làm state resume cho bước này; code cũng từ chối scope sai.
-5. Attach dense index, completed adapter `full` và đúng một `tuned_selection.yaml`; chạy notebook inference với `DENSE_INDEX_ONLY=False`.
-6. Nộp duy nhất `/kaggle/working/submission.zip`.
-
-Cả ba notebook v9.2 chỉ nhận source có `SOURCE_CONTRACT.json` khớp đầy
-đủ release, Agentic/cache/selector schema và 12 wheel offline. Vì vậy bản
-`legalqa_source` cũ nằm kèm trong Dataset QLoRA split/full sẽ bị loại thay
-vì có thể được chọn nhầm theo tên thư mục.
-
-Bạn có thể bỏ bước QLoRA và dùng Qwen base, nhưng candidate-oracle nên được chạy trước khi quyết định selector nào tốt hơn. Chỉ chấp nhận trọng số tuned nếu phần grouped holdout cải thiện, không chỉ phần tune.
-
-## Chạy kiểm thử
+## Chạy
 
 ```bash
 PYTHONPATH=src python -m pytest -q
-python -m compileall -q src scripts kaggle
 ```
 
-## Artifact chính
+```python
+from pathlib import Path
+from legalqa.corpus import iter_documents
+from legalqa.chunking import chunk_document
+from legalqa.evidence import expand_to_evidence
 
-```text
-/kaggle/working/legalqa_dense_index/
-/kaggle/working/legalqa_qlora/qwen_qlora_adapter.zip
-/kaggle/working/legalqa_selector_calibration/calibration_summary.json
-/kaggle/working/legalqa_selector_calibration/selector_report.json
-/kaggle/working/legalqa_selector_calibration/tuned_selection.yaml
-/kaggle/working/legalqa_recovery_latest.zip
-/kaggle/working/submission.zip
+docs = list(iter_documents(Path("data/official/selected-contexts")))
+chunks = [c for d in docs for c in chunk_document(d)]      # 287.741 chunk
+ev = expand_to_evidence(docs[0], chunks[0])                 # Evidence trọn Điều
 ```
 
-Không có agent loop vô hạn. Graph retrieval và Agentic tool-call đều tối đa hai vòng mặc định, có visited/query-set và dừng ngay khi không còn evidence phù hợp.
+EDA tái lập được bằng `scripts/eda/` (7 script, đọc `data/official/`).
+
+## Tài liệu
+
+| File | Nội dung |
+|---|---|
+| `CONTEXT.md` | Glossary — thuật ngữ miền, không có chi tiết cài đặt |
+| `docs/EDA_V10.md` | Toàn bộ số đo |
+| `docs/adr/` | Quyết định kiến trúc |
+| `docs/V10_BUILD_SPEC.md` | Đặc tả 5 module lõi |
+| `AGENTS.md` | Hướng dẫn cho agent AI |
