@@ -194,10 +194,18 @@ class LegalGraph:
     def _build_amendments(self, docs: list[Document]) -> None:
         self._amend = defaultdict(list)
         for d in docs:
-            targets = self._amend_target(d)
-            if not targets:
-                continue
+            chung = self._amend_target(d)
             for art in d.articles:
+                # Mục tiêu khai theo TỪNG ĐIỀU mới là mục tiêu đúng: "LUẬT SỬA ĐỔI 37 LUẬT
+                # LIÊN QUAN ĐẾN QUY HOẠCH" có 37 Điều, mỗi Điều sửa một luật khác nhau.
+                # Lấy một mục tiêu chung cho cả văn bản thì 3.308/5.760 cạnh đổ nhầm chỗ —
+                # riêng Luật Giao thông đường bộ nhận oan 223 cạnh.
+                # Điều tự khai mục tiêu thì lấy đúng của nó, KỂ CẢ khi tra trượt: rơi về
+                # mục tiêu chung là gán nhầm hẳn sang văn bản khác, tệ hơn mất cạnh.
+                hm = HEADING_AMEND_RE.match(art.heading)
+                targets = self._muc_tieu(d, hm.group(1)) if hm else chung
+                if not targets:
+                    continue
                 body = d.passage[art.start : art.end]
                 for m in KHOAN_AMEND_RE.finditer(body):
                     start = art.start + m.start()
@@ -229,8 +237,10 @@ class LegalGraph:
                 if hm:
                     ten = hm.group(1)
                     break
-        if ten is None:
-            return []
+        return self._muc_tieu(doc, ten) if ten is not None else []
+
+    def _muc_tieu(self, doc: Document, ten: str) -> list[str]:
+        """Tra một chuỗi mục tiêu ra danh sách doc_id. Loại văn bản trỏ vào chính nó."""
         by = _nam_slug(doc.slug)
         out = []
         for phan in _tach_muc_tieu(ten):

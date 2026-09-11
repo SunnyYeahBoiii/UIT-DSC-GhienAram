@@ -387,9 +387,9 @@ số từ thừa ít nhất nên `Luật Các tổ chức tín dụng sửa đ�
 |---|---|
 | Văn bản sửa đổi nhận diện được | 349 (279 tiêu đề + 70 heading Điều) |
 | Trong đó tra được mục tiêu | 305 = 87,4% |
-| Văn bản sửa nhiều văn bản cùng lúc | 19 |
-| Cặp (văn bản, Điều) bị sửa | 4.183 |
-| Cạnh (khoản → Điều) | 5.760 |
+| Văn bản thực sự sinh cạnh | 262 |
+| Cặp (văn bản, Điều) bị sửa | 4.345 |
+| Cạnh (khoản → Điều) | 5.299 |
 | Điều bị >1 khoản sửa | 812 |
 | Độ dài khoản sửa | p50 596 ký tự, p90 2.418, max 16.600 |
 
@@ -449,3 +449,30 @@ hàng trăm Slug nên khớp vào văn bản bất kỳ.
 - **Truy vấn < 3 từ thì trả None**, trừ khi có năm — năm thu hẹp đủ để 2 từ vẫn xác định được.
 - **Bỏ ứng viên thừa > 6 từ**: `LUẬT SỬA ĐỔI, BỔ SUNG MỘT SỐ ĐIỀU CỦA` từng khớp vào
   `Nghị định 51/2002 hướng dẫn Luật Báo chí` với 11 từ thừa.
+
+### 14.6 Mục tiêu khai theo Điều, không theo văn bản
+
+Lỗi này chỉ lộ ra khi **nhìn graph bằng mắt**: Luật Giao thông đường bộ đứng thứ tư trong
+bảng bị-sửa-nhiều-nhất với 87 Điều, trong đó 223 cạnh đến từ một văn bản duy nhất —
+`LUẬT SỬA ĐỔI, BỔ SUNG MỘT SỐ ĐIỀU CỦA 37 LUẬT CÓ LIÊN QUAN ĐẾN QUY HOẠCH`. Văn bản đó
+có 37 Điều, **mỗi Điều sửa một luật khác nhau**; lấy một mục tiêu chung cho cả văn bản
+(heading Điều 1 = Luật GTĐB) thì toàn bộ 37 Điều đổ vào một luật.
+
+Đo quy mô: **72 văn bản** khai mục tiêu khác nhau theo từng Điều, **3.308/5.760 cạnh
+(57%) gán nhầm chỗ**.
+
+Sửa: mục tiêu lấy từ heading của chính Điều đang đọc; chỉ Điều nào không tự khai mới
+dùng mục tiêu chung ở tiêu đề. Và khi Điều có khai mà tra trượt thì **bỏ hẳn**, không rơi
+về mục tiêu chung — gán nhầm sang văn bản khác tệ hơn mất cạnh.
+
+Kết quả: cạnh 5.760 → 5.299, cặp (văn bản, Điều) 4.183 → **4.345** (tăng vì cạnh phân tán
+đúng chỗ thay vì dồn một chỗ). Luật GTĐB 87 → 43 Điều, 223 → 43 cạnh từ văn bản đó. Văn
+bản "37 luật quy hoạch" giờ trỏ vào 24 văn bản khác nhau.
+
+Ca 166937 không đổi qua cả ba vòng vá.
+
+### 14.7 Công cụ xem
+
+`scripts/dump_graph.py` xuất graph ra `window.GRAPH` (~5,4 MB, 495 văn bản có cạnh) cho
+một trang xem: tìm văn bản, liệt kê Điều bị sửa, mở ra nguyên văn khoản sửa, bấm sang
+văn bản nguồn. Lỗi 14.6 tìm ra từ bảng xếp hạng trên trang này chứ không từ test.

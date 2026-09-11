@@ -222,3 +222,44 @@ def test_truy_van_qua_ngan_khong_khop_bua():
     g, _ = _corpus_hop()
     assert g.resolve(DocRef(name="Nghị định")) is None
     assert g.resolve(DocRef(name="Nghị định", year="2019")) == "B"
+
+
+def test_moi_dieu_co_muc_tieu_rieng():
+    """"LUẬT SỬA ĐỔI 37 LUẬT LIÊN QUAN ĐẾN QUY HOẠCH": mỗi Điều sửa một luật khác.
+    Lấy một mục tiêu chung cho cả văn bản thì 3.308/5.760 cạnh đổ nhầm chỗ."""
+    a = _doc("A", "Luat-Giao-thong-duong-bo-2008-1", "Điều 8. Hành vi cấm\nNội dung.")
+    b = _doc("B", "Luat-Bao-ve-moi-truong-2014-2", "Điều 8. Điều kiện\nNội dung.")
+    sua = _doc(
+        "S",
+        "Luat-sua-doi-cac-Luat-lien-quan-quy-hoach-2018-3",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Luật Giao thông đường bộ\n"
+        "1. Sửa đổi Điều 8 như sau:\n“Nội dung giao thông.”\n"
+        "Điều 2. Sửa đổi, bổ sung một số điều của Luật Bảo vệ môi trường\n"
+        "1. Sửa đổi Điều 8 như sau:\n“Nội dung môi trường.”\n",
+    )
+    g = LegalGraph()
+    g.build([a, b, sua])
+    assert [x.src_article for x in g.amendments_of("A", "8")] == ["1"]
+    assert [x.src_article for x in g.amendments_of("B", "8")] == ["2"]
+    assert "giao thông" in sua.passage[g.amendments_of("A", "8")[0].start : g.amendments_of("A", "8")[0].end]
+
+
+def test_dieu_khong_khai_muc_tieu_thi_dung_muc_tieu_tieu_de():
+    g, docs = _graph()
+    assert g.amendments_of("GOC", "127")[0].src_doc_id == "SUA"
+
+
+def test_dieu_khai_muc_tieu_tra_truot_thi_bo_han():
+    """Rơi về mục tiêu chung là gán nhầm sang văn bản khác — tệ hơn mất cạnh."""
+    a = _doc("A", "Luat-Giao-thong-duong-bo-2008-1", "Điều 8. Hành vi cấm\nNội dung.")
+    sua = _doc(
+        "S",
+        "Luat-sua-doi-cac-Luat-lien-quan-quy-hoach-2018-3",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Luật Giao thông đường bộ\n"
+        "1. Sửa đổi Điều 8 như sau:\n“Nội dung giao thông.”\n"
+        "Điều 2. Sửa đổi, bổ sung một số điều của Luật Không Có Trong Corpus\n"
+        "1. Sửa đổi Điều 8 như sau:\n“Nội dung khác.”\n",
+    )
+    g = LegalGraph()
+    g.build([a, sua])
+    assert [x.src_article for x in g.amendments_of("A", "8")] == ["1"]
