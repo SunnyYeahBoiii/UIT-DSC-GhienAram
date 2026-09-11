@@ -576,3 +576,100 @@ Cuối cùng: 5.971 cạnh, 4.851 cặp, 287 văn bản nguồn, 390 văn bản 
 `scripts/dump_graph.py` xuất graph ra `window.GRAPH` (~5,4 MB, 495 văn bản có cạnh) cho
 một trang xem: tìm văn bản, liệt kê Điều bị sửa, mở ra nguyên văn khoản sửa, bấm sang
 văn bản nguồn. Lỗi 14.6 tìm ra từ bảng xếp hạng trên trang này chứ không từ test.
+
+## 15. Retrieval — BM25 và cross-encoder rerank
+
+### 15.1 Weak gold: không có nhãn retrieval nào trong dữ liệu thi
+
+`train.json` chỉ có `question` + `answer`. Không có "câu này trúng văn bản nào". Muốn đo
+retrieval phải tự suy ra. Hai kênh, cố ý **không** dùng BM25 — gold suy từ đầu ra của
+chính retriever đang đo sẽ tự khẳng định nó.
+
+| kênh | cách suy | câu |
+|---|---|---:|
+| `nguyen_van` | 12 từ giữa answer, tìm nguyên văn trong text Chunk | 5.278 |
+| `so_hieu` | regex số hiệu trong answer → tra `Document.number` | — |
+| **hợp lại** | | **6.250/7.000 = 89,3%** |
+
+Chi tiết: `nguyen_van+so_hieu` 2.921 · `nguyen_van` 2.357 · `so_hieu` 972.
+Số doc/câu: 1→4.153, 2→1.187, 3→395, ≥4→304 (bản gốc + bản sửa đổi chép lại nguyên khoản).
+
+Lấy 12 từ **giữa** answer chứ không phải đầu: đầu answer là câu dẫn người viết soạn
+("Căn cứ khoản 3 Điều 17 Nghị định 90/2017/NĐ-CP...") — không có trong corpus, khớp vào
+đó là khớp vào văn phong.
+
+Gold ở mức **Document**, không phải Điều, và tính "trúng ít nhất một" → chỉ số **nới tay**.
+Dùng để so sánh các phương án với nhau thì tốt; đọc như xác suất retrieval đúng thì sai.
+
+### 15.2 Hai bệnh sau một con số "trượt@10"
+
+Thứ hạng gold trong pool 3.000 chunk (n=1.000):
+
+| ≤10 | 11-50 | 51+ | không với tới |
+|---:|---:|---:|---:|
+| 86,7% | 9,3%* | 3,6%* | **0,4%** |
+
+BM25 gần như luôn **tìm thấy** văn bản đúng (99,6%), chỉ **xếp sai hạng**. Hai bệnh cần
+hai thuốc khác nhau: không với tới cần biểu diễn khác (dense); xếp sai hạng cần chấm lại
+(rerank). Đo được 0,4% bệnh một, ~11% bệnh hai.
+
+Hệ quả: thay BM25 bằng bi-encoder mua tối đa 0,4 điểm recall với giá 568M params. Còn
+15,2 điểm (R@5 81,0% → R@50 96,2%) nằm sẵn trong top-50, chỉ cần sắp lại. → ADR: rerank,
+không dense.
+
+### 15.3 Cross-encoder rerank — số đo
+
+`AITeamVN/Vietnamese_Reranker` (XLM-R large, 567.755.777 params), **zero-shot**, pool 50,
+n=500, T4x2:
+
+| | R@1 | R@3 | R@5 | R@10 | R@20 | R@50 |
+|---|---:|---:|---:|---:|---:|---:|
+| BM25 | 56,4% | 74,6% | 81,0% | 88,4% | 94,0% | 96,2% |
+| +rerank | 75,2% | 89,4% | 92,0% | 94,2% | 96,0% | 96,2% |
+| chênh | +18,8 | +14,8 | **+11,0** | +5,8 | +2,0 | **0,0** |
+
+Trần (gold có trong pool 50) = 96,2%. Rerank ăn khoảng trống (trần − BM25):
+k=1 **47%** · k=5 **72%** · k=10 **74%**.
+
+Ba phép kiểm nội tại:
+
+- `chênh R@50 = 0,0` **đúng bằng 0** — rerank sắp lại pool 50, không thêm ứng viên, nên
+  tập 50 doc đầu không đổi. Lệch khỏi 0 là code sai.
+- `+rerank R@50 = trần` — bám khít.
+- rerank@1 (75,2%) > BM25@3 (74,6%): ứng viên số 1 sau chấm lại tốt hơn ba ứng viên đầu
+  của BM25 gộp. Với generation đó là khác biệt giữa nhồi 3 Evidence và nhồi 1.
+
+Chi phí 1,58 s/câu → 1.000 câu ≈ 26 phút. Params: Qwen 3B (3,09B) + reranker (0,568B)
+= 3,66B, còn trống 340M dưới trần 4B.
+
+### 15.4 Chỗ nghẽn đã dịch từ xếp hạng sang trần
+
+Phân rã 500 câu ở k=5:
+
+| | câu | % |
+|---|---:|---:|
+| trúng@5 sau rerank | 460 | 92,0% |
+| trong pool nhưng rerank chưa vớt | 21 | 4,2% |
+| gold không trong pool 50 | 19 | **3,8%** |
+
+Hai nhóm trượt gần bằng nhau. Trước rerank, 100% khoảng trống là lỗi xếp hạng; sau rerank
+gần một nửa là lỗi pool. Nên bước tiếp theo là quét pool (nâng trần), không phải đổi
+reranker.
+
+### 15.5 Cảnh báo: số 15.3 chốt trên train
+
+Ngưỡng pool/K đang chốt trên chính tập dùng để quan sát. `warmup.json` (500 câu có
+Reference answer, không nằm trong train, dựng được gold 456/500 = 91,2%) là tập độc lập
+để kiểm lại — BM25 thuần trên đó R@1 54,2% · R@5 83,1% · R@10 89,5%, lệch ≤1,9 điểm so
+với train, nên quy trình nhãn tái lập được. Dòng `chênh` trên warmup **chưa đo**.
+
+### 15.6 Tái lập
+
+```bash
+./scripts/push_dataset.sh                    # codebase -> Kaggle Dataset
+./scripts/push_kernel.sh                     # notebook -> Kaggle (T4x2)
+# hoặc trên máy có GPU:
+PYTHONPATH=src python scripts/build_gold.py
+PYTHONPATH=src python scripts/eval_retrieval.py 1000 3000
+PYTHONPATH=src python scripts/eval_rerank.py --model models/Vietnamese_Reranker --pool 50
+```
