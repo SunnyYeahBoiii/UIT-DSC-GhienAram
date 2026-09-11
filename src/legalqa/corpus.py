@@ -19,11 +19,14 @@ from typing import Iterator
 WRAP_RE = re.compile(r"[ \t]*\r\n*[ \t]*")
 ENDPUNCT = ".:;?!…"
 
+# Dòng đánh dấu nội dung bị thuvienphapluat lược bớt — 85.602 dòng, rác thuần
+_ELIDED = {"...", "....", ".....", "…", "..…", "-", "--", "---"}
+
 # Dòng chỉ chứa mỗi số khoản/điểm ("1.", "a)") rồi xuống dòng — 1,1% số dòng.
 # Một dấu đánh số đứng một mình không bao giờ là đoạn riêng, nên nối chắc chắn đúng.
 # Trường hợp này dùng "\n\n" thuần nên vòng gỡ \r ở trên không bắt được.
 LONE_MARKER_RE = re.compile(
-    r"^([ \t]*(?:\d{1,3}[a-zđ]?|[a-zđ])[.)])[ \t]*\n\s*\n[ \t]*(?=\S)", re.MULTILINE
+    r"^([ \t]*(?:\d{1,3}[a-zđ]?|[a-zđ])[.)])[ \t]*\n+[ \t]*(?=\S)", re.MULTILINE
 )
 
 # Điều đứng đầu dòng: "Điều 12.", "Điều 12a.", "Điều 12 ." — bắt cả biến thể thiếu dấu chấm
@@ -32,7 +35,14 @@ DIEU_RE = re.compile(r"^[ \t]*(Điều\s+(\d+[a-zđ]?))\s*[.\-:]?\s*", re.MULTIL
 # Slug thuvienphapluat luôn kết thúc bằng "-<id số>"; phần đầu là tên văn bản viết không dấu
 SLUG_TAIL_RE = re.compile(r"-\d+$")
 
-# Loại văn bản nhận diện được từ đầu Slug, map sang dạng có dấu
+# URL thuvienphapluat mang đúng Slug đó: ".../Ten-van-ban-<id>.aspx".
+# 100% Document có link, và cả 1.105 Document thiếu trường `name` đều lấy lại được
+# Slug từ đây — Slug không mất, chỉ nằm chỗ khác.
+LINK_SLUG_RE = re.compile(r"/([^/]+?-\d+)\.aspx")
+
+# Loại văn bản nhận diện được từ đầu Slug, map sang dạng có dấu.
+# Thứ tự quan trọng: tiền tố dài phải đứng trước tiền tố là tiền tố của nó
+# ("Thong-tu-lien-tich" trước "Thong-tu").
 SLUG_PREFIX = {
     "Nghi-dinh": "Nghị định",
     "Thong-tu-lien-tich": "Thông tư liên tịch",
@@ -41,10 +51,21 @@ SLUG_PREFIX = {
     "Nghi-quyet": "Nghị quyết",
     "Phap-lenh": "Pháp lệnh",
     "Cong-van": "Công văn",
+    "Cong-dien": "Công điện",
     "Chi-thi": "Chỉ thị",
     "Bo-luat": "Bộ luật",
     "Hien-phap": "Hiến pháp",
+    "Van-ban-hop-nhat": "Văn bản hợp nhất",
+    "Huong-dan": "Hướng dẫn",
+    "Thong-bao": "Thông báo",
+    "Ke-hoach": "Kế hoạch",
+    "Quy-dinh": "Quy định",
+    "Dieu-le": "Điều lệ",
+    "Cong-uoc": "Công ước",
     "Luat": "Luật",
+    # 256 TCVN + 119 QCVN: tiêu chuẩn/quy chuẩn kỹ thuật, không có "Điều" nào
+    "TCVN": "TCVN",
+    "QCVN": "QCVN",
 }
 
 # Tiêu đề văn bản nằm trên dòng RIÊNG giữa Passage (sau tên cơ quan, số hiệu, ngày),
@@ -52,7 +73,9 @@ SLUG_PREFIX = {
 # đường lui Slug không dấu.
 TITLE_LINE_RE = re.compile(
     r"^[ \t]*((?:BỘ LUẬT|NGHỊ ĐỊNH|THÔNG TƯ LIÊN TỊCH|THÔNG TƯ|QUYẾT ĐỊNH|"
-    r"NGHỊ QUYẾT|PHÁP LỆNH|CÔNG VĂN|CHỈ THỊ|HIẾN PHÁP|LUẬT)[^\n]{0,200})$",
+    r"NGHỊ QUYẾT|PHÁP LỆNH|CÔNG VĂN|CÔNG ĐIỆN|CHỈ THỊ|HIẾN PHÁP|"
+    r"VĂN BẢN HỢP NHẤT|TIÊU CHUẨN QUỐC GIA|QUY CHUẨN KỸ THUẬT QUỐC GIA|"
+    r"TCVN|QCVN|LUẬT)[^\n]{0,200})$",
     re.MULTILINE,
 )
 
@@ -112,6 +135,13 @@ def dewrap_passage(passage: str) -> str:
     đều trỏ vào Passage sau bước này. Nếu không gỡ, 75,7% tiêu đề Điều bị cắt đôi
     ("Điều 2. Tổ chức" | "thực hiện") nên Article.heading và Document.title đều sai.
     """
+    passage = _unwrap_cr(passage)
+    passage = _collapse_blank_lines(passage)
+    return LONE_MARKER_RE.sub(r"\1 ", passage)
+
+
+def _unwrap_cr(passage: str) -> str:
+    """Vòng 1: gỡ wrap mềm `\\r\\n\\n` của trình crawl."""
     if "\r" in passage:
         out: list[str] = []
         pos = 0
@@ -127,8 +157,32 @@ def dewrap_passage(passage: str) -> str:
                 out.append(" ")
         out.append(passage[pos:])
         passage = "".join(out)
+    return passage
 
-    return LONE_MARKER_RE.sub(r"\1 ", passage)
+
+def _collapse_blank_lines(passage: str) -> str:
+    """Vòng 3: bỏ dòng trống, dòng `...` và space thừa ở hai đầu mỗi dòng.
+
+    Đo trên 8.512 Document: 59,3% số dòng là dòng TRỐNG (5,7 triệu dòng) — thuần
+    trình bày HTML, không mang thông tin. Ngược lại xuống dòng đơn PHẢI giữ:
+    95,8% Document dùng đầu dòng để phân khoản, đó là cấu trúc model cần để trích
+    đúng khoản.
+
+    Dòng chỉ chứa `...` (85.602 dòng) là chỗ thuvienphapluat lược nội dung cho người
+    chưa trả phí — bỏ đi, để lại thì model học sinh ra `...` giữa câu trả lời.
+    """
+    keep = [
+        line
+        for raw in passage.split("\n")
+        if (line := raw.strip()) and line not in _ELIDED
+    ]
+    return "\n".join(keep)
+
+
+def slug_from_link(link: str) -> str:
+    """Lấy Slug từ URL thuvienphapluat. Rỗng nếu URL không đúng dạng."""
+    m = LINK_SLUG_RE.search(link)
+    return m.group(1) if m else ""
 
 
 def title_from_slug(slug: str) -> str:
@@ -174,11 +228,13 @@ def load_document(path: Path) -> Document | None:
     passage = dewrap_passage(str(raw.get("passage") or ""))
     if not passage.strip():
         return None
+    link = str(raw.get("link") or "")
     doc = Document(
         doc_id=str(raw.get("id") or path.stem),
         passage=passage,
-        slug=str(raw.get("name") or ""),
-        link=str(raw.get("link") or ""),
+        # 13,0% Document thiếu trường `name`, nhưng link luôn có và mang đúng Slug đó
+        slug=str(raw.get("name") or "") or slug_from_link(link),
+        link=link,
     )
     doc.articles = parse_articles(passage)
     return doc

@@ -42,6 +42,10 @@ def clean_corpus() -> dict[str, int]:
                 stat["co_so_hieu"] += 1
             if not doc.slug:
                 stat["thieu_slug"] += 1
+            stat["ky_tu"] += len(doc.passage)
+            stat["dong_rong"] += sum(
+                1 for line in doc.passage.split("\n") if not line.strip()
+            )
             f.write(
                 json.dumps(
                     {
@@ -129,7 +133,9 @@ def main() -> None:
     print(f"  Dieu tach duoc      {c['article']:,}")
     print(f"  Document khong Dieu {c['doc_khong_dieu']:,} = {100*c['doc_khong_dieu']/c['doc']:.1f}%")
     print(f"  co so hieu          {c['co_so_hieu']:,} = {100*c['co_so_hieu']/c['doc']:.1f}%")
-    print(f"  thieu Slug          {c['thieu_slug']:,} = {100*c['thieu_slug']/c['doc']:.1f}%")
+    print(f"  dong trong con lai  {c['dong_rong']:,}")
+    print(f"  ky tu               {c['ky_tu']:,}")
+    print(f"  thieu Slug          {c.get('thieu_slug', 0):,}")
     print(f"  -> {OUT_DIR/'corpus.jsonl'}  ({c['byte_out']/1e6:.1f} MB)")
 
     w = _count_wrap()

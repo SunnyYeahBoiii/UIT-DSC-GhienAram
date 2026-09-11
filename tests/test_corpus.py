@@ -42,18 +42,18 @@ def test_dewrap_noi_wrap_mem():
     assert dewrap_passage("CỘNG\r\n\n  HÒA XÃ HỘI") == "CỘNG HÒA XÃ HỘI"
 
 
-def test_dewrap_giu_ngat_doan_that():
-    """"\\n\\n" thuần giữ nguyên — chỉ 50,7% nối giữa câu, mơ hồ nên không đụng."""
+def test_dewrap_bo_dong_trong_giu_xuong_dong():
+    """Dòng trống bị bỏ (59,3% số dòng), xuống dòng đơn giữ nguyên — nó phân khoản."""
     from legalqa.corpus import dewrap_passage
 
-    assert dewrap_passage("Điều 1. Phạm vi\n\n1. Khoản một") == "Điều 1. Phạm vi\n\n1. Khoản một"
+    assert dewrap_passage("Điều 1. Phạm vi\n\n1. Khoản một") == "Điều 1. Phạm vi\n1. Khoản một"
 
 
 def test_dewrap_giu_ngat_sau_dau_cau():
-    """Wrap ngay sau dấu kết câu + trước chữ hoa = ngắt đoạn thật, không nối liền."""
+    """Wrap sau dấu kết câu + trước chữ hoa = ngắt đoạn thật, xuống dòng chứ không nối."""
     from legalqa.corpus import dewrap_passage
 
-    assert dewrap_passage("nghề nghiệp;\r\n\nCăn cứ Nghị định") == "nghề nghiệp;\n\nCăn cứ Nghị định"
+    assert dewrap_passage("nghề nghiệp;\r\n\nCăn cứ Nghị định") == "nghề nghiệp;\nCăn cứ Nghị định"
 
 
 def test_dewrap_khong_mat_chu():
@@ -80,13 +80,34 @@ def test_dewrap_gop_so_khoan_dung_mot_minh():
     """Dòng chỉ có "1." rồi "\\n\\n" — số khoản không bao giờ là đoạn riêng, phải nối."""
     from legalqa.corpus import dewrap_passage
 
-    assert dewrap_passage("Điều 32. A\n\n1.\n\nCăn cứ vào") == "Điều 32. A\n\n1. Căn cứ vào"
-    assert dewrap_passage("Mở đầu\n\na)\n\nNội dung") == "Mở đầu\n\na) Nội dung"
+    assert dewrap_passage("Điều 32. A\n\n1.\n\nCăn cứ vào") == "Điều 32. A\n1. Căn cứ vào"
+    assert dewrap_passage("Mở đầu\n\na)\n\nNội dung") == "Mở đầu\na) Nội dung"
 
 
 def test_dewrap_khong_gop_khoan_binh_thuong():
     """Khoản đã có nội dung cùng dòng thì giữ nguyên ranh giới đoạn."""
     from legalqa.corpus import dewrap_passage
 
-    raw = "Điều 1. A\n\n1. Khoản một\n\n2. Khoản hai"
-    assert dewrap_passage(raw) == raw
+    assert (
+        dewrap_passage("Điều 1. A\n\n1. Khoản một\n\n2. Khoản hai")
+        == "Điều 1. A\n1. Khoản một\n2. Khoản hai"
+    )
+
+
+def test_dewrap_bo_dong_chi_chua_dau_cham():
+    """Dòng `...` là chỗ thuvienphapluat lược nội dung — 85.602 dòng, phải bỏ."""
+    from legalqa.corpus import dewrap_passage
+
+    assert dewrap_passage("Cấp 1: nhẹ.\n\n...\n\n...\n\nCấp 3: nặng.") == (
+        "Cấp 1: nhẹ.\nCấp 3: nặng."
+    )
+
+
+def test_dewrap_khong_con_dong_trong_hay_space_thua():
+    """Sau clean: không dòng trống, không space đầu/cuối dòng, không \\r."""
+    from legalqa.corpus import dewrap_passage
+
+    out = dewrap_passage("  BỘ Y TẾ  \r\n\n  Số: 1\n\n\n\n   THÔNG TƯ   \n\n")
+    assert "\r" not in out
+    assert "\n\n" not in out
+    assert all(line == line.strip() and line for line in out.split("\n"))

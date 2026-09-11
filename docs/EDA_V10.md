@@ -254,3 +254,42 @@ Materialize sẵn để bước index/SFT không parse lại 8.532 file JSON.
 Trùng question thì giữ bản answer dài nhất (bản ngắn thường là trích lược).
 
 Xác minh trên 179 Document lấy ngẫu nhiên: 0 offset Điều sai, 0 ký tự `\r` còn sót.
+
+### Dòng trống và dòng bị lược
+
+Sau hai vòng trên, đo lại toàn corpus thấy phần rác lớn nhất vẫn còn nguyên:
+
+| Loại | Số lượng | Tỷ lệ |
+|---|---:|---:|
+| Dòng **trống** | 5.703.199 | **59,3% số dòng** |
+| Dòng chỉ chứa `...` | 85.602 | 0,9% |
+| Dòng thừa space đầu/cuối | 139.629 | 1,5% |
+| Khối lặp nguyên văn nửa Passage | 0 | 0% |
+
+Dòng trống là trình bày HTML thuần, không mang thông tin → bỏ. Dòng `...` là chỗ
+thuvienphapluat lược nội dung cho người chưa trả phí → bỏ, để lại thì model học sinh
+ra `...` giữa câu trả lời.
+
+**Xuống dòng đơn thì GIỮ.** 95,8% Document dùng đầu dòng để phân khoản; đó là cấu trúc
+model cần để trích đúng khoản. Xoá hết `\n` là phá chính thứ khiến small-to-big hoạt động.
+
+Kết quả: 343.156.199 → **336.323.568** ký tự, dòng trống 5,7 triệu → **0**.
+
+### Xuống dòng còn lại KHÔNG phải rác
+
+40,0% số dòng ngắn hơn 25 ký tự, và 607/8.512 Document (7,1%) có hơn 60% số dòng như
+vậy. Đó là **ô bảng** HTML, mỗi ô một dòng — ví dụ `TCVN-13268-1-2021` là bảng phân cấp
+sâu bệnh, các dòng `Sâu cuốn lá nhỏ` / `Cnaphalocrocis medinalis` / `50 con/m2` là ba ô
+khác nhau của cùng một hàng. Nối chúng lại là làm hỏng dữ liệu, không phải làm sạch.
+
+Tương tự, 411/8.512 Document (4,8%) chứa tổng cộng 25.935 khối nội dung đã bị lược mất
+từ nguồn. Đó là lỗ hổng của corpus, không sửa được ở tầng clean.
+
+### Slug lấy lại được từ link
+
+EDA ban đầu ghi "1.125/8.532 Document không có Slug" như mất mát không cứu được — sai.
+`link` có ở **100% Document** và chứa đúng chuỗi Slug đó (`.../Ten-van-ban-<id>.aspx`).
+Đối chiếu 6.954 Document có cả hai: khớp hoàn toàn.
+
+`slug_from_link()` lấp đủ 1.105 Document thiếu trường `name`. Hệ quả: Document title
+rỗng (`"Văn bản 100050"`) **11,0% → 0,0%**.

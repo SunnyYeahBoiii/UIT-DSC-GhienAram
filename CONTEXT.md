@@ -16,15 +16,22 @@ Toàn bộ nội dung text của một Document. Là trường thô, không ph�
 _Avoid_: content, body, text
 
 **Slug**:
-Trường `name` của Document — chuỗi URL không dấu do thuvienphapluat.vn sinh, ví dụ
-`Thong-tu-17-2022-TT-BGTVT-...-522401`. **Không phải** tên văn bản đọc được và không tồn tại ở
-1.125/8.532 Document.
+Chuỗi URL không dấu do thuvienphapluat.vn sinh, ví dụ `Thong-tu-17-2022-TT-BGTVT-...-522401`.
+**Không phải** tên văn bản đọc được. Nằm ở trường `name`, thiếu ở 1.105/8.512 Document —
+nhưng khi thiếu thì lấy lại được từ `link`, vốn chứa đúng chuỗi đó và có ở 100% Document.
 _Avoid_: name, document name, title
 
 **Document title**:
-Tên văn bản tiếng Việt có dấu, phải được **suy ra** từ Slug hoặc từ dòng đầu Passage. Là thứ duy nhất
-được phép hiển thị cho người đọc hoặc đưa vào prompt.
+Tên văn bản tiếng Việt có dấu, **suy ra** từ dòng tiêu đề trong Passage; khi Passage không có
+thì lùi về Slug (mất dấu, chỉ đủ để định danh). Là thứ duy nhất được phép hiển thị cho người
+đọc hoặc đưa vào prompt.
 _Avoid_: name, slug
+
+**Số hiệu văn bản**:
+Mã định danh chính thức, ví dụ `27/2017/TT-BLĐTBXH`. Lấy từ dòng `Số:` đầu Passage, có ở
+90,8% Document. Đây là khoá đối chiếu Citation với Document trong legal graph — Slug và
+Document title đều không dùng được cho việc đó.
+_Avoid_: id, doc_id (đó là mã file, khác hẳn)
 
 **Reference answer**:
 Câu trả lời do BTC cung cấp trong `train.json` / `warmup.json`. Là mục tiêu của METEOR, không phải
