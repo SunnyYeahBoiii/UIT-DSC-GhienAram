@@ -171,3 +171,54 @@ def test_so_hieu_ngoai_corpus_thi_bo_qua():
     g, docs = _corpus_hop()
     seed = Evidence("A", "x", "1", "Theo Điều 5 Nghị định 999/1999/NĐ-CP.")
     assert expand_with_graph(g, docs, seed) == []
+
+
+# ---- mục tiêu số nhiều -----------------------------------------------------
+
+
+def test_tach_muc_tieu_khi_liet_ke_song_song():
+    from legalqa.graph import _tach_muc_tieu
+
+    assert _tach_muc_tieu(
+        "LUẬT THUẾ GIÁ TRỊ GIA TĂNG, LUẬT THUẾ TIÊU THỤ ĐẶC BIỆT VÀ LUẬT QUẢN LÝ THUẾ"
+    ) == ["LUẬT THUẾ GIÁ TRỊ GIA TĂNG", "LUẬT THUẾ TIÊU THỤ ĐẶC BIỆT", "LUẬT QUẢN LÝ THUẾ"]
+
+
+def test_khong_tach_o_ten_loai_khong_phai_liet_ke():
+    """"NGHỊ ĐỊNH ... HƯỚNG DẪN LUẬT CHĂN NUÔI" có MỘT mục tiêu. Cắt ở mọi tên loại
+    thì sinh cạnh nghị-định-sửa-luật không có thật — 51 ca hỏng đúng kiểu này."""
+    from legalqa.graph import _tach_muc_tieu
+
+    t = "NGHỊ ĐỊNH QUY ĐỊNH CHI TIẾT VÀ HƯỚNG DẪN THI HÀNH LUẬT CHĂN NUÔI"
+    assert _tach_muc_tieu(t) == [t]
+
+
+def test_dau_phay_trong_ten_khong_phai_cho_tach():
+    from legalqa.graph import _tach_muc_tieu
+
+    assert _tach_muc_tieu("LUẬT CÁN BỘ, CÔNG CHỨC VÀ LUẬT VIÊN CHỨC") == [
+        "LUẬT CÁN BỘ, CÔNG CHỨC",
+        "LUẬT VIÊN CHỨC",
+    ]
+
+
+def test_van_ban_sua_nhieu_luat_sinh_canh_cho_tung_luat():
+    goc1 = _doc("L1", "Luat-Dau-tu-cong-2019-1", "Điều 6. Phân loại\nNội dung.")
+    goc2 = _doc("L2", "Luat-Nha-o-2014-2", "Điều 9. Công nhận\nNội dung.")
+    sua = _doc(
+        "S",
+        "Luat-sua-doi-Luat-Dau-tu-cong-Luat-Nha-o-2024-3",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Luật Đầu tư công, Luật Nhà ở\n"
+        "1. Sửa đổi Điều 6 như sau:\n“Nội dung mới.”\n",
+    )
+    g = LegalGraph()
+    g.build([goc1, goc2, sua])
+    assert g.amendments_of("L1", "6")[0].src_khoan == "1"
+    assert g.amendments_of("L2", "6")[0].src_khoan == "1"
+
+
+def test_truy_van_qua_ngan_khong_khop_bua():
+    """Mảnh cắt cụt "Thông tư" là tập con của hàng trăm Slug — phải trả None."""
+    g, _ = _corpus_hop()
+    assert g.resolve(DocRef(name="Nghị định")) is None
+    assert g.resolve(DocRef(name="Nghị định", year="2019")) == "B"

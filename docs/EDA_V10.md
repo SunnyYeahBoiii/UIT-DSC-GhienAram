@@ -386,10 +386,10 @@ số từ thừa ít nhất nên `Luật Các tổ chức tín dụng sửa đ�
 | | |
 |---|---|
 | Văn bản sửa đổi nhận diện được | 349 (279 tiêu đề + 70 heading Điều) |
-| Trong đó tra được mục tiêu | 298 = 85,4% |
-| Văn bản thực sự sinh cạnh | 247 |
-| Cặp (văn bản, Điều) bị sửa | 3.664 |
-| Cạnh (khoản → Điều) | 5.105 |
+| Trong đó tra được mục tiêu | 305 = 87,4% |
+| Văn bản sửa nhiều văn bản cùng lúc | 19 |
+| Cặp (văn bản, Điều) bị sửa | 4.183 |
+| Cạnh (khoản → Điều) | 5.760 |
 | Điều bị >1 khoản sửa | 812 |
 | Độ dài khoản sửa | p50 596 ký tự, p90 2.418, max 16.600 |
 
@@ -412,3 +412,40 @@ Kiểm ca 166937 đầu-cuối: `resolve("Luật Các tổ chức tín dụng", 
 `amendments_of("26667","127")` → `[('157517','1','20')]`; Evidence sinh thêm mang nhãn
 `Sửa đổi Điều 127 của LUẬT CÁC TỔ CHỨC TÍN DỤNG — khoản 20 Điều 1` và chứa trọn cả điểm b
 lẫn khoản 5 mới.
+
+### 14.4 Mổ 51 ca không tra được mục tiêu
+
+Đo từng ca một, không suy đoán:
+
+| Nguyên nhân | Số ca | Cứu được? |
+|---|---:|---|
+| Văn bản đích **vắng khỏi corpus** | 31 | Không. Giới hạn dữ liệu. |
+| Số hiệu đích chỉ xuất hiện trong Slug văn bản khác | 7 | **Không nên** — xem dưới |
+| Tiêu đề liệt kê nhiều mục tiêu | 8 | Có |
+| Mục tiêu đơn mà vẫn trượt | 5 | 4 ca do `before_year` |
+
+**7 ca số hiệu: bẫy đã tránh.** Ý tưởng "số hiệu không có trong index thì tìm Slug nào
+chứa nó" nghe hợp lý, nhưng đo ra 4/7 ứng viên là **một bản sửa đổi KHÁC** của cùng văn
+bản gốc (105589 và 152569 cùng sửa Thông tư 59/2021/TT-BQP, bản gốc thì không có trong
+corpus) — vá kiểu đó sinh cạnh sửa-đổi-trỏ-sang-bản-sửa-đổi. Thêm nữa `02/2017/TT-BTC`
+là chuỗi con của `102/2017/TT-BTC`. Bỏ.
+
+**8 ca liệt kê: chỉ cắt khi song song.** Cắt ở mọi tên loại văn bản làm số ca đa mục tiêu
+nổ từ 8 lên 65, phần lớn hỏng cùng một kiểu: `NGHỊ ĐỊNH ... HƯỚNG DẪN LUẬT CHĂN NUÔI` bị
+hiểu là sửa cả Luật Chăn nuôi. Chỉ cắt ở tên loại đứng ngay sau `,` hoặc `và` → 19 ca đa
+mục tiêu, và `LUẬT SỬA ĐỔI ... LUẬT ĐẦU TƯ CÔNG, LUẬT ĐẦU TƯ THEO PHƯƠNG THỨC ĐỐI TÁC
+CÔNG TƯ, LUẬT ĐẦU TƯ, LUẬT NHÀ Ở, LUẬT ĐẤU THẦU...` ra đúng 6 luật đích.
+
+**`before_year` dùng `>` chứ không `>=`:** năm trong Slug bản sửa đổi đôi khi là năm của
+bản GỐC (`Phap-lenh-sua-doi-Phap-lenh-ngoai-hoi-2005`). Cùng năm vẫn an toàn vì mục tiêu
+trỏ vào chính nó đã bị loại riêng.
+
+### 14.5 Hai chốt chặn khớp bừa
+
+Đo 83 mục tiêu tra qua kênh tên: số từ thừa p50 = 1, p90 = 5, max 11. Đuôi phân bố toàn
+rác cùng một dạng — mảnh cắt cụt còn 2 từ (`Thông tư số`, `Quyết định số`) là tập con của
+hàng trăm Slug nên khớp vào văn bản bất kỳ.
+
+- **Truy vấn < 3 từ thì trả None**, trừ khi có năm — năm thu hẹp đủ để 2 từ vẫn xác định được.
+- **Bỏ ứng viên thừa > 6 từ**: `LUẬT SỬA ĐỔI, BỔ SUNG MỘT SỐ ĐIỀU CỦA` từng khớp vào
+  `Nghị định 51/2002 hướng dẫn Luật Báo chí` với 11 từ thừa.

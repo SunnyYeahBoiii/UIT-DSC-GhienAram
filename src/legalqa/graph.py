@@ -73,6 +73,16 @@ DIEU_TRONG_CAU_RE = re.compile(r"Điều\s+(\d{1,3}[a-zđ]?)")
 # Đuôi "số 12/2020/TT-BGTVT ngày 29 tháng 5 năm 2020 của Bộ trưởng..." trong tên mục tiêu
 _DUOI_SO_RE = re.compile(r"\s+(?:số|SỐ)\s+.*$")
 
+# Một văn bản sửa nhiều luật cùng lúc: "LUẬT THUẾ GIÁ TRỊ GIA TĂNG, LUẬT THUẾ TIÊU THỤ
+# ĐẶC BIỆT VÀ LUẬT QUẢN LÝ THUẾ" = 3 mục tiêu. Chỉ cắt ở tên loại đứng ngay sau "," hoặc
+# "và" — tức đang LIỆT KÊ SONG SONG. Cắt ở mọi tên loại thì "NGHỊ ĐỊNH ... HƯỚNG DẪN LUẬT
+# CHĂN NUÔI" thành hai mục tiêu và sinh cạnh nghị định-sửa-luật không có thật: thử cách đó
+# cho 65 ca đa mục tiêu, phần lớn hỏng đúng kiểu này.
+_MOC_LOAI_RE = re.compile(rf"(?<=[,\s])(?:{_LOAI_HOA}|{_LOAI})\b")
+_NOI_RE = re.compile(r"(?:,|\bvà|\bVÀ)\s*$")
+# Từ nối dính vào đuôi mảnh trước khi cắt — để lại thì tập từ thừa một từ "va".
+_DUOI_NOI_RE = re.compile(r"[\s,;]*(?:và|VÀ)?[\s,;]*$")
+
 
 def _bo_dau(s: str) -> str:
     s = unicodedata.normalize("NFD", s)
@@ -184,15 +194,17 @@ class LegalGraph:
     def _build_amendments(self, docs: list[Document]) -> None:
         self._amend = defaultdict(list)
         for d in docs:
-            target = self._amend_target(d)
-            if target is None or target == d.doc_id:
+            targets = self._amend_target(d)
+            if not targets:
                 continue
             for art in d.articles:
                 body = d.passage[art.start : art.end]
                 for m in KHOAN_AMEND_RE.finditer(body):
                     start = art.start + m.start()
                     end = art.start + _khoan_end(body, m.group(1), m.start())
-                    for dieu in dict.fromkeys(DIEU_TRONG_CAU_RE.findall(m.group(2))):
+                    dieu_list = dict.fromkeys(DIEU_TRONG_CAU_RE.findall(m.group(2)))
+                    for target in targets:
+                      for dieu in dieu_list:
                         self._amend[(target, dieu)].append(
                             Amendment(
                                 src_doc_id=d.doc_id,
@@ -205,8 +217,10 @@ class LegalGraph:
                         )
         self._amend = dict(self._amend)
 
-    def _amend_target(self, doc: Document) -> str | None:
-        """Văn bản mà `doc` sửa đổi. Tìm ở tiêu đề trước, rồi heading 3 Điều đầu."""
+    def _amend_target(self, doc: Document) -> list[str]:
+        """Các văn bản mà `doc` sửa đổi. Tìm ở tiêu đề trước, rồi heading 3 Điều đầu.
+
+        Trả list vì 8 văn bản sửa nhiều luật trong cùng một tiêu đề."""
         m = TITLE_AMEND_RE.search(doc.title)
         ten = m.group(1) if m else None
         if ten is None:
@@ -216,8 +230,14 @@ class LegalGraph:
                     ten = hm.group(1)
                     break
         if ten is None:
-            return None
-        return self.resolve(_doc_ref(ten), before_year=_nam_slug(doc.slug))
+            return []
+        by = _nam_slug(doc.slug)
+        out = []
+        for phan in _tach_muc_tieu(ten):
+            t = self.resolve(_doc_ref(phan), before_year=by)
+            if t and t != doc.doc_id and t not in out:
+                out.append(t)
+        return out
 
     # ---- tra ----------------------------------------------------------------
 
@@ -233,15 +253,25 @@ class LegalGraph:
             return None
         ten = ref.name if SO_HIEU_RE.search(ref.name) else _DUOI_SO_RE.sub("", ref.name)
         q = _tu(ten)
-        if not q:
+        # Truy vấn < 3 từ ("Thông tư", "Quyết định") là mảnh cắt cụt, không phải tên:
+        # tập từ quá nhỏ nên là con của hàng trăm Slug và khớp bừa vào văn bản bất kỳ.
+        # Chỉ tha khi có năm — năm thu hẹp đủ để 2 từ vẫn xác định được văn bản.
+        if not q or (len(q) < 3 and not ref.year):
             return None
         best: tuple[tuple[int, int], str] | None = None
         for toks, year, doc_id in self._by_tokens:
             if ref.year and year and year != ref.year:
                 continue
-            if before_year and year and year >= before_year:
+            # `>` chứ không `>=`: năm trong Slug bản sửa đổi đôi khi LÀ năm bản gốc
+            # ("Phap-lenh-sua-doi-Phap-lenh-ngoai-hoi-2005"). Khớp cùng năm vẫn an toàn
+            # vì `_amend_target` đã loại văn bản trỏ vào chính nó.
+            if before_year and year and year > before_year:
                 continue
             if not q <= toks:
+                continue
+            # Thừa > 6 từ nghĩa là Slug nói về chuyện khác mà tình cờ chứa đủ tập từ
+            # ("LUẬT SỬA ĐỔI..." khớp "Nghị định hướng dẫn Luật Báo chí"). p90 chỉ 5 từ.
+            if len(toks - q) > 6:
                 continue
             # ít từ thừa nhất = khớp chặt nhất; hoà thì lấy bản mới hơn
             key = (len(toks - q), -int(year or 0))
@@ -354,3 +384,15 @@ def _article_evidence(doc: Document | None, number: str) -> Evidence | None:
                 relation="Được dẫn chiếu",
             )
     return None
+
+
+def _tach_muc_tieu(ten: str) -> list[str]:
+    """Cắt chuỗi mục tiêu thành từng văn bản một. Chỉ cắt khi có >=2 tên loại văn bản —
+    chuỗi một mục tiêu giữ nguyên để không đụng vào 290 ca vốn đã đúng."""
+    moc = [0] + [m.start() for m in _MOC_LOAI_RE.finditer(ten) if _NOI_RE.search(ten[: m.start()])]
+    if len(moc) < 2:
+        return [ten]
+    moc.append(len(ten))
+    phan = [_DUOI_NOI_RE.sub("", ten[a:b]).strip(" ,;") for a, b in zip(moc, moc[1:])]
+    # Mảnh một từ ("LUẬT") là rác cắt hụt: tập từ quá nhỏ nên khớp bừa vào văn bản bất kỳ.
+    return [x for x in phan if len(x.split()) >= 2] or [ten]
