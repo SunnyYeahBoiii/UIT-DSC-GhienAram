@@ -48,16 +48,16 @@ JSON
 # giá trị rác ("BOGUS") mà không báo lỗi, và trường "accelerator"/"machine_shape" trong
 # kernel-metadata.json đọc ngược lại luôn ra "Gpu" — API chỉ biết có/không GPU. Lần chạy
 # đầu bốc trúng P100 (sm_60) nên .half() vỡ ở phút 30.
-# -> Đặt tay: mở notebook, Settings -> Accelerator -> GPU T4 x2. Setting bám theo kernel,
-#    đặt một lần là các version sau giữ nguyên.
 kaggle kernels push -p "$DIR"
 echo "https://www.kaggle.com/code/sunny070306/$SLUG"
 
-# In ra thành một BƯỚC, không phải comment: kernel mới bốc P100 hai lần liên tiếp, nên
-# đó là default của Kaggle cho slug chưa từng đặt accelerator, không phải bốc thăm.
-# Comment trong file không chặn được ai đang nhìn terminal.
-if ! kaggle kernels list -m --page-size 100 2>/dev/null | grep -q "sunny070306/$SLUG"; then
-  echo
-  echo "  !! SLUG MỚI — accelerator đang là default (P100, sm_60, fp16 KHÔNG chạy)."
-  echo "  !! Mở link trên -> Settings -> Accelerator -> GPU T4 x2 TRƯỚC khi chạy."
-fi
+# In LUÔN LUÔN, không gác theo "slug mới". Đã đo: v10-probe-and-eval version 2 chạy T4
+# (đặt tay trong UI), push version 3 từ đây thì bốc lại P100 và assert sm>=7 giết run ở
+# giây 44. Tức `kernels push` RESET accelerator về default, setting KHÔNG bám theo kernel.
+# Bản trước gác cảnh báo sau `if slug chưa từng chạy` nên nó tắt tiếng đúng lượt cần nhất.
+#
+# Hệ quả về quy trình: mỗi lần push là hai bước tay, không phải một.
+echo
+echo "  !! PUSH VỪA XOÁ ACCELERATOR — mọi version mới về default (P100, sm_60, fp16 vỡ)."
+echo "  !! Mở link trên -> Settings -> Accelerator -> GPU T4 x2 -> Save & Run All."
+echo "  !! Run mà push này vừa khởi động sẽ chết trên P100; bỏ nó, chạy lại từ UI."
