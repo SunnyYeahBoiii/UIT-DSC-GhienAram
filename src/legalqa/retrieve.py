@@ -73,30 +73,78 @@ class Retriever:
         # cho khớp chữ ký thay vì tính lại.
         return [s.chunk for s in self.reranker.rerank(question, [(c, 0.0) for c in cands])]
 
-    def evidence(self, question: str, top_n: int = 5) -> list["Evidence"]:
-        """Top-N Evidence để nhồi prompt, đã bỏ trùng."""
-        return chon_evidence(self.rank(question), self.docs, top_n=top_n)
+    def evidence(
+        self, question: str, *, top_n: int = 5, max_chars: int = 24_000
+    ) -> list["Evidence"]:
+        """Evidence để nhồi prompt, đã bỏ trùng và đã cắt theo ngân sách ký tự."""
+        return chon_evidence(
+            self.rank(question), self.docs, top_n=top_n, max_chars=max_chars
+        )
 
 
 def chon_evidence(
-    ranked: list["Chunk"], docs: dict[str, "Document"], *, top_n: int = 5
+    ranked: list["Chunk"],
+    docs: dict[str, "Document"],
+    *,
+    top_n: int = 5,
+    max_chars: int = 24_000,
+    khoa: str = "dieu",
 ) -> list["Evidence"]:
-    """Chuyển Chunk đã xếp hạng thành top-N Evidence, bỏ trùng.
+    """Chuyển Chunk đã xếp hạng thành Evidence để nhồi prompt, đã bỏ trùng.
 
-    Trùng là CHẮC CHẮN xảy ra, không phải trường hợp biên: chunk/Document p50 19, và
-    pool 50 thường chứa nhiều chunk của cùng một Document. Hai chunk chạm cùng một Điều
-    thì `expand_to_evidence` trả text y hệt nhau — nhồi cả hai là đốt 869 từ ngân sách
-    prompt để lấy 0 thông tin.
+    Hai giới hạn cùng lúc, ai chặn trước thì thắng: `top_n` và `max_chars`. Số Evidence
+    trả về là KẾT QUẢ, không phải tham số — Evidence p50 869 từ nhưng max 26 Điều, nên
+    `top_n=5` có thể ra 5 Evidence ngắn hoặc 2 Evidence dài. Chỉ chặn theo `top_n` thì
+    prompt phình không kiểm soát; chỉ chặn theo ký tự thì mất mốc dễ đọc. v9.2 đặt
+    `max_context_chars: 24000` (configs/kaggle_inference_t4.yaml) — giữ nguyên số đó.
 
-    TODO(người dùng): chọn khoá bỏ trùng. Ba lựa chọn, đánh đổi thật:
+    LUÔN trả về ít nhất 1 Evidence nếu `ranked` không rỗng, kể cả khi nó vượt ngân sách.
+    Prompt không có căn cứ nào thì model chắc chắn bịa; Evidence bị cắt cụt vẫn hơn.
 
-    - theo `doc_id`: 5 văn bản khác nhau, rộng nhất. Nhưng 2.097/6.250 câu (33,5%) có
-      gold từ 2+ Document, và câu cần HAI Điều của CÙNG một luật sẽ mất Điều thứ hai.
-    - theo `(doc_id, article_number)`: 5 Điều khác nhau, cho phép trùng Document. Giữ
-      được cả hai khoản của một luật, nhưng một Document áp đảo thì mất chiều rộng.
-    - theo text: chính xác nhất nhưng Evidence chồng lấn một phần vẫn lọt (Điều 5,6 và
-      Điều 6,7 là hai text khác nhau mà chung Điều 6).
+    Bỏ trùng là bắt buộc, không phải trường hợp biên: chunk/Document p50 19, pool 50
+    thường chứa nhiều chunk cùng một Document. Hai chunk chạm cùng một Điều thì
+    `expand_to_evidence` trả text y hệt — nhồi cả hai là đốt 869 từ để lấy 0 thông tin.
 
-    Trả về đúng thứ tự hạng, tối đa `top_n` phần tử.
+    `khoa` chọn mức bỏ trùng:
+
+    - `"dieu"` (mặc định) = `(doc_id, article_number)`. Cho trùng Document, không cho
+      trùng Điều. Chọn mặc định này vì 2.097/6.250 câu (33,5%) có gold từ 2+ Document —
+      nhưng phần còn lại có nghĩa là 66,5% câu gold nằm trong MỘT văn bản, và câu cần
+      hai Điều của cùng một luật là dạng phổ biến trong luật Việt Nam (Điều dẫn chiếu
+      Điều). Khoá theo `doc_id` sẽ mất Điều thứ hai của đúng những câu đó.
+    - `"van_ban"` = `doc_id`. Rộng nhất, 5 văn bản khác nhau. Dùng khi reranker dồn cả
+      pool vào một Document và cần ép đa dạng.
+    - `"text"` = chính text. Chính xác nhất nhưng Evidence chồng lấn MỘT PHẦN vẫn lọt
+      (Điều 5,6 và Điều 6,7 là hai text khác nhau mà chung Điều 6).
+
+    28,1% Evidence là fallback cửa sổ, `article_number is None` (§7). Với chúng khoá
+    `"dieu"` sẽ gộp mọi fallback của cùng một Document thành một — mà chúng là các cửa
+    sổ KHÁC NHAU. Nên `article_number is None` thì tụt về khoá text.
     """
-    raise NotImplementedError("xem TODO ở trên")
+    ev: list["Evidence"] = []
+    da_thay: set[object] = set()
+    da_dung = 0
+    for chunk in ranked:
+        if len(ev) >= top_n:
+            break
+        doc = docs.get(chunk.doc_id)
+        if doc is None:
+            continue
+        e = expand_to_evidence(doc, chunk)
+        if khoa == "van_ban":
+            k: object = e.doc_id
+        elif khoa == "text" or e.article_number is None:
+            k = e.text
+        else:
+            k = (e.doc_id, e.article_number)
+        if k in da_thay:
+            continue
+        # Vượt ngân sách thì DỪNG, không phải bỏ qua rồi thử cái sau: `ranked` xếp theo
+        # hạng nên cái sau luôn kém hơn. Nhặt một Evidence ngắn hạng 9 thay cho cái dài
+        # hạng 3 là đổi chất lượng lấy độ dài — sai chiều.
+        if ev and da_dung + len(e.text) > max_chars:
+            break
+        da_thay.add(k)
+        da_dung += len(e.text)
+        ev.append(e)
+    return ev

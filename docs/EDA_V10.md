@@ -730,7 +730,17 @@ n=1.000, deep 1.000, rrf-k 60. Dòng BM25 trùng khít qua cả bốn lượt ch
 | bkai bi-encoder L256 | 135M | 94,1% | 97,6% | +0,9 | 1.560s |
 
 **Chốt: e5-small, max_len 256.** 97,9% vượt BM25 pool 100 (97,5%) mà còn rẻ hơn nó 4 phút.
-Ngân sách 3,09 + 0,568 + 0,118 = 3,78B, dư 225M.
+Ngân sách 2,274 + 0,568 + 0,118 = **2,96B, dư 1,04B**.
+
+> **Sửa số, 12-09.** Ba dòng trên trước đây ghi generator là 3,09B ("Qwen 3B") — con số
+> tôi áng chứ không đếm. Số đếm thật nằm ở `docs/CHECKPOINT_VALIDATION.md` nhánh `main`:
+> `Qwen3.5-2B (gồm vision tower trong checkpoint) = 2.274.069.824`. Chênh 816M, tức chỗ
+> trống dưới trần 4B không phải 225M mà **1,04B**. Hệ quả: khe dense không còn chật,
+> `truro7/vn-law-embedding` (278M, domain pháp luật) hay `e5-base` (278M) vào được →
+> 3,12B. Kết luận loại `AITeamVN/Vietnamese_Embedding` ở §15.8 bên dưới vẫn giữ, nhưng
+> **lý do phải đổi**: nó yếu hơn `Vietnamese_Reranker` ở bảng của chính tác giả, chứ
+> không phải vượt trần. Đây là ví dụ vì sao "đo trước khi tuyên" áp cả cho số params —
+> một số áng làm lệch một quyết định kiến trúc.
 
 #### max_len 512 thua, và dạng của nó nói vì sao
 
@@ -768,7 +778,9 @@ chỉ vì độ dài đầu vào. **Xem `max_position_embeddings` trước cả 
 #### Vì sao không dùng embedding 568M
 
 `AITeamVN/Vietnamese_Embedding` (568M, nền bge-m3, 8.192 ctx) cộng reranker 568M cộng Qwen
-3,09B = **4,23B, vượt trần 226M**. Đường vào duy nhất là thay chỗ reranker, mà bảng Legal
+3,09B = **4,23B, vượt trần 226M**. (Số generator này sai — xem ô "Sửa số, 12-09" ở trên;
+với 2,274B thật thì tổng là 3,41B và KHÔNG vượt trần. Kết luận không đổi vì lý do dưới
+đây mới là lý do chính.) Đường vào duy nhất là thay chỗ reranker, mà bảng Legal
 Zalo trong model card của chính tác giả cho reranker thắng embedding ở mọi k:
 
 | model | A@1 | A@5 | A@10 | MRR@10 |
