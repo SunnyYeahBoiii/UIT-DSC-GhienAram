@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Đẩy kaggle/eval_rerank.ipynb lên Kaggle. Upload tay qua UI đã hai lần khiến notebook chạy
-# bản cũ trong khi file trên máy đã sửa — triệu chứng là traceback trỏ vào dòng không còn
-# tồn tại. Đẩy bằng CLI thì phiên bản luôn khớp commit.
+# Đẩy notebook trong kaggle/ lên Kaggle: $1 = file .ipynb, $2 = slug. Upload tay qua UI đã hai
+# lần khiến notebook chạy bản cũ trong khi file trên máy đã sửa — triệu chứng là traceback trỏ
+# vào dòng không còn tồn tại. Đẩy bằng CLI thì phiên bản luôn khớp commit.
 #
 # Codebase vào bằng dataset legalqa-v10-src (scripts/push_dataset.sh), không clone GitHub.
 set -euo pipefail
