@@ -432,11 +432,13 @@ def test_khoan_sua_doi_dung_ngay_sau_dieu_no_sua_khong_don_xuong_cuoi():
     seed = Evidence("NGUON", "Thông tư 01", "1", nguon.passage)
 
     out = expand_with_graph(g, docs, seed, max_hop=1, max_extra=9)
-    cap = [(e.doc_id, e.article_number, e.relation[:18]) for e in out]
-    # Điều 127 -> khoản sửa 127, RỒI mới tới Điều 126. Không phải 127, 126, sửa-127.
-    assert [c[0] for c in cap] == ["GOC", "SUA", "GOC"]
-    assert cap[1][2].startswith("Sửa đổi Điều 127")
-    assert cap[2][1] == "126"
+    # Điều 127 -> khoản sửa 127 -> Điều 126 -> khoản sửa 126. Không dồn hai khoản sửa
+    # xuống cuối, và khoản 19/khoản 20 cùng nằm ở Điều 1 văn bản SUA nên khoá bỏ trùng
+    # phải xuống tới khoản, nếu không khoản thứ hai bị nuốt.
+    assert [e.doc_id for e in out] == ["GOC", "SUA", "GOC", "SUA"]
+    assert out[1].relation.startswith("Sửa đổi Điều 127")
+    assert out[2].article_number == "126"
+    assert out[3].relation.startswith("Sửa đổi Điều 126")
 
 
 def test_ngan_sach_uu_tien_khoan_sua_doi_hon_dieu_dan_chieu_ke_tiep():
@@ -456,3 +458,24 @@ def test_ngan_sach_uu_tien_khoan_sua_doi_hon_dieu_dan_chieu_ke_tiep():
     out = expand_with_graph(g, docs, seed, max_hop=1, max_extra=2)
     # Thà thiếu Điều 126 còn hơn để Điều 127 đứng một mình ở bản đã hết hiệu lực.
     assert [(e.doc_id, e.article_number) for e in out] == [("GOC", "127"), ("SUA", "1")]
+
+
+def test_seed_cham_nhieu_dieu_van_tra_duoc_sua_doi_tung_dieu():
+    """`expand_to_evidence` nối số Điều thành "126, 127" khi Chunk chạm cả hai — đo trên
+    400 Document đầu: 40,5% Evidence ở dạng này. Tra `amendments_of(doc_id, "126, 127")`
+    là tra khoá không tồn tại, nên trước bản vá 40,5% Evidence im lặng mất hết sửa đổi.
+    """
+    g, docs = _graph()
+    seed = Evidence("GOC", "Luật Các TCTD", "126, 127", docs["GOC"].passage)
+    out = expand_with_graph(g, docs, seed)
+    khoan = sorted(r.relation for r in out)
+    assert len(out) == 2
+    assert "Sửa đổi Điều 126" in khoan[0] and "khoản 19" in khoan[0]
+    assert "Sửa đổi Điều 127" in khoan[1] and "khoản 20" in khoan[1]
+
+
+def test_nhan_neu_dieu_cu_the_khong_neu_ca_cum():
+    """Nhãn "Sửa đổi Điều 126, 127" là sai sự thật: khoản 19 chỉ sửa Điều 126."""
+    g, docs = _graph()
+    seed = Evidence("GOC", "Luật Các TCTD", "126, 127", docs["GOC"].passage)
+    assert all("126, 127" not in e.relation for e in expand_with_graph(g, docs, seed))

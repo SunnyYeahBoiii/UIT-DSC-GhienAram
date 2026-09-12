@@ -395,6 +395,16 @@ def _khoan_end(body: str, so: str, start: int) -> int:
     return len(body)
 
 
+def _cac_so_dieu(ev: Evidence) -> list[str]:
+    """`Evidence.article_number` là DANH SÁCH ghép bằng ", " khi Chunk chạm nhiều Điều —
+    `expand_to_evidence` nối "126, 127". Đo trên 400 Document đầu: 5.184/12.789 = 40,5%
+    Evidence ở dạng này. Tra `amendments_of(doc_id, "126, 127")` là tra một khoá không
+    bao giờ tồn tại, tức 40,5% Evidence im lặng mất toàn bộ phần sửa đổi."""
+    if not ev.article_number:
+        return []
+    return [s.strip() for s in ev.article_number.split(",") if s.strip()]
+
+
 def _sua_doi_cua(
     graph: LegalGraph,
     docs_by_id: dict[str, Document],
@@ -410,23 +420,33 @@ def _sua_doi_cua(
     y như luật đang hiệu lực.
     """
     out: list[Evidence] = []
-    for am in graph.amendments_of(ev.doc_id, ev.article_number or ""):
-        src = docs_by_id.get(am.src_doc_id)
-        if src is None or (am.src_doc_id, am.src_article) in visited:
-            continue
-        visited.add((am.src_doc_id, am.src_article))
-        out.append(
-            Evidence(
-                doc_id=src.doc_id,
-                doc_title=src.title,
-                article_number=am.src_article,
-                text=src.passage[am.start : am.end],
-                relation=(
-                    f"Sửa đổi Điều {ev.article_number} của {ev.doc_title} — "
-                    f"khoản {am.src_khoan} Điều {am.src_article}"
-                ),
+    for so in _cac_so_dieu(ev):
+        for am in graph.amendments_of(ev.doc_id, so):
+            src = docs_by_id.get(am.src_doc_id)
+            # Khoá bỏ trùng phải xuống tới KHOẢN. Một Điều của văn bản sửa đổi chứa
+            # nhiều khoản sửa nhiều Điều khác nhau (Điều 1 Luật sửa đổi 2017: khoản 19
+            # sửa Điều 126, khoản 20 sửa Điều 127) — khoá theo (doc, Điều) làm khoản
+            # thứ hai bị nuốt, và Evidence gốc chạm 2 Điều thì chỉ còn 1 sửa đổi.
+            khoa = (am.src_doc_id, f"{am.src_article}#{am.src_khoan}")
+            if src is None or khoa in visited:
+                continue
+            visited.add(khoa)
+            # Chặn luôn đường dẫn chiếu quay lại chính Điều vừa lấy khoản này ra.
+            visited.add((am.src_doc_id, am.src_article))
+            out.append(
+                Evidence(
+                    doc_id=src.doc_id,
+                    doc_title=src.title,
+                    article_number=am.src_article,
+                    text=src.passage[am.start : am.end],
+                    # Nhãn nêu Điều CỤ THỂ bị sửa, không nêu cả cụm "126, 127": Evidence
+                    # gốc chứa nhiều Điều thì model phải biết khoản này thay Điều nào.
+                    relation=(
+                        f"Sửa đổi Điều {so} của {ev.doc_title} — "
+                        f"khoản {am.src_khoan} Điều {am.src_article}"
+                    ),
+                )
             )
-        )
     return out
 
 
@@ -454,7 +474,11 @@ def expand_with_graph(
     sửa đổi được cấp trước — thà thiếu một Điều được dẫn chiếu còn hơn thiếu khoản sửa
     đổi của Điều đã có.
     """
-    visited: set[tuple[str, str]] = {(seed.doc_id, seed.article_number or "")}
+    # Đăng ký TỪNG số Điều của seed, không đăng ký cả cụm "126, 127": dẫn chiếu ngược
+    # về Điều 126 của chính văn bản đó phải bị chặn, khoá cụm thì không chặn được.
+    visited: set[tuple[str, str]] = {(seed.doc_id, s) for s in _cac_so_dieu(seed)} or {
+        (seed.doc_id, "")
+    }
     out: list[Evidence] = []
 
     for ev in _sua_doi_cua(graph, docs_by_id, seed, visited):
