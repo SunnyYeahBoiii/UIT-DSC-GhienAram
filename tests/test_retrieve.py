@@ -5,7 +5,9 @@ Fixture dùng `\n\n` và space thừa: fixture toàn space đơn từng che bug 
 """
 from legalqa.chunking import Chunk, chunk_document
 from legalqa.corpus import Document, parse_articles
-from legalqa.retrieve import chon_evidence
+from legalqa.evidence import Evidence
+from legalqa.graph import LegalGraph
+from legalqa.retrieve import Retriever, chon_evidence
 
 
 def _art(n: int, words: int) -> str:
@@ -104,3 +106,94 @@ def test_fallback_khong_co_so_dieu_thi_khong_gop_bua():
     ev = chon_evidence(ranked, {"d1": doc}, top_n=5)
     assert all(e.article_number is None for e in ev)
     assert len(ev) == 2, "hai cửa sổ khác nhau không được gộp"
+
+
+# ---- wiring end-to-end: seed + legal graph ---------------------------------
+
+
+class _FakeRetriever:
+    """Chỉ cần hai thứ mà `evidence_day_du` dùng: `docs` và `evidence()`. Dựng
+    Retriever thật đòi ChunkIndex + BM25 — đo một đại lượng khác, không phải wiring."""
+
+    def __init__(self, docs, seeds):
+        self.docs = docs
+        self._seeds = seeds
+
+    def evidence(self, question, *, top_n=5, max_chars=24_000):
+        return self._seeds[:top_n]
+
+    evidence_day_du = Retriever.evidence_day_du
+
+
+def _corpus_sua_doi():
+    """Cùng fixture với test_graph: Điều 127 của GOC bị khoản 20 của SUA sửa."""
+    goc = _doc_slug(
+        "GOC",
+        "Luat-cac-to-chuc-tin-dung-2010-108079",
+        "Điều 126. Cấm\nNội dung cấm.\nĐiều 127. Hạn chế cấp tín dụng\n"
+        "1. Không được cấp tín dụng cho:\nb) Kế toán trưởng;\n",
+    )
+    sua = _doc_slug(
+        "SUA",
+        "Luat-sua-doi-Luat-cac-to-chuc-tin-dung-2017-356283",
+        "Điều 1. Sửa đổi, bổ sung một số điều của Luật Các tổ chức tín dụng\n"
+        "20. Sửa đổi, bổ sung điểm b khoản 1 vào Điều 127 như sau:\n"
+        "“b) Kế toán trưởng, Chủ tịch Hội đồng quản trị;”\n",
+    )
+    g = LegalGraph()
+    g.build([goc, sua])
+    return g, {"GOC": goc, "SUA": sua}
+
+
+def _doc_slug(doc_id: str, slug: str, passage: str) -> Document:
+    d = Document(doc_id=doc_id, passage=passage, slug=slug)
+    d.articles = parse_articles(passage)
+    return d
+
+
+def _seed_127(docs):
+    a = next(a for a in docs["GOC"].articles if a.number == "127")
+    return Evidence(
+        doc_id="GOC",
+        doc_title=docs["GOC"].title,
+        article_number="127",
+        text=docs["GOC"].passage[a.start : a.end],
+    )
+
+
+def test_khoan_sua_doi_di_ngay_sau_dieu_goc():
+    """Cặp "gốc -> sửa đổi" nằm trong THỨ TỰ list, không ở trường nào của Evidence."""
+    g, docs = _corpus_sua_doi()
+    r = _FakeRetriever(docs, [_seed_127(docs)])
+    ev = r.evidence_day_du("hỏi gì", g)
+    assert len(ev) == 2
+    assert ev[0].relation == "" and ev[0].article_number == "127"
+    assert "Sửa đổi Điều 127" in ev[1].relation
+
+
+def test_seed_va_phan_mo_rong_la_mot_cum_nhan_ca_hoac_khong_nhan():
+    """Nhận Điều gốc rồi cắt mất khoản sửa đổi = đưa luật hết hiệu lực vào prompt mà
+    không kèm dấu hiệu nào. Ngân sách phải cắt theo CỤM."""
+    g, docs = _corpus_sua_doi()
+    seed = _seed_127(docs)
+    # Ngân sách đủ cho seed nhưng không đủ cho cả cụm, và đã có sẵn một cụm trước đó.
+    khac = Evidence(doc_id="GOC", doc_title="x", article_number="126", text="y" * 50)
+    r = _FakeRetriever(docs, [khac, seed])
+    ev = r.evidence_day_du("hỏi gì", g, max_chars=60)
+    assert [e.article_number for e in ev] == ["126"], "cụm 127 phải bị loại NGUYÊN CỤM"
+
+
+def test_cum_dau_tien_luon_duoc_nhan_du_vuot_ngan_sach():
+    g, docs = _corpus_sua_doi()
+    r = _FakeRetriever(docs, [_seed_127(docs)])
+    assert len(r.evidence_day_du("hỏi gì", g, max_chars=1)) == 2
+
+
+def test_top_n_dem_seed_khong_dem_evidence_graph():
+    """Một seed có nhiều khoản sửa đổi không được ăn hết top_n và đẩy seed hạng sau ra
+    vì lý do không liên quan tới hạng."""
+    g, docs = _corpus_sua_doi()
+    khac = Evidence(doc_id="GOC", doc_title="x", article_number="126", text="z")
+    r = _FakeRetriever(docs, [_seed_127(docs), khac])
+    ev = r.evidence_day_du("hỏi gì", g, top_n=2)
+    assert [e.article_number for e in ev] == ["127", "1", "126"]

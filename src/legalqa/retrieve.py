@@ -32,6 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .corpus import Document
     from .dense import BiEncoder, DenseIndex
     from .evidence import Evidence
+    from .graph import LegalGraph
     from .rerank import CrossEncoderReranker
 
 
@@ -76,10 +77,61 @@ class Retriever:
     def evidence(
         self, question: str, *, top_n: int = 5, max_chars: int = 24_000
     ) -> list["Evidence"]:
-        """Evidence để nhồi prompt, đã bỏ trùng và đã cắt theo ngân sách ký tự."""
+        """Evidence để nhồi prompt, đã bỏ trùng và đã cắt theo ngân sách ký tự.
+
+        CHƯA có phần mở rộng theo legal graph — dùng `evidence_day_du()` cho đường
+        đầy đủ. Giữ hàm này riêng vì `eval_rerank.py` đo recall trên seed, thêm
+        Evidence graph vào đó là đo một đại lượng khác.
+        """
         return chon_evidence(
             self.rank(question), self.docs, top_n=top_n, max_chars=max_chars
         )
+
+    def evidence_day_du(
+        self,
+        question: str,
+        graph: "LegalGraph",
+        *,
+        top_n: int = 5,
+        max_chars: int = 24_000,
+        max_extra: int = 3,
+    ) -> list["Evidence"]:
+        """Seed + phần mở rộng legal graph, xếp đúng thứ tự prompt cần.
+
+        Đây là caller mà `prompt.py` nói tới: cặp "Điều gốc -> khoản sửa đổi" nằm
+        trong THỨ TỰ của list này, không nằm ở trường nào của Evidence. Ai sắp lại
+        list này là xoá thông tin không dựng lại được.
+        """
+        from .graph import expand_with_graph
+
+        out: list["Evidence"] = []
+        da_dung = 0
+        da_thay: set[tuple[str, str]] = set()
+        # top_n đếm SEED, không đếm Evidence graph: graph không phải kết quả tìm kiếm,
+        # nó là ngữ cảnh bắt buộc của seed. Đếm chung thì một seed có 3 khoản sửa đổi
+        # sẽ ăn hết top_n và đẩy seed hạng 2 ra ngoài vì lý do không liên quan tới hạng.
+        for seed in self.evidence(question, top_n=top_n, max_chars=max_chars):
+            # Seed + phần mở rộng của nó là MỘT cụm: nhận cả cụm hoặc không nhận.
+            # Nhận seed rồi cắt mất khoản sửa đổi của nó là đưa vào prompt một Điều đã
+            # hết hiệu lực mà không kèm dấu hiệu nào — tệ hơn là không đưa gì.
+            cum = [seed, *expand_with_graph(graph, self.docs, seed, max_extra=max_extra)]
+            cum = [
+                e
+                for e in cum
+                if (e.doc_id, e.article_number or e.text[:80]) not in da_thay
+            ]
+            if not cum:
+                continue
+            ton = sum(len(e.text) for e in cum)
+            # `out` rỗng thì nhận bất chấp ngân sách: prompt không có căn cứ nào thì
+            # model chắc chắn bịa.
+            if out and da_dung + ton > max_chars:
+                break
+            for e in cum:
+                da_thay.add((e.doc_id, e.article_number or e.text[:80]))
+            out.extend(cum)
+            da_dung += ton
+        return out
 
 
 def chon_evidence(
