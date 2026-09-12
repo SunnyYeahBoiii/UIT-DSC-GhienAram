@@ -29,6 +29,11 @@ cat > "$DIR/kernel-metadata.json" <<JSON
 }
 JSON
 
-# --accelerator: metadata không có trường loại GPU, bỏ qua là về P100 mặc định.
-kaggle kernels push -p "$DIR" --accelerator nvidiaTeslaT4x2
+# LOẠI GPU KHÔNG ĐẶT ĐƯỢC TỪ ĐÂY. Đã đo trên kaggle CLI 2.2.4: cờ --accelerator nhận cả
+# giá trị rác ("BOGUS") mà không báo lỗi, và trường "accelerator"/"machine_shape" trong
+# kernel-metadata.json đọc ngược lại luôn ra "Gpu" — API chỉ biết có/không GPU. Lần chạy
+# đầu bốc trúng P100 (sm_60) nên .half() vỡ ở phút 30.
+# -> Đặt tay: mở notebook, Settings -> Accelerator -> GPU T4 x2. Setting bám theo kernel,
+#    đặt một lần là các version sau giữ nguyên.
+kaggle kernels push -p "$DIR"
 echo "https://www.kaggle.com/code/sunny070306/$SLUG"
