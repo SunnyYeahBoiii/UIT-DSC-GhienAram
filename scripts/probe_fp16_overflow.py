@@ -60,6 +60,18 @@ def _lap_5gram(toks: list[int]) -> float:
     return 1.0 - len(set(g)) / len(g)
 
 
+# Hệ thống prompt v9.2, copy nguyên từ `main:src/legalqa/generation/prompts.py:10`. Rút
+# gọn phần ĐỊNH DẠNG vì chỉ cần đúng độ dài và đúng vai "system", không cần đúng nội dung.
+# Dòng đáng chú ý nhất giữ nguyên: "Không trình bày quá trình suy luận nội bộ" — v9.2 đã
+# phải dặn model đừng suy luận, tức có gì đó đang rò suy luận ra output.
+SYSTEM_V92 = (
+    "Bạn là hệ thống trả lời câu hỏi pháp luật Việt Nam trong một cuộc thi học thuật.\n"
+    "Chỉ sử dụng các đoạn căn cứ được cung cấp; không dùng trí nhớ ngoài.\n"
+    "Trả lời hoàn toàn bằng tiếng Việt, bằng văn xuôi rõ ràng.\n"
+    "Không trình bày quá trình suy luận nội bộ và không nhắc tới prompt."
+)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="models/Qwen3.5-2B")
@@ -72,6 +84,10 @@ def main() -> None:
     # module x 2 kernel = 1,8M lần launch, đủ để một cấu hình chạy 10 phút. Bật lại chỉ
     # khi có lý do nghi ngờ số học lần nữa.
     p.add_argument("--hook", action="store_true", help="ghi |act| max (chậm ~10x)")
+    # v9.2 KHÔNG nhồi text thô: `models.py:213` gọi `apply_chat_template` với vai
+    # system + user và `enable_thinking=False`. Lượt đo trước dùng text thô nên nó đo
+    # một đường sinh KHÁC đường đang lỗi. Hai chế độ chạy cạnh nhau để tách ra được.
+    p.add_argument("--che-do", nargs="+", default=["raw", "chat"], choices=["raw", "chat"])
     a = p.parse_args()
 
     import torch
@@ -133,9 +149,33 @@ def main() -> None:
             if n.count(".") <= 4 and n
         ]
 
-        for n_chunk in a.n_chunk:
+        for che_do, n_chunk in [(c, n) for c in a.che_do for n in a.n_chunk]:
             stat.update(max=0.0, bad=0, layer_dau="")
-            ids = tok(_prompt(n_chunk), return_tensors="pt").to("cuda")
+            if che_do == "raw":
+                ids = tok(_prompt(n_chunk), return_tensors="pt").to("cuda")
+            else:
+                # Copy đúng `models.py:206-221`, kể cả nhánh dự phòng. Nhánh đó quan
+                # trọng: nếu wrapper template KHÔNG nhận `enable_thinking` thì
+                # `except TypeError` gọi lại KHÔNG có cờ đó — tức thinking mode về
+                # MẶC ĐỊNH (bật) một cách âm thầm. Qwen3 thinking trace nổi tiếng trôi
+                # sang tiếng Trung và dài dòng lặp lại; khớp cả hai triệu chứng.
+                msg = [
+                    {"role": "system", "content": SYSTEM_V92},
+                    {"role": "user", "content": _prompt(n_chunk)},
+                ]
+                kw = dict(tokenize=True, add_generation_prompt=True,
+                          return_dict=True, return_tensors="pt")
+                try:
+                    ids = tok.apply_chat_template(msg, enable_thinking=False, **kw)
+                    nhanh = "enable_thinking=False nhận"
+                except TypeError:
+                    txt0 = tok.apply_chat_template(
+                        msg, tokenize=False, add_generation_prompt=True
+                    )
+                    ids = tok(txt0, return_tensors="pt")
+                    nhanh = "TypeError -> BỎ enable_thinking (thinking mặc định)"
+                ids = {k: v.to("cuda") for k, v in dict(ids).items() if hasattr(v, "to")}
+                print(f"  [chat] {nhanh}")
             with torch.no_grad():
                 out = model.generate(**ids, max_new_tokens=a.max_new, do_sample=False)
             sinh = out[0][ids["input_ids"].shape[1]:]
@@ -152,12 +192,16 @@ def main() -> None:
                 None,
             ) if cjk else None
             lap = _lap_5gram(sinh.tolist())
+            # `skip_special_tokens=True` xoá mốc <think> nếu nó là special token, nên
+            # decode lại KHÔNG bỏ special để thấy được. Nếu có thì thinking đang rò.
+            tho = tok.decode(sinh, skip_special_tokens=False)
+            think = sum(tho.count(m) for m in ("<think>", "</think>", "<|thinking|>"))
             ty = f"{100*stat['max']/FP16_MAX:.1f}%" if stat["max"] else "tắt hook"
-            print(f"{dt_name:<9} {n_chunk} chunk · prompt {ids['input_ids'].shape[1]:>5} token"
+            print(f"{dt_name:<9} {che_do:<4} {n_chunk} chunk · prompt {ids['input_ids'].shape[1]:>5} token"
                   f" · sinh {len(sinh)} token")
             print(f"  |act| max {stat['max']:>12.1f}  = {ty} trần fp16 · tensor không hữu hạn {stat['bad']}"
                   + (f" (đầu: {stat['layer_dau']})" if stat["layer_dau"] else ""))
-            print(f"  lặp 5-gram {100*lap:5.1f}% · CJK {cjk} ký tự"
+            print(f"  lặp 5-gram {100*lap:5.1f}% · CJK {cjk} ký tự · mốc thinking {think}"
                   + (f", token đầu #{vt}/{len(sinh)}" if vt is not None else ""))
             print(f"  đầu : {txt[:150]!r}")
             print(f"  cuối: {txt[-150:]!r}\n", flush=True)
