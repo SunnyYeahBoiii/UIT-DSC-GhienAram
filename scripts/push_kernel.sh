@@ -52,3 +52,12 @@ JSON
 #    đặt một lần là các version sau giữ nguyên.
 kaggle kernels push -p "$DIR"
 echo "https://www.kaggle.com/code/sunny070306/$SLUG"
+
+# In ra thành một BƯỚC, không phải comment: kernel mới bốc P100 hai lần liên tiếp, nên
+# đó là default của Kaggle cho slug chưa từng đặt accelerator, không phải bốc thăm.
+# Comment trong file không chặn được ai đang nhìn terminal.
+if ! kaggle kernels list -m --page-size 100 2>/dev/null | grep -q "sunny070306/$SLUG"; then
+  echo
+  echo "  !! SLUG MỚI — accelerator đang là default (P100, sm_60, fp16 KHÔNG chạy)."
+  echo "  !! Mở link trên -> Settings -> Accelerator -> GPU T4 x2 TRƯỚC khi chạy."
+fi
