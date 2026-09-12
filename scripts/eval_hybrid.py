@@ -58,9 +58,11 @@ def main() -> None:
     p.add_argument("--rrf-k", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--gold", default="gold.jsonl")
-    # 256 từ tiếng Việt ≈ 380-520 subword (xem rerank.py). Lượt đo đầu để max_len 256 nên
-    # cắt mất ~40% mỗi chunk — mà đuôi chunk hay chứa đúng khoản cần tìm. 512 giữ gần trọn.
-    p.add_argument("--max-len", type=int, default=512)
+    # 256 từ tiếng Việt ≈ 380-520 subword (xem rerank.py), nên L256 cắt mất ~40% mỗi
+    # chunk và 512 lẽ ra phải hơn. ĐO NGƯỢC (§15.8): dense @10 L512 91,4 vs L256 92,2,
+    # hybrid @50 97,5 vs 97,9 — mean pooling loãng, boilerplate bầu áp đảo token định vị.
+    # Mặc định đổi 512 -> 256 sau lượt đo đó; giả thuyết "512 giữ gần trọn" đã bị bác.
+    p.add_argument("--max-len", type=int, default=256)
     p.add_argument("--prefix", default="", choices=["", "e5", "none"], help="rỗng = suy từ tên")
     p.add_argument("--cache", default="", help="tên file .npy; rỗng = suy từ tên model")
     a = p.parse_args()
