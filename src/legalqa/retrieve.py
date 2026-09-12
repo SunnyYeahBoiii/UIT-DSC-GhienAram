@@ -175,6 +175,7 @@ def chon_evidence(
     """
     ev: list["Evidence"] = []
     da_thay: set[object] = set()
+    da_dieu: set[tuple[str, str]] = set()
     da_dung = 0
     for chunk in ranked:
         if len(ev) >= top_n:
@@ -183,12 +184,27 @@ def chon_evidence(
         if doc is None:
             continue
         e = expand_to_evidence(doc, chunk)
+        so_dieu = {
+            (e.doc_id, s.strip())
+            for s in (e.article_number or "").split(",")
+            if s.strip()
+        }
         if khoa == "van_ban":
             k: object = e.doc_id
         elif khoa == "text" or e.article_number is None:
             k = e.text
         else:
-            k = (e.doc_id, e.article_number)
+            # Khoá theo TẬP Điều, không theo chuỗi `article_number`: Chunk 256 từ
+            # thường chạm nhiều Điều nên chuỗi là "126, 127" và hai Chunk kề nhau ra
+            # "126, 127" / "127, 128" — hai chuỗi khác nhau, cùng chứa trọn Điều 127.
+            # Đo trên 400 Document đầu: 6.724/12.389 = 54,3% cặp Chunk kề nhau chung
+            # Điều mà khác chuỗi, trong đó 53,6% là một bên BAO TRỌN bên kia — tức nhồi
+            # cả hai chỉ để lặp lại đúng những Điều đã có.
+            # Bao trọn thì bỏ; chồng lấn một phần (46,4%) thì GIỮ, vì nó mang thêm Điều
+            # mới và mất một Điều đắt hơn lặp một Điều.
+            k = tuple(sorted(so_dieu))
+            if so_dieu and so_dieu <= da_dieu:
+                continue
         if k in da_thay:
             continue
         # Vượt ngân sách thì DỪNG, không phải bỏ qua rồi thử cái sau: `ranked` xếp theo
@@ -197,6 +213,7 @@ def chon_evidence(
         if ev and da_dung + len(e.text) > max_chars:
             break
         da_thay.add(k)
+        da_dieu |= so_dieu
         da_dung += len(e.text)
         ev.append(e)
     return ev

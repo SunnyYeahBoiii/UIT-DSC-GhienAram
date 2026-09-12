@@ -197,3 +197,38 @@ def test_top_n_dem_seed_khong_dem_evidence_graph():
     r = _FakeRetriever(docs, [_seed_127(docs), khac])
     ev = r.evidence_day_du("hỏi gì", g, top_n=2)
     assert [e.article_number for e in ev] == ["127", "1", "126"]
+
+
+def _doc3() -> Document:
+    return _doc(_art(1, 30) + _art(2, 30) + _art(3, 30), "d1")
+
+
+def _chunk_phu(doc: Document, i: int, j: int) -> Chunk:
+    """Chunk giả chạm đúng các Điều từ i tới j (0-based) — điều khiển được `touched`."""
+    a, b = doc.articles[i], doc.articles[j]
+    return Chunk(f"d1:{i}{j}", "d1", doc.passage[a.start : b.end], a.start, b.end)
+
+
+def test_evidence_bi_bao_tron_thi_bo():
+    """Chunk 256 từ chạm nhiều Điều nên `article_number` là chuỗi "1, 2"; hai Chunk kề
+    nhau ra "1, 2" và "2" — hai chuỗi khác nhau, cùng chứa trọn Điều 2. Đo trên 400
+    Document đầu: 54,3% cặp Chunk kề chung Điều mà khác chuỗi, 53,6% trong số đó là bao
+    trọn. Khoá theo chuỗi thì nhồi cả hai để lặp lại đúng Điều đã có."""
+    doc = _doc3()
+    ev = chon_evidence([_chunk_phu(doc, 0, 1), _chunk_phu(doc, 1, 1)], {"d1": doc}, top_n=5)
+    assert [e.article_number for e in ev] == ["1, 2"]
+
+
+def test_chong_lan_mot_phan_thi_giu_vi_mang_them_dieu_moi():
+    """46,4% còn lại chỉ chồng lấn một phần. Mất một Điều đắt hơn lặp một Điều."""
+    doc = _doc3()
+    ev = chon_evidence([_chunk_phu(doc, 0, 1), _chunk_phu(doc, 1, 2)], {"d1": doc}, top_n=5)
+    assert [e.article_number for e in ev] == ["1, 2", "2, 3"]
+
+
+def test_bao_tron_van_ap_dung_khi_dieu_den_khong_theo_thu_tu():
+    """Bỏ trùng theo TẬP, không theo chuỗi: "2" tới sau "1, 2" phải bị bỏ dù đứng ở đâu."""
+    doc = _doc3()
+    ranked = [_chunk_phu(doc, 2, 2), _chunk_phu(doc, 0, 1), _chunk_phu(doc, 2, 2)]
+    ev = chon_evidence(ranked, {"d1": doc}, top_n=5)
+    assert [e.article_number for e in ev] == ["3", "1, 2"]
