@@ -40,7 +40,12 @@ class BiEncoder:
         self,
         model_path: str,
         batch_size: int = 128,
-        max_len: int = 512,
+        # 256, KHÔNG phải 512 dù chunk 256 từ ≈ 380-520 subword nên 512 đọc trọn chunk.
+        # §15.8 đo ngược: L512 dense @10 91,4 vs L256 92,2, hybrid @50 97,5 vs 97,9 —
+        # mean pooling bị loãng, vài trăm token boilerplate bầu áp đảo vài token định vị.
+        # Mặc định 512 là cái bẫy: `BiEncoder(path)` không truyền gì sẽ dựng index ở đúng
+        # cấu hình EDA ghi "đừng thử lại". build_dense.py đã ép 256, class thì chưa.
+        max_len: int = 256,
         device: str | None = None,
         prefix: str | None = None,
     ) -> None:
