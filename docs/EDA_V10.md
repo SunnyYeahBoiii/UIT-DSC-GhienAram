@@ -711,7 +711,82 @@ Chỗ còn lại nhiều nhất là k=1 (pool 100): rerank@1 78,0% so với tr�
 Hệ quả cho prompt: **nhồi top-5 Evidence, không phải top-1.** Evidence p50 869 từ × 5
 ≈ 4.300 từ ≈ 6.000 token, vừa context Qwen 3B. Lấy top-1 là tự vứt 19 điểm recall.
 
-### 15.6 Tái lập
+### 15.8 Hybrid BM25 + dense — chốt e5-small, max_len 256
+
+§15.7 khoá đường cải thiện lại còn một: nâng trần pool. Dense chỉ được đo ở đúng đại
+lượng đó — gold có nằm trong top-k Document lấy từ pool hay không — nên `eval_hybrid.py`
+KHÔNG chạy cross-encoder trong vòng lặp, nhanh hơn ~50 lần.
+
+Mốc phải vượt không phải BM25 pool 50 mà **BM25 pool 100**: nó cũng nâng trần và tốn 0
+params. Ngưỡng chốt trước khi chạy: `< 96,2%` vứt · `96,2-97,3%` vứt · `>= 98%` gắn.
+
+n=1.000, deep 1.000, rrf-k 60. Dòng BM25 trùng khít qua cả bốn lượt chạy (88,4/93,6/
+96,7/97,5) — cùng seed, cùng tập câu, nên chênh lệch chỉ đến từ nhánh dense.
+
+| model | params | dense @50 | hybrid @50 | chênh | encode |
+|---|---:|---:|---:|---:|---:|
+| e5-small L256 | 118M | 96,5% | **97,9%** | +1,2 | 436s |
+| e5-small L512 | 118M | 96,9% | 97,5% | +0,8 | 873s |
+| bkai bi-encoder L256 | 135M | 94,1% | 97,6% | +0,9 | 1.560s |
+
+**Chốt: e5-small, max_len 256.** 97,9% vượt BM25 pool 100 (97,5%) mà còn rẻ hơn nó 4 phút.
+Ngân sách 3,09 + 0,568 + 0,118 = 3,78B, dư 225M.
+
+#### max_len 512 thua, và dạng của nó nói vì sao
+
+Chunk 256 từ tiếng Việt ≈ 380-520 subword, nên L256 cắt mất ~40% mỗi chunk. Đọc trọn
+chunk lẽ ra phải tốt hơn. Đo được ngược:
+
+| k | dense L256 | dense L512 | hybrid L256 | hybrid L512 |
+|---|---:|---:|---:|---:|
+| @10 | 92,2 | 91,4 (−0,8) | 93,1 | 93,5 (+0,4) |
+| @20 | 95,1 | 94,8 (−0,3) | 96,5 | 95,9 (−0,6) |
+| @50 | 96,5 | 96,9 (+0,4) | 97,9 | 97,5 (−0,4) |
+| @100 | 97,9 | 97,6 (−0,3) | 98,8 | 98,7 (−0,1) |
+
+Dense với tới sâu hơn (@50 +0,4) nhưng đỉnh kém đi (@10 −0,8): **mean pooling bị loãng**.
+Bình quân 500 token thì vài token mang thông tin định vị bị vài trăm token boilerplate
+("theo quy định của pháp luật") bầu áp đảo — vector thành "trung bình của văn bản hành
+chính", nhận đúng LOẠI văn bản nhưng không phân biệt được văn bản NÀO.
+
+Cross-encoder không bị vậy vì nó không nén: query nhìn từng token qua attention, token vô
+nghĩa bị gán trọng số thấp thay vì được bầu bình đẳng. Cách chữa đúng là đổi pooling
+(CLS đã train contrastive, hoặc weighted-mean theo IDF), nhưng ta không train được model
+nên hạ max_len là cách rẻ duy nhất — và nó vừa đúng vừa nhanh gấp đôi. **Đừng thử lại 512.**
+
+#### Ba model bị loại vì kiến trúc, không vì chất lượng
+
+`bkai/vietnamese-bi-encoder`, `dangvantuan/vietnamese-embedding`, `keepitreal/vietnamese-sbert`
+là **cùng một checkpoint PhoBERT-base** — params trùng đến từng đơn vị (134.998.272) —
+với `max_position_embeddings = 258`. Chúng không bao giờ đọc nổi một chunk 256 từ.
+
+Đó là lý do bkai chỉ được 94,1% dense@50 trong khi e5-small 118M được 96,5%. Trên benchmark
+Legal Zalo (passage ngắn, lọt trong 258 vị trí) bkai chỉ kém `Vietnamese_Embedding` 1,6 điểm
+A@1; trên chunk của ta nó kém e5-small 9,1 điểm @10. Cùng model, hai kết luận trái nhau,
+chỉ vì độ dài đầu vào. **Xem `max_position_embeddings` trước cả benchmark.**
+
+#### Vì sao không dùng embedding 568M
+
+`AITeamVN/Vietnamese_Embedding` (568M, nền bge-m3, 8.192 ctx) cộng reranker 568M cộng Qwen
+3,09B = **4,23B, vượt trần 226M**. Đường vào duy nhất là thay chỗ reranker, mà bảng Legal
+Zalo trong model card của chính tác giả cho reranker thắng embedding ở mọi k:
+
+| model | A@1 | A@5 | A@10 | MRR@10 |
+|---|---:|---:|---:|---:|
+| Vietnamese_Reranker | 0,794 | 0,954 | 0,974 | 0,867 |
+| Vietnamese_Embedding | 0,727 | 0,931 | 0,957 | 0,818 |
+
+Cùng 568M, cùng nhóm tác giả, cùng benchmark. Đổi là nước lỗ — không cần tốn GPU để biết.
+Cùng lý do loại `mainguyen9/vietlegal-e5` (560M). Ứng viên 278M đúng miền pháp luật
+`truro7/vn-law-embedding` chưa đo: 118M đã vượt mốc, chưa cần tiêu thêm 160M params.
+
+#### Còn nợ một số đo
+
+`+1 điểm trần ≈ +0,7 điểm R@5` là suy từ hệ số 0,72 của §15.6, không phải đo. Nên
+`+1,2 điểm trần -> ước +0,9 điểm R@5` vẫn là ước. Số thật phải chạy `eval_rerank.py`
+trên pool hybrid — xem §15.9.
+
+### 15.9 Tái lập
 
 ```bash
 ./scripts/push_dataset.sh                    # codebase -> Kaggle Dataset
@@ -720,4 +795,9 @@ Hệ quả cho prompt: **nhồi top-5 Evidence, không phải top-1.** Evidence 
 PYTHONPATH=src python scripts/build_gold.py
 PYTHONPATH=src python scripts/eval_retrieval.py 1000 3000
 PYTHONPATH=src python scripts/eval_rerank.py --model models/Vietnamese_Reranker --pool 50
+PYTHONPATH=src python scripts/eval_hybrid.py --dense-model intfloat/multilingual-e5-small \
+    --n-cau 1000 --max-len 256      # trần hybrid, §15.8
+PYTHONPATH=src python scripts/build_dense.py --model intfloat/multilingual-e5-small
+PYTHONPATH=src python scripts/eval_rerank.py --model models/Vietnamese_Reranker --pool 50 \
+    --dense dense.npy               # R@5 thật trên pool hybrid
 ```

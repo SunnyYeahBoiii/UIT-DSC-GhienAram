@@ -19,9 +19,12 @@ torch/transformers import TRONG hàm, cùng lý do với rerank.py: năm module 
 
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
+
+if TYPE_CHECKING:  # pragma: no cover
+    from pathlib import Path
 
 T = TypeVar("T")
 
@@ -101,3 +104,35 @@ def rrf(rank_lists: list[list[T]], k: int = 60) -> list[T]:
         for r, item in enumerate(lst, 1):
             score[item] = score.get(item, 0.0) + 1.0 / (k + r)
     return sorted(score, key=lambda x: -score[x])
+
+
+class DenseIndex:
+    """Ma trận embedding của toàn bộ Chunk, giữ thẳng trong RAM.
+
+    287.358 × 384 fp16 = 0,22 GB. Không dùng FAISS/HNSW: ở quy mô này matmul đặc chạy
+    ~0,1s/câu, còn HNSW là **xấp xỉ** — đổi độ chính xác lấy tốc độ mà ta không cần, và
+    thêm một wheel phải build offline cho Kaggle.
+
+    `search` nhận vector câu hỏi đã chuẩn hoá, trả (chunk_id, cosine) giảm dần.
+    """
+
+    def __init__(self, chunk_ids: list[str], matrix: np.ndarray) -> None:
+        assert len(chunk_ids) == matrix.shape[0], (len(chunk_ids), matrix.shape)
+        self.chunk_ids = chunk_ids
+        # fp32 một lần lúc nạp: matmul fp16 trên CPU chậm hơn fp32 vài lần vì numpy
+        # không có kernel fp16, và 0,44 GB vẫn thừa chỗ trên Kaggle 30 GB RAM.
+        self.matrix = matrix.astype(np.float32)
+
+    @classmethod
+    def load(cls, npy: "Path", ids_txt: "Path") -> "DenseIndex":
+        ids = ids_txt.read_text(encoding="utf-8").split("\n")
+        return cls([i for i in ids if i], np.load(npy))
+
+    def search(self, qvec: np.ndarray, top_k: int = 1000) -> list[tuple[str, float]]:
+        sim = self.matrix @ qvec.astype(np.float32)
+        k = min(top_k, sim.shape[0])
+        # argpartition thay vì argsort: chỉ cần k phần tử đầu, 287k phần tử thì
+        # partition O(n) rẻ hơn sort O(n log n) khoảng 10 lần.
+        top = np.argpartition(-sim, k - 1)[:k]
+        top = top[np.argsort(-sim[top])]
+        return [(self.chunk_ids[j], float(sim[j])) for j in top]

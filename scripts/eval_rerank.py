@@ -29,6 +29,7 @@ from collections import Counter
 from pathlib import Path
 
 from legalqa.chunking import Chunk
+from legalqa.dense import rrf
 from legalqa.rerank import CrossEncoderReranker
 
 from eval_retrieval import load_index  # cùng thư mục scripts/
@@ -53,6 +54,12 @@ def main() -> None:
     p.add_argument("--n-cau", type=int, default=500)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--gold", default="gold.jsonl", help="gold_warmup.jsonl = tập độc lập")
+    # Pool hybrid: §15.8 nâng trần 96,7 -> 97,9. Ước +0,9 điểm R@5 qua hệ số 0,72 của
+    # §15.6 — cờ này đo con số THẬT thay vì ước.
+    p.add_argument("--dense", default="", help="tên .npy trong CLEAN_DIR; rỗng = pool BM25 thuần")
+    p.add_argument("--dense-model", default="intfloat/multilingual-e5-small")
+    p.add_argument("--deep", type=int, default=1000)
+    p.add_argument("--rrf-k", type=int, default=60)
     a = p.parse_args()
 
     gold = [json.loads(l) for l in (CLEAN_DIR / a.gold).open(encoding="utf-8")]
@@ -70,8 +77,17 @@ def main() -> None:
                 **{k: d[k] for k in ("chunk_id", "doc_id", "start", "end", "text")}
             )
 
+    dense = enc = None
+    if a.dense:
+        from legalqa.dense import BiEncoder, DenseIndex
+
+        stem = a.dense[:-4] if a.dense.endswith(".npy") else a.dense
+        dense = DenseIndex.load(CLEAN_DIR / f"{stem}.npy", CLEAN_DIR / f"{stem}.ids")
+        enc = BiEncoder(a.dense_model, batch_size=256, max_len=256)
+
     rr = CrossEncoderReranker(a.model, batch_size=a.batch_size)
-    print(f"{len(gold):,} câu · pool {a.pool} chunk · {a.model}\n", flush=True)
+    nhanh = "BM25+dense (RRF)" if dense is not None else "BM25"
+    print(f"{len(gold):,} câu · pool {a.pool} chunk từ {nhanh} · {a.model}\n", flush=True)
 
     hit_bm25: Counter = Counter()
     hit_rr: Counter = Counter()
@@ -79,7 +95,15 @@ def main() -> None:
     t0 = time.time()
     for i, g in enumerate(gold, 1):
         gd = set(g["gold_docs"])
-        res = idx.search(g["question"], top_k=a.pool)
+        if dense is None:
+            res = idx.search(g["question"], top_k=a.pool)
+        else:
+            bm = [cid for cid, _ in idx.search(g["question"], top_k=a.deep)]
+            qv = enc.encode([g["question"]], is_query=True)[0]
+            de = [cid for cid, _ in dense.search(qv, top_k=a.deep)]
+            # Điểm BM25 mất nghĩa sau khi trộn theo hạng; truyền 0.0 vì §15.3 đo rerank
+            # thuần, không hoà điểm.
+            res = [(cid, 0.0) for cid in rrf([bm, de], k=a.rrf_k)[: a.pool]]
         cands = [(by_id[cid], s) for cid, s in res]
 
         base = _doc_theo_thu_tu([c.doc_id for c, _ in cands])
