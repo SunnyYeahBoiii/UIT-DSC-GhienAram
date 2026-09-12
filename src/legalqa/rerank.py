@@ -64,8 +64,10 @@ class CrossEncoderReranker:
         self._tok = AutoTokenizer.from_pretrained(model_path)
         self._model = AutoModelForSequenceClassification.from_pretrained(model_path)
         self._model.to(self._device).eval()
-        # fp16 chỉ trên CUDA: trên CPU fp16 chậm hơn fp32 vài lần vì không có kernel.
-        if self._device.startswith("cuda"):
+        # fp16 chỉ trên CUDA và chỉ từ sm_70: trên CPU không có kernel fp16, còn trên
+        # P100 (sm_60, Kaggle cấp khi T4 hết slot) torch không build kernel -> ném
+        # "no kernel image is available" ngay ở .half().
+        if self._device.startswith("cuda") and torch.cuda.get_device_capability()[0] >= 7:
             self._model.half()
         self._batch_size = batch_size
         self._n_labels = int(self._model.config.num_labels)

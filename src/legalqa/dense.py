@@ -48,7 +48,10 @@ class BiEncoder:
         self._tok = AutoTokenizer.from_pretrained(model_path)
         self._model = AutoModel.from_pretrained(model_path)
         self._model.to(self._device).eval()
-        if self._device.startswith("cuda"):
+        # fp16 chỉ khi compute capability >= 7.0. Kaggle cấp P100 (sm_60) khi T4 hết
+        # slot, mà torch bản trên Kaggle chỉ build kernel từ sm_70 -> .half() ném
+        # "no kernel image is available". Tụt về fp32 chậm hơn ~2x nhưng vẫn ra số.
+        if self._device.startswith("cuda") and torch.cuda.get_device_capability()[0] >= 7:
             self._model.half()
         self._bs = batch_size
         self._max_len = max_len
