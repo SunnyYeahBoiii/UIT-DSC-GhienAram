@@ -7,15 +7,16 @@
 set -euo pipefail
 
 NB="${1:-kaggle/eval_rerank.ipynb}"
+SLUG="${2:-v10-eval-rerank}"
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT
 
-cp "$NB" "$DIR/v10-eval-rerank.ipynb"
-cat > "$DIR/kernel-metadata.json" <<'JSON'
+cp "$NB" "$DIR/$SLUG.ipynb"
+cat > "$DIR/kernel-metadata.json" <<JSON
 {
-  "id": "sunny070306/v10-eval-rerank",
-  "title": "v10 eval rerank",
-  "code_file": "v10-eval-rerank.ipynb",
+  "id": "sunny070306/$SLUG",
+  "title": "$SLUG",
+  "code_file": "$SLUG.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,
@@ -30,4 +31,4 @@ JSON
 
 # --accelerator: metadata không có trường loại GPU, bỏ qua là về P100 mặc định.
 kaggle kernels push -p "$DIR" --accelerator nvidiaTeslaT4x2
-echo "https://www.kaggle.com/code/sunny070306/v10-eval-rerank"
+echo "https://www.kaggle.com/code/sunny070306/$SLUG"
