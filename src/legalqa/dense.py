@@ -37,8 +37,9 @@ class BiEncoder:
         self,
         model_path: str,
         batch_size: int = 128,
-        max_len: int = 256,
+        max_len: int = 512,
         device: str | None = None,
+        prefix: str | None = None,
     ) -> None:
         import torch
         from transformers import AutoModel, AutoTokenizer
@@ -55,8 +56,13 @@ class BiEncoder:
             self._model.half()
         self._bs = batch_size
         self._max_len = max_len
-        la = model_path.lower()
-        self._q_pre, self._d_pre = ("query: ", "passage: ") if "e5" in la else ("", "")
+        # prefix: "e5" | "none" | None (suy từ tên). Suy theo tên từng làm hỏng một lượt đo
+        # — truro7/vn-law-embedding là e5-base finetune nhưng tên không chứa "e5", nên prefix
+        # bị bỏ im lặng và điểm tụt mà không ai biết vì sao. Giữ auto cho tiện, nhưng cho
+        # người gọi ép được.
+        if prefix is None:
+            prefix = "e5" if "e5" in model_path.lower() else "none"
+        self._q_pre, self._d_pre = ("query: ", "passage: ") if prefix == "e5" else ("", "")
 
     def encode(self, texts: list[str], is_query: bool = False) -> np.ndarray:
         """(n, dim) float16 đã chuẩn hoá. Mean pooling có mask — CLS của model chưa

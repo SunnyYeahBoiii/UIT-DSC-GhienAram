@@ -58,6 +58,10 @@ def main() -> None:
     p.add_argument("--rrf-k", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--gold", default="gold.jsonl")
+    # 256 từ tiếng Việt ≈ 380-520 subword (xem rerank.py). Lượt đo đầu để max_len 256 nên
+    # cắt mất ~40% mỗi chunk — mà đuôi chunk hay chứa đúng khoản cần tìm. 512 giữ gần trọn.
+    p.add_argument("--max-len", type=int, default=512)
+    p.add_argument("--prefix", default="", choices=["", "e5", "none"], help="rỗng = suy từ tên")
     p.add_argument("--cache", default="", help="tên file .npy; rỗng = suy từ tên model")
     a = p.parse_args()
 
@@ -76,11 +80,18 @@ def main() -> None:
             texts.append(d["text"])
     print(f"{len(ids):,} chunk · {len(gold):,} câu · {a.dense_model}", flush=True)
 
-    enc = BiEncoder(a.dense_model, batch_size=a.batch_size)
+    enc = BiEncoder(
+        a.dense_model,
+        batch_size=a.batch_size,
+        max_len=a.max_len,
+        prefix=a.prefix or None,
+    )
 
     # Encode một lần rồi cache: 287k chunk mất 20-40 phút T4, còn đo thì chạy nhiều lần
     # khi dò rrf-k và deep.
-    name = a.cache or "dense_" + a.dense_model.rstrip("/").split("/")[-1] + ".npy"
+    # max_len PHẢI nằm trong tên cache: cùng model, khác max_len là hai ma trận khác nhau.
+    # Thiếu nó thì lượt 512 nạp lại đúng file 256 của lượt trước và in ra số y nguyên.
+    name = a.cache or f"dense_{a.dense_model.rstrip('/').split('/')[-1]}_L{a.max_len}.npy"
     cache = CLEAN_DIR / name
     if cache.exists():
         M = np.load(cache)
