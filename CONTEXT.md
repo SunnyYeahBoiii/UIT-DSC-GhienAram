@@ -49,6 +49,12 @@ _Avoid_: segment, window, span, block
 điều khoản đầy đủ. Chunk và Evidence không cùng kích thước và không được dùng lẫn tên.
 _Avoid_: context, passage, retrieved chunk, snippet
 
+**Cụm Evidence**:
+Một Evidence hạt giống (do tìm kiếm trả về) cùng toàn bộ Evidence mà Legal relation kéo theo nó. Cụm là
+đơn vị **không chia được** khi cắt ngân sách prompt: nhận Điều gốc mà bỏ khoản sửa đổi của nó là đưa luật
+đã hết hiệu lực vào prompt mà không có dấu nào báo — sai nặng hơn là không có căn cứ nào.
+_Avoid_: nhóm, batch, expanded evidence
+
 **Weak gold document**:
 Document được suy ra là nguồn của một Reference answer bằng khớp chuỗi nguyên văn, không phải nhãn do
 BTC cấp. BTC **không** cung cấp nhãn retrieval nào.
@@ -91,6 +97,12 @@ _Avoid_: answer, candidate, final answer
 Thống kê phân phối của Reference answer (số từ, số câu, tỷ lệ liệt kê) dùng làm mục tiêu độ dài khi sinh.
 Là ràng buộc hình thức, không phải ràng buộc nội dung.
 _Avoid_: length plan, format spec
+
+**Nhãn quan hệ**:
+Dòng nhãn đặt trước mỗi Evidence trong prompt, nói Evidence đó là căn cứ chính hay là đoạn được Legal
+relation kéo vào, và kéo vào theo quan hệ gì. Prompt chứa **cả** Điều gốc lẫn khoản sửa đổi, không ghép
+thành bản hợp nhất — nhãn là thứ duy nhất cho model biết đoạn nào thay đoạn nào.
+_Avoid_: header, tiêu đề, metadata
 
 **Amendment**:
 Quan hệ "khoản X Điều Y của văn bản A sửa đổi/bổ sung/bãi bỏ Điều Z của văn bản B". Khác Cross-reference ở
