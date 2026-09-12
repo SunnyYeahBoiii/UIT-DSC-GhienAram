@@ -44,7 +44,8 @@ def main() -> None:
     a = p.parse_args()
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import transformers
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     print(f"GPU {torch.cuda.get_device_name(0)} · sm {'.'.join(map(str, torch.cuda.get_device_capability()))}")
     # bf16 trên sm_75 chỉ emulate, không phải hỗ trợ thật -> in ra để khỏi ai đề xuất lại.
@@ -52,9 +53,27 @@ def main() -> None:
 
     tok = AutoTokenizer.from_pretrained(a.model)
 
+    # Checkpoint là `Qwen3_5ForConditionalGeneration` (đa mô thức, config lồng: `dtype` và
+    # `max_position_embeddings` KHÔNG có ở tầng gốc mà nằm trong `text_config`). Lượt đo
+    # trước A1 in ra `None` cho cả hai — đó là dấu của config lồng, không phải checkpoint hỏng.
+    # `AutoModelForCausalLM` không chắc nhận kiến trúc conditional-generation, nên lấy class
+    # thẳng từ `architectures` của chính config: tên đó là nguồn duy nhất đúng, đoán auto-class
+    # là thêm một chỗ sai.
+    cfg = AutoConfig.from_pretrained(a.model)
+    ten_class = (getattr(cfg, "architectures", None) or [""])[0]
+    Klass = getattr(transformers, ten_class, None) or AutoModelForCausalLM
+    print(f"class nạp: {Klass.__name__} (config ghi {ten_class!r})")
+    # Tràn xảy ra ở LM decoder; tower ảnh không dự phần nhưng vẫn chiếm VRAM. In ra để biết
+    # fp32 8 GB có còn vừa T4 16 GB hay không.
+    tc = getattr(cfg, "text_config", None)
+    if tc is not None:
+        print(f"text_config: dtype {getattr(tc, 'dtype', None) or getattr(tc, 'torch_dtype', None)}"
+              f" · maxpos {getattr(tc, 'max_position_embeddings', None)}"
+              f" · layer {getattr(tc, 'num_hidden_layers', None)}")
+
     for dt_name in a.dtype:
         dt = getattr(torch, dt_name)
-        model = AutoModelForCausalLM.from_pretrained(a.model, dtype=dt, device_map="cuda")
+        model = Klass.from_pretrained(a.model, dtype=dt, device_map="cuda")
         model.eval()
 
         stat = {"max": 0.0, "bad": 0, "layer_dau": ""}
@@ -76,7 +95,11 @@ def main() -> None:
         handles = [
             m.register_forward_hook(lambda mo, i, o, t=n: hook(mo, i, o, t))
             for n, m in model.named_modules()
-            if n.count(".") <= 3 and n
+            # Ngưỡng 4 thay vì 3: config lồng nên tên module có thêm một tầng
+            # (`model.language_model.layers.0.self_attn`). Ở 3 thì dừng ở nguyên cả
+            # decoder layer — biết layer nào tràn mà không biết attention hay MLP, đúng
+            # cái phân biệt chọn bản vá (softmax fp32 vs NF4 4-bit).
+            if n.count(".") <= 4 and n
         ]
 
         for n_chunk in a.n_chunk:

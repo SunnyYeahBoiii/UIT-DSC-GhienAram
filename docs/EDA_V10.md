@@ -792,11 +792,41 @@ Cùng 568M, cùng nhóm tác giả, cùng benchmark. Đổi là nước lỗ —
 Cùng lý do loại `mainguyen9/vietlegal-e5` (560M). Ứng viên 278M đúng miền pháp luật
 `truro7/vn-law-embedding` chưa đo: 118M đã vượt mốc, chưa cần tiêu thêm 160M params.
 
-#### Còn nợ một số đo
+#### Số thật (đo 13-09, T4x2, cùng một lượt chạy)
 
-`+1 điểm trần ≈ +0,7 điểm R@5` là suy từ hệ số 0,72 của §15.6, không phải đo. Nên
-`+1,2 điểm trần -> ước +0,9 điểm R@5` vẫn là ước. Số thật phải chạy `eval_rerank.py`
-trên pool hybrid — xem §15.9.
+Ước cũ đã trả nợ. `eval_rerank.py --pool 50 --n-cau 500` chạy HAI lần **trong cùng
+session** — có `--dense dense.npy` và không — nên nhiễu chung (seed, máy, tập câu) triệt
+tiêu. Không lấy số §15.3 cũ ra trừ: lượt đó khác máy.
+
+Trần hybrid ở đây 97,6% còn §15.8 đo 97,9%: khác n (500 vs 1.000), lệch 0,3 điểm nằm trong sai số ±1,3 của n=500. Không phải hai đại lượng khác nhau.
+
+| pool | | R@1 | R@3 | **R@5** | R@10 | R@20 | trần |
+|---|---|---|---|---|---|---|---|
+| BM25 | BM25 | 56,4 | 74,6 | 81,0 | 88,4 | 94,0 | 96,2 |
+| BM25 | +rerank | 75,2 | 89,4 | **92,0** | 94,2 | 96,0 | |
+| hybrid | BM25 | 61,2 | 84,0 | 89,2 | 93,8 | 97,0 | 97,6 |
+| hybrid | +rerank | 77,2 | 91,4 | **93,6** | 96,0 | 97,2 | |
+| | **chênh** | +2,0 | +2,0 | **+1,6** | +1,8 | +1,2 | +1,4 |
+
+**Ước +0,9, thật +1,6.** Hệ số 0,72 ước THẤP, và thấp một cách hệ thống — nó mô hình
+thiếu một đường nhân quả. RRF làm hai việc: thêm ứng viên (nâng trần 96,2 -> 97,6) và
+**sắp lại pool** (nâng sàn BM25 R@5 81,0 -> 89,2 = +8,2 điểm). Công thức
+`Δtrần × 0,72` chỉ tính đường thứ nhất.
+
+Bằng chứng cho cách đọc đó nằm ở tỉ lệ ăn khoảng trống, nó TỤT khi pool tốt hơn:
+
+| pool | khoảng trống k=5 | rerank ăn |
+|---|---|---|
+| BM25 | 76 câu | +55 = 72% |
+| hybrid | 42 câu | +22 = 52% |
+
+52% < 72% không phải reranker kém đi. Câu dễ đã bị pool hybrid dọn trước khi reranker
+chạm vào, nên 42 câu còn lại khó hơn 76 câu kia. Hệ quả cho thiết kế: **đừng ước R@5 từ
+trần nữa** — hệ số không bất biến theo chất lượng pool.
+
+Giá thực: encode 287.358 chunk **421s** (comment cũ trong `eval_hybrid.py` ghi 20-40
+phút — sai gấp 4). Vòng đo 1,56s/câu có dense so với 1,58s/câu không có: dense **không**
+tốn thời gian chạy, chỉ tốn 118M params và 0,22 GB index.
 
 ### 15.9 Tái lập
 
