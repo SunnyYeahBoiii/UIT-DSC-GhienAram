@@ -37,6 +37,23 @@ def test_ref_khong_ghep_qua_dau_cham():
     assert parse_refs("Theo Điều 5 Luật này. Xem Nghị định 100/2019/NĐ-CP.") == []
 
 
+def test_ref_noi_bang_va_khong_bi_ref_truoc_nuot():
+    """Đo trên 2.000 Document corpus thật: +498 ref = +2,7%, 0 Document bị mất ref.
+
+    `[^.\\n;,]{0,80}` ăn tham chiếu kế tiếp vì finditer không chồng lấn — "Điều 29 Luật
+    Bảo vệ và Phát triển rừng và Điều 54 Luật Đất đai" (câu có thật trong corpus) chỉ ra
+    MỘT ref. Dấu phẩy đã bị loại sẵn nên danh sách ngăn bằng phẩy vốn an toàn; "và"
+    thì không."""
+    t = "Điều 29 Luật Bảo vệ và Phát triển rừng và Điều 54 Luật Đất đai"
+    assert [r.article for r in parse_refs(t)] == ["29", "54"]
+
+
+def test_ref_ten_van_ban_chua_cum_dieu_le_khong_bi_cat():
+    """Chặn theo "Điều + SỐ" chứ không theo chữ "Điều": có văn bản tên chứa "Điều lệ"."""
+    (r,) = parse_refs("Điều 3 Quyết định ban hành Điều lệ mẫu hợp tác xã 2015 quy định")
+    assert r.doc.name == "Quyết định ban hành Điều lệ mẫu hợp tác xã"
+
+
 def test_ref_bo_trung_giu_thu_tu():
     t = "Điều 5 Nghị định 100/2019/NĐ-CP, Điều 3 Luật 45/2019/QH14; Điều 5 Nghị định 100/2019/NĐ-CP"
     assert [r.article for r in parse_refs(t)] == ["5", "3"]
@@ -370,3 +387,72 @@ def test_heading_khai_tron_khong_chia_khoan():
     (am,) = g.amendments_of("A", "3")
     assert (am.src_article, am.src_khoan) == ("1", "")
     assert "Mức phụ cấp 40%" in sua.passage[am.start : am.end]
+
+
+def test_dieu_lay_qua_dan_chieu_cung_duoc_keo_theo_khoan_sua_doi():
+    """Điều được dẫn chiếu mà đã bị sửa: prompt phải có CẢ hai.
+
+    Trước bản vá này chỉ seed mới được tra sửa đổi, nên Điều 127 vào prompt ở bản gốc
+    2010 trong khi khoản 20 Luật sửa đổi 2017 đã thay điểm b — model đọc "Kế toán
+    trưởng" và bỏ mất "Chủ tịch Hội đồng quản trị". Luật hết hiệu lực đọc y như luật
+    đang hiệu lực, verifier không bắt được.
+    """
+    g, docs = _graph()
+    nguon = _doc(
+        "NGUON",
+        "Thong-tu-01-2020-TT-NHNN-9",
+        "Số: 01/2020/TT-NHNN\nĐiều 1. Phạm vi\n"
+        "Thực hiện theo Điều 127 Luật Các tổ chức tín dụng 2010.\n",
+    )
+    docs = {**docs, "NGUON": nguon}
+    g = LegalGraph()
+    g.build(list(docs.values()))
+    seed = Evidence("NGUON", "Thông tư 01", "1", nguon.passage)
+
+    out = expand_with_graph(g, docs, seed, max_hop=1)
+    assert [(e.doc_id, e.article_number) for e in out] == [("GOC", "127"), ("SUA", "1")]
+    assert "Sửa đổi Điều 127" in out[1].relation
+    assert "Chủ tịch Hội đồng quản trị" in out[1].text
+
+
+def test_khoan_sua_doi_dung_ngay_sau_dieu_no_sua_khong_don_xuong_cuoi():
+    """Cặp "gốc → sửa đổi" nằm trong THỨ TỰ, không nằm ở trường nào. Dồn sửa đổi xuống
+    cuối là bắt model tự đoán khoản nào sửa Điều nào."""
+    g, docs = _graph()
+    nguon = _doc(
+        "NGUON",
+        "Thong-tu-01-2020-TT-NHNN-9",
+        "Số: 01/2020/TT-NHNN\nĐiều 1. Phạm vi\n"
+        "Áp dụng Điều 127 Luật Các tổ chức tín dụng 2010 và Điều 126 "
+        "Luật Các tổ chức tín dụng 2010.\n",
+    )
+    docs = {**docs, "NGUON": nguon}
+    g = LegalGraph()
+    g.build(list(docs.values()))
+    seed = Evidence("NGUON", "Thông tư 01", "1", nguon.passage)
+
+    out = expand_with_graph(g, docs, seed, max_hop=1, max_extra=9)
+    cap = [(e.doc_id, e.article_number, e.relation[:18]) for e in out]
+    # Điều 127 -> khoản sửa 127, RỒI mới tới Điều 126. Không phải 127, 126, sửa-127.
+    assert [c[0] for c in cap] == ["GOC", "SUA", "GOC"]
+    assert cap[1][2].startswith("Sửa đổi Điều 127")
+    assert cap[2][1] == "126"
+
+
+def test_ngan_sach_uu_tien_khoan_sua_doi_hon_dieu_dan_chieu_ke_tiep():
+    g, docs = _graph()
+    nguon = _doc(
+        "NGUON",
+        "Thong-tu-01-2020-TT-NHNN-9",
+        "Số: 01/2020/TT-NHNN\nĐiều 1. Phạm vi\n"
+        "Áp dụng Điều 127 Luật Các tổ chức tín dụng 2010 và Điều 126 "
+        "Luật Các tổ chức tín dụng 2010.\n",
+    )
+    docs = {**docs, "NGUON": nguon}
+    g = LegalGraph()
+    g.build(list(docs.values()))
+    seed = Evidence("NGUON", "Thông tư 01", "1", nguon.passage)
+
+    out = expand_with_graph(g, docs, seed, max_hop=1, max_extra=2)
+    # Thà thiếu Điều 126 còn hơn để Điều 127 đứng một mình ở bản đã hết hiệu lực.
+    assert [(e.doc_id, e.article_number) for e in out] == [("GOC", "127"), ("SUA", "1")]

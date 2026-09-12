@@ -45,9 +45,17 @@ _LOAI_HOA = (
 
 # "Điều 127 Luật Các tổ chức tín dụng 2010" / "Điều 5 của Nghị định 100/2019/NĐ-CP".
 # Đo trên 6.929 reference answer: 49,5% dùng dạng số hiệu, 42,1% dùng dạng TÊN — chỉ
-# bắt số hiệu là bỏ gần một nửa. Chặn ở [^.\n;]: qua dấu câu là sang tham chiếu khác.
+# bắt số hiệu là bỏ gần một nửa. Chặn ở [^.\n;,]: qua dấu câu là sang tham chiếu khác.
+#
+# `(?!\sĐiều\s+\d)` chặn tên văn bản nuốt luôn tham chiếu KẾ TIẾP. Không có nó,
+# "Điều 127 Luật Các TCTD 2010 và Điều 126 Luật Các TCTD 2010" chỉ ra MỘT ref: finditer
+# không chồng lấn, match đầu đã ăn hết 80 ký tự kể cả "và Điều 126...". Dấu phẩy đã bị
+# loại sẵn nên danh sách ngăn bằng phẩy vốn an toàn; dạng nối bằng "và"/"hoặc" thì không.
+# Chặn theo "Điều + SỐ" chứ không theo "Điều": tên văn bản có thật chứa cụm "Điều lệ"
+# ("Quyết định ban hành Điều lệ ...") và cắt ở đó là cụt tên.
 REF_RE = re.compile(
-    rf"Điều\s+(\d{{1,3}}[a-zđ]?)\s+(?:của\s+)?((?:{_LOAI})[^.\n;,]{{0,80}})"
+    rf"Điều\s+(\d{{1,3}}[a-zđ]?)\s+(?:của\s+)?"
+    rf"((?:{_LOAI})(?:(?!\sĐiều\s+\d)[^.\n;,]){{0,80}})"
 )
 NAM_RE = re.compile(r"\b((?:19|20)\d{2})\b")
 
@@ -387,6 +395,41 @@ def _khoan_end(body: str, so: str, start: int) -> int:
     return len(body)
 
 
+def _sua_doi_cua(
+    graph: LegalGraph,
+    docs_by_id: dict[str, Document],
+    ev: Evidence,
+    visited: set[tuple[str, str]],
+) -> list[Evidence]:
+    """Các khoản sửa đổi Điều mà `ev` đang chứa, đã dán nhãn quan hệ.
+
+    Tách khỏi `expand_with_graph` vì nó phải chạy cho CẢ hai loại Evidence: seed và Điều
+    lấy về qua Cross-reference. Trước đây chỉ seed được tra sửa đổi, nên một Điều được
+    dẫn chiếu mà đã bị sửa sẽ vào prompt ở bản gốc, không dấu nào báo — đúng lỗi mà
+    CONTEXT.md ("Cụm Evidence") gọi là nặng hơn không có căn cứ: luật hết hiệu lực đọc
+    y như luật đang hiệu lực.
+    """
+    out: list[Evidence] = []
+    for am in graph.amendments_of(ev.doc_id, ev.article_number or ""):
+        src = docs_by_id.get(am.src_doc_id)
+        if src is None or (am.src_doc_id, am.src_article) in visited:
+            continue
+        visited.add((am.src_doc_id, am.src_article))
+        out.append(
+            Evidence(
+                doc_id=src.doc_id,
+                doc_title=src.title,
+                article_number=am.src_article,
+                text=src.passage[am.start : am.end],
+                relation=(
+                    f"Sửa đổi Điều {ev.article_number} của {ev.doc_title} — "
+                    f"khoản {am.src_khoan} Điều {am.src_article}"
+                ),
+            )
+        )
+    return out
+
+
 def expand_with_graph(
     graph: LegalGraph,
     docs_by_id: dict[str, Document],
@@ -395,35 +438,27 @@ def expand_with_graph(
     max_hop: int = 2,
     max_extra: int = 3,
 ) -> list[Evidence]:
-    """Trả về Evidence phụ cho `seed`: phần sửa đổi Điều đó, rồi các Điều nó trỏ tới.
+    """Trả về Evidence phụ cho `seed`: phần sửa đổi Điều đó, rồi các Điều nó trỏ tới —
+    và phần sửa đổi của chính những Điều đó.
 
     Amendment đi trước Cross-reference vì nó nói về CHÍNH Điều đang đọc — một Điều đã
     bị sửa mà đưa nguyên bản gốc vào prompt là đưa luật hết hiệu lực.
 
+    Khoản sửa đổi đặt NGAY SAU Điều mà nó sửa, không dồn xuống cuối: `prompt.py` giữ
+    nguyên thứ tự truyền vào, và cặp "gốc → sửa đổi" nằm trong THỨ TỰ chứ không nằm ở
+    trường nào. Dồn xuống cuối là để model tự đoán khoản nào sửa Điều nào.
+
     `max_hop=2` theo ADR-0002; visited-set chặn quay vòng (văn bản sửa đổi và văn bản
     bị sửa trỏ lẫn nhau nên chu trình là chuyện thường). `max_extra=3` chặn bùng nổ:
-    một Điều có tới 150 tham chiếu.
+    một Điều có tới 150 tham chiếu. Ngân sách đếm CHUNG cả sửa đổi lẫn dẫn chiếu, và
+    sửa đổi được cấp trước — thà thiếu một Điều được dẫn chiếu còn hơn thiếu khoản sửa
+    đổi của Điều đã có.
     """
     visited: set[tuple[str, str]] = {(seed.doc_id, seed.article_number or "")}
     out: list[Evidence] = []
 
-    for am in graph.amendments_of(seed.doc_id, seed.article_number or ""):
-        src = docs_by_id.get(am.src_doc_id)
-        if src is None:
-            continue
-        out.append(
-            Evidence(
-                doc_id=src.doc_id,
-                doc_title=src.title,
-                article_number=am.src_article,
-                text=src.passage[am.start : am.end],
-                relation=(
-                    f"Sửa đổi Điều {seed.article_number} của {seed.doc_title} — "
-                    f"khoản {am.src_khoan} Điều {am.src_article}"
-                ),
-            )
-        )
-        visited.add((am.src_doc_id, am.src_article))
+    for ev in _sua_doi_cua(graph, docs_by_id, seed, visited):
+        out.append(ev)
         if len(out) >= max_extra:
             return out
 
@@ -445,6 +480,13 @@ def expand_with_graph(
                 nxt.append(hit)
                 if len(out) >= max_extra:
                     return out
+                # Sửa đổi của Điều vừa lấy, ngay sau nó. KHÔNG đẩy vào `nxt`: hop đếm
+                # theo dẫn chiếu, và text khoản sửa đổi trích lại bản gốc nên nó chứa
+                # đầy tham chiếu của văn bản KHÁC — đi tiếp từ đó là lạc đề.
+                for phu in _sua_doi_cua(graph, docs_by_id, hit, visited):
+                    out.append(phu)
+                    if len(out) >= max_extra:
+                        return out
         frontier = nxt
     return out
 
