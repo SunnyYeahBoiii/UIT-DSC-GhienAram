@@ -656,12 +656,60 @@ Hai nhóm trượt gần bằng nhau. Trước rerank, 100% khoảng trống là
 gần một nửa là lỗi pool. Nên bước tiếp theo là quét pool (nâng trần), không phải đổi
 reranker.
 
-### 15.5 Cảnh báo: số 15.3 chốt trên train
+### 15.5 Kiểm trên tập độc lập — warmup
 
-Ngưỡng pool/K đang chốt trên chính tập dùng để quan sát. `warmup.json` (500 câu có
-Reference answer, không nằm trong train, dựng được gold 456/500 = 91,2%) là tập độc lập
-để kiểm lại — BM25 thuần trên đó R@1 54,2% · R@5 83,1% · R@10 89,5%, lệch ≤1,9 điểm so
-với train, nên quy trình nhãn tái lập được. Dòng `chênh` trên warmup **chưa đo**.
+`warmup.json` 500 câu có Reference answer, KHÔNG nằm trong train. Gold dựng bằng đúng
+quy trình 15.1: 456/500 = 91,2% (`nguyen_van+so_hieu` 215 · `nguyen_van` 179 · `so_hieu` 62).
+
+| n=456 | R@1 | R@3 | R@5 | R@10 | R@20 | R@50 |
+|---|---:|---:|---:|---:|---:|---:|
+| BM25 | 54,2% | 74,3% | 83,1% | 89,5% | 92,5% | 94,3% |
+| +rerank | 72,1% | 88,2% | 90,1% | 92,5% | 94,1% | 94,3% |
+| chênh | +18,0 | +13,8 | +7,0 | +3,1 | +1,5 | **0,0** |
+
+R@1 +18,0 so với +18,8 trên train — trùng khít. R@5 +7,0 so với +11,0 thấp hơn, nhưng
+KHÔNG phải vì reranker yếu đi: khoảng trống nhỏ hơn.
+
+| tập | trần | BM25@5 | khoảng trống | ăn |
+|---|---:|---:|---:|---:|
+| train | 96,2% | 81,0% | 15,2 điểm | 72% |
+| warmup | 94,3% | 83,1% | 11,2 điểm | 63% |
+
+Chuẩn hoá theo khoảng trống thì hai tập cùng cỡ. `chênh R@50 = 0,0` lặp lại đúng trên
+tập thứ hai. Kết luận 15.3 không phải đặc tính của train.
+
+### 15.6 Quét pool — chốt pool 50
+
+Pool 20 và 100 chạy n=300 (cùng tập: BM25 R@1/R@3/R@5 giống hệt 56,3/75,0/80,0), pool 50
+chạy n=500 nên chỉ 20 <-> 100 so trực tiếp được.
+
+| pool | trần | +rerank R@5 | ăn@5 | s/câu | 1.000 câu |
+|---:|---:|---:|---:|---:|---:|
+| 20 | 89,3% | 86,3% | 68% | 0,93 | 15 ph |
+| 50 * | 96,2% | 92,0% | 72% | 1,62 | 27 ph |
+| 100 | 97,3% | 92,7% | 73% | 2,88 | 48 ph |
+
+\* khác tập câu
+
+Lợi ích biên: 20→50 được +5,7 điểm R@5 với +12 phút = 0,48 điểm/phút; 50→100 được +0,7
+điểm với +21 phút = 0,03 điểm/phút. Gấp 16 lần. **Chốt pool 50.**
+
+`ăn %` gần như đứng yên qua cả ba pool (68/72/73) — reranker không suy giảm khi pool to
+ra, nó bị chặn bởi trần. Mà trần đã bão hoà: 89,3 → 96,2 → 97,3, bước cuối chỉ +1,1.
+
+### 15.7 Reranker đã bão hoà pool — chỗ nghẽn dịch lần nữa
+
+Pool 20, k=10: `khoảng trống 9 câu · rerank ăn +9 = 100%`. Rerank R@10 = 89,3% = **đúng
+bằng trần**. Trong pool 20 mọi câu có gold đều vào được top-10.
+
+Năng lực xếp hạng không còn là chỗ nghẽn. Đổi reranker khác, hay train lại nó, không mua
+được gì — mọi cải thiện phải đến từ đưa thêm ứng viên đúng vào pool.
+
+Chỗ còn lại nhiều nhất là k=1 (pool 100): rerank@1 78,0% so với trần 97,3% = bỏ lại 19,3
+điểm. Ở k=5 chỉ còn bỏ lại 4,6 điểm.
+
+Hệ quả cho prompt: **nhồi top-5 Evidence, không phải top-1.** Evidence p50 869 từ × 5
+≈ 4.300 từ ≈ 6.000 token, vừa context Qwen 3B. Lấy top-1 là tự vứt 19 điểm recall.
 
 ### 15.6 Tái lập
 
