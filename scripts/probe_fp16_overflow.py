@@ -10,10 +10,24 @@ Mảnh bằng chứng mạnh nhất đã có: repetition_penalty 1.1 và no_repe
 trong kaggle_inference_t4.yaml mà vẫn lặp. Logits processor không sửa được NaN, nên lặp
 là hậu quả của lỗi số chứ không phải lỗi sampling.
 
-Script này ĐO, không sửa. Ba đại lượng, cùng một prompt, ba dtype:
-  1. |activation| lớn nhất gặp phải  -> so với 65.504
+ĐÃ ĐO 13-09 (T4 sm_75, 1/3/5 Evidence, fp16 và fp32) — GIẢ THUYẾT SAI:
+
+    |act| max 62,6-63,1 · tensor không hữu hạn 0 · CJK 0 · fp16 và fp32 sinh GIỐNG NHAU
+
+62,9 so với 65.504 cách ba bậc độ lớn, không phải sát mép — không văn bản nào đẩy được
+nó lên trần. Nhánh số học chết chắc. Kèm hai số phụ: `is_bf16_supported()` in ra True
+trên sm_75 (trái điều tôi khẳng định), `text_config.dtype = bfloat16`, `maxpos 262144`.
+
+NHƯNG lượt đó đo SAI ĐẠI LƯỢNG: `--max-new 40`, còn config thật là `max_new_tokens:
+1300`. Lặp từ và trôi token hiếm khi hiện trong 40 token đầu. Dòng "40 token đầu -> mắt
+thường thấy ngay rác" của bản cũ là một giả định về VỊ TRÍ xuất hiện của lỗi, chưa đo.
+
+Bản này đo trên toàn bộ 1300 token và thêm chỉ số bắt được lỗi ở chỗ nó thật sự nằm:
+
+  1. |activation| lớn nhất (tuỳ chọn, --hook)  -> so với 65.504
   2. số tensor có phần tử không hữu hạn (inf/nan)
-  3. 40 token đầu sinh ra            -> mắt thường thấy ngay rác
+  3. tỉ lệ 5-gram trùng                        -> 5 khớp no_repeat_ngram_size: 5
+  4. vị trí ký tự CJK ĐẦU TIÊN theo token       -> chỉ ra sau bao nhiêu token thì trôi
 
 Chạy:
     PYTHONPATH=src python scripts/probe_fp16_overflow.py \
@@ -35,12 +49,29 @@ def _prompt(n_chunk: int, chunk_words: int = 869) -> str:
     return f"Căn cứ pháp luật:\n{cc}\n\nCâu hỏi: Điều kiện được hưởng chế độ này là gì?\nTrả lời:"
 
 
+def _lap_5gram(toks: list[int]) -> float:
+    """Tỉ lệ 5-gram trùng. Chọn n=5 vì `no_repeat_ngram_size: 5` đã bật mà vẫn lặp —
+    nếu chỉ số này > 0 thì logits processor đang bị vượt qua, và đó là số cần biết.
+    Greedy decode lành mạnh trên văn bản pháp luật vẫn lặp nhẹ (cụm "người lao động"),
+    nên đọc chỉ số này theo chênh lệch giữa các n_chunk, đừng đọc giá trị tuyệt đối."""
+    if len(toks) < 5:
+        return 0.0
+    g = [tuple(toks[i : i + 5]) for i in range(len(toks) - 4)]
+    return 1.0 - len(set(g)) / len(g)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--model", default="models/Qwen3.5-2B")
     p.add_argument("--n-chunk", type=int, nargs="+", default=[1, 3, 5])
     p.add_argument("--dtype", nargs="+", default=["float16", "float32"])
-    p.add_argument("--max-new", type=int, default=40)
+    # 1300 = `generation.max_new_tokens` của kaggle_inference_t4.yaml. Đo 40 như bản
+    # trước là đo 3% chiều dài của thứ cần đo.
+    p.add_argument("--max-new", type=int, default=1300)
+    # Hook tắt theo mặc định: nhánh số học đã bị bác (62,9/65.504), mà 1300 token x ~700
+    # module x 2 kernel = 1,8M lần launch, đủ để một cấu hình chạy 10 phút. Bật lại chỉ
+    # khi có lý do nghi ngờ số học lần nữa.
+    p.add_argument("--hook", action="store_true", help="ghi |act| max (chậm ~10x)")
     a = p.parse_args()
 
     import torch
@@ -92,7 +123,7 @@ def main() -> None:
             else:
                 stat["max"] = max(stat["max"], float(f.abs().max()))
 
-        handles = [
+        handles = [] if not a.hook else [
             m.register_forward_hook(lambda mo, i, o, t=n: hook(mo, i, o, t))
             for n, m in model.named_modules()
             # Ngưỡng 4 thay vì 3: config lồng nên tên module có thêm một tầng
@@ -107,13 +138,29 @@ def main() -> None:
             ids = tok(_prompt(n_chunk), return_tensors="pt").to("cuda")
             with torch.no_grad():
                 out = model.generate(**ids, max_new_tokens=a.max_new, do_sample=False)
-            txt = tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=True)
+            sinh = out[0][ids["input_ids"].shape[1]:]
+            txt = tok.decode(sinh, skip_special_tokens=True)
             cjk = sum(0x4E00 <= ord(c) <= 0x9FFF for c in txt)
-            ty = f"{100*stat['max']/FP16_MAX:.0f}%" if stat["max"] else "—"
-            print(f"{dt_name:<9} {n_chunk} chunk · {ids['input_ids'].shape[1]:>5} token")
+            # Vị trí CJK đầu tiên THEO TOKEN, không theo ký tự: nó trả lời "sinh bao nhiêu
+            # token thì trôi", tức có hạ max_new_tokens để né được hay không.
+            vt = next(
+                (
+                    j
+                    for j in range(len(sinh))
+                    if any(0x4E00 <= ord(c) <= 0x9FFF for c in tok.decode(sinh[j : j + 1]))
+                ),
+                None,
+            ) if cjk else None
+            lap = _lap_5gram(sinh.tolist())
+            ty = f"{100*stat['max']/FP16_MAX:.1f}%" if stat["max"] else "tắt hook"
+            print(f"{dt_name:<9} {n_chunk} chunk · prompt {ids['input_ids'].shape[1]:>5} token"
+                  f" · sinh {len(sinh)} token")
             print(f"  |act| max {stat['max']:>12.1f}  = {ty} trần fp16 · tensor không hữu hạn {stat['bad']}"
                   + (f" (đầu: {stat['layer_dau']})" if stat["layer_dau"] else ""))
-            print(f"  CJK {cjk} ký tự · sinh: {txt[:110]!r}\n", flush=True)
+            print(f"  lặp 5-gram {100*lap:5.1f}% · CJK {cjk} ký tự"
+                  + (f", token đầu #{vt}/{len(sinh)}" if vt is not None else ""))
+            print(f"  đầu : {txt[:150]!r}")
+            print(f"  cuối: {txt[-150:]!r}\n", flush=True)
 
         for h in handles:
             h.remove()
