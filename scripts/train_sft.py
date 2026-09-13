@@ -129,10 +129,15 @@ def loss_dap_an(model, lo, batch):
     import torch.nn.functional as F
 
     lm = model.get_output_embeddings()
-    # Khởi tạo bằng tensor NỐI VÀO ĐỒ THỊ, không phải float 0.0: nếu batch không có
-    # token đáp án nào thì `tong` giữ nguyên giá trị khởi tạo, và một float thì
-    # `.backward()` nổ giữa lúc train. `lo.sum()*0` giữ đúng device, dtype và graph.
-    tong, dem = lo.sum() * 0.0, 0
+    # Mỏ neo đồ thị dựng LƯỜI, chỉ khi batch không có token đáp án nào. Bản trước khởi
+    # tạo `tong = lo.sum() * 0.0` ở mọi bước và nó đầu độc log: `lo` là [B, T, H] fp16
+    # với T tới 6.144 và H 2.048, tức ~12,6 triệu phần tử; torch cộng dồn bằng fp32
+    # nhưng ÉP KẾT QUẢ VỀ fp16, nên tổng vượt 65.504 thành `inf`, rồi `inf * 0.0 = nan`.
+    #
+    # Nan đó vô hại về gradient (đạo hàm của sum*0 là 0) nên train vẫn đúng — v10-train-sft
+    # v9 in `b20 loss nan gnorm 0.45`, gnorm hữu hạn chính là bằng chứng. Nhưng loss in ra
+    # là thứ duy nhất đọc được giữa hai lần eval cách nhau 4 giờ, nhiễm nan là mù.
+    tong, dem = None, 0
     for i in range(lo.size(0)):
         a, b = int(batch["n_prompt"][i]), int(batch["n_tong"][i])
         if b - a < 1:
@@ -141,9 +146,14 @@ def loss_dap_an(model, lo, batch):
         nhan = batch["input_ids"][i, a:b].to(h.device)
         # float() trước cross_entropy: logsumexp trên 248.070 lớp ở fp16 mất chính xác
         # đủ để gradient nhiễu. Chỉ 450 hàng nên upcast ở đây rẻ.
-        tong = tong + F.cross_entropy(lm(h).float(), nhan, reduction="sum")
+        ce = F.cross_entropy(lm(h).float(), nhan, reduction="sum")
+        tong = ce if tong is None else tong + ce
         dem += b - a
-    return tong / max(1, dem), dem
+    if tong is None:
+        # Không mẫu nào có đáp án. Trả tensor nối vào đồ thị chứ không phải float 0.0,
+        # vì `.backward()` trên float sẽ nổ. Lấy MỘT vị trí nên không có chuyện tràn.
+        return lo[0, 0, :].sum() * 0.0, 0
+    return tong / dem, dem
 
 
 def tim_than(model):
