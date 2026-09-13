@@ -232,3 +232,38 @@ def test_bao_tron_van_ap_dung_khi_dieu_den_khong_theo_thu_tu():
     ranked = [_chunk_phu(doc, 2, 2), _chunk_phu(doc, 0, 1), _chunk_phu(doc, 2, 2)]
     ev = chon_evidence(ranked, {"d1": doc}, top_n=5)
     assert [e.article_number for e in ev] == ["3", "1, 2"]
+
+
+def test_seed_sau_nam_tron_trong_seed_truoc_thi_bo_ca_cum():
+    """Seed "126, 127" đã vào rồi thì seed "127" là lặp thuần. Bỏ CẢ cụm chứ không bỏ
+    mỗi seed: giữ lại khoản sửa đổi mà mất Điều gốc là để nhãn "Sửa đổi Điều 127" trỏ
+    vào một Điều không có trong prompt."""
+    g, docs = _corpus_sua_doi()
+    rong = Evidence(doc_id="GOC", doc_title="x", article_number="126, 127", text="z" * 40)
+    r = _FakeRetriever(docs, [rong, _seed_127(docs)])
+    ev = r.evidence_day_du("hỏi gì", g)
+    # Cụm đầu đã kéo sẵn khoản sửa Điều 127 (Điều 1 của SUA), nên cụm sau không còn gì.
+    assert [e.article_number for e in ev] == ["126, 127", "1"]
+
+
+def test_khoan_sua_doi_trung_giua_hai_cum_chi_vao_prompt_mot_lan():
+    """Hai seed khác nhau cùng bị một khoản sửa: khoản đó chỉ được kể một lần, nhưng
+    seed thứ hai vẫn phải vào vì nó là Điều khác."""
+    g, docs = _corpus_sua_doi()
+    seed = _seed_127(docs)
+    khac = Evidence(doc_id="GOC", doc_title="x", article_number="126", text="y" * 30)
+    r = _FakeRetriever(docs, [seed, khac])
+    ev = r.evidence_day_du("hỏi gì", g)
+    assert [e.article_number for e in ev] == ["127", "1", "126"]
+    assert sum("Sửa đổi Điều 127" in e.relation for e in ev) == 1
+
+
+def test_fallback_cua_so_khong_bi_gop_theo_doc_id():
+    """28,1% Evidence không có số Điều. Hai cửa sổ khác nhau của cùng Document là hai
+    đoạn khác nhau — gộp theo doc_id là mất một đoạn."""
+    g, docs = _corpus_sua_doi()
+    a = Evidence(doc_id="GOC", doc_title="x", article_number=None, text="cửa sổ A")
+    b = Evidence(doc_id="GOC", doc_title="x", article_number=None, text="cửa sổ B")
+    r = _FakeRetriever(docs, [a, b, a])
+    ev = r.evidence_day_du("hỏi gì", g)
+    assert [e.text for e in ev] == ["cửa sổ A", "cửa sổ B"]

@@ -106,7 +106,8 @@ class Retriever:
 
         out: list["Evidence"] = []
         da_dung = 0
-        da_thay: set[tuple[str, str]] = set()
+        da_dieu: set[tuple[str, str]] = set()
+        da_text: set[str] = set()
         # top_n đếm SEED, không đếm Evidence graph: graph không phải kết quả tìm kiếm,
         # nó là ngữ cảnh bắt buộc của seed. Đếm chung thì một seed có 3 khoản sửa đổi
         # sẽ ăn hết top_n và đẩy seed hạng 2 ra ngoài vì lý do không liên quan tới hạng.
@@ -115,23 +116,42 @@ class Retriever:
             # Nhận seed rồi cắt mất khoản sửa đổi của nó là đưa vào prompt một Điều đã
             # hết hiệu lực mà không kèm dấu hiệu nào — tệ hơn là không đưa gì.
             cum = [seed, *expand_with_graph(graph, self.docs, seed, max_extra=max_extra)]
-            cum = [
-                e
-                for e in cum
-                if (e.doc_id, e.article_number or e.text[:80]) not in da_thay
-            ]
-            if not cum:
+            # Seed đã có rồi thì bỏ CẢ cụm, không bỏ mỗi seed: phần mở rộng còn lại là
+            # khoản sửa đổi mồ côi, mất Điều gốc mà nó sửa nên model không biết nó sửa
+            # cái gì. Cụm trước đã kéo theo đúng những khoản đó rồi.
+            if _da_co(seed, da_dieu, da_text):
                 continue
+            cum = [e for e in cum if not _da_co(e, da_dieu, da_text)]
             ton = sum(len(e.text) for e in cum)
             # `out` rỗng thì nhận bất chấp ngân sách: prompt không có căn cứ nào thì
             # model chắc chắn bịa.
             if out and da_dung + ton > max_chars:
                 break
             for e in cum:
-                da_thay.add((e.doc_id, e.article_number or e.text[:80]))
+                da_dieu |= _so_dieu(e)
+                if not e.article_number:
+                    da_text.add(e.text)
             out.extend(cum)
             da_dung += ton
         return out
+
+
+def _so_dieu(ev: "Evidence") -> set[tuple[str, str]]:
+    """Tập (doc_id, số Điều) của một Evidence. `article_number` là chuỗi ghép ", " khi
+    Chunk chạm nhiều Điều (40,5% Evidence), nên so sánh chuỗi là so sai đại lượng."""
+    return {
+        (ev.doc_id, s.strip())
+        for s in (ev.article_number or "").split(",")
+        if s.strip()
+    }
+
+
+def _da_co(ev: "Evidence", da_dieu: set[tuple[str, str]], da_text: set[str]) -> bool:
+    """Evidence này đã nằm trọn trong phần đã nhận chưa. Fallback cửa sổ (28,1%, không
+    có số Điều) so bằng chính text: hai cửa sổ khác nhau của cùng Document là hai đoạn
+    khác nhau, gộp theo doc_id là mất một đoạn."""
+    so = _so_dieu(ev)
+    return so <= da_dieu if so else ev.text in da_text
 
 
 def chon_evidence(
