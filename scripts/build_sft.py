@@ -40,6 +40,24 @@ CLEAN = Path(os.environ.get("CLEAN_DIR", "data/clean"))
 # lấy một con số mới nào.
 CAU_HINH = ((5, 24_000), (5, 12_000), (3, 12_000), (5, 8_000), (3, 8_000))
 
+# Cấu hình chốt sau lần đo có rerank trên Kaggle (n=300, 268 câu có weak gold):
+#
+#   | top_n | max_chars | gold  | ev/câu | p50  | max  | >4096 |
+#   |     5 |    24.000 | 89,2% |    5,0 | 5007 | 8341 | 83,0% |
+#   |     5 |    12.000 | 88,1% |    3,4 | 3378 | 5109 |  9,0% |
+#   |     3 |    12.000 | 86,6% |    2,9 | 3014 | 5109 |  4,3% |
+#   |     5 |     8.000 | 83,2% |    2,1 | 2249 | 3740 |  0,0% |
+#
+# 24k mua thêm 1,1 điểm gold bằng cái giá 83% mẫu vượt 4096 token — không đáng.
+# `top_n=3` không tiết kiệm gì (2,9 vs 3,4 Evidence, vì `max_chars` mới là ràng buộc
+# cắn thật) mà mất 1,5 điểm. Chọn 5/12.000.
+TOP_N, MAX_CHARS = 5, 12_000
+
+# Cắt trên seq len. Max đo được là 5.109 trên 300 mẫu; 6.144 chừa biên cho đuôi của
+# 6.908 mẫu. Mẫu vượt bị LOẠI chứ không truncate: truncate cắt từ đuôi, mà đuôi là
+# reference answer — mẫu còn lại dạy model dừng giữa câu.
+MAX_SEQ = 6_144
+
 
 def nap_docs() -> dict[str, Document]:
     """Dựng lại Document từ corpus.jsonl — passage trong đó ĐÃ qua `dewrap_passage()`
@@ -151,6 +169,70 @@ def do_token(rows: list[dict], r: Retriever, tok, batch: int) -> None:
     print("\n(p50/p90/p95/max và cột >N là prompt + answer, tức seq len thật lúc train)")
 
 
+def giu_mau(evs, gold_docs: set[str] | None, seq_len: int) -> str:
+    """Lý do loại, hoặc "" nếu giữ. Tách khỏi vòng lặp để test được không cần GPU.
+
+    Quyết định của người dùng: mẫu mà retrieval trượt gold thì LOẠI hẳn, không chèn gold
+    vào cũng không đổi thành mẫu từ chối. Lý do: chèn gold thì lúc train gold LUÔN có
+    mặt, model học "đáp án chắc chắn nằm đâu đó trong đây" — đúng cơ chế sinh ra bịa khi
+    inference trượt. Còn 21,3% mẫu từ chối là tỉ lệ quá cao, model sẽ từ chối cả khi
+    context đủ, mà bài thi chấm theo nội dung nên từ chối là 0 điểm.
+
+    Giá phải trả, ghi ra để đừng quên lúc đọc eval: model chưa từng thấy context thiếu
+    gold, nên tỉ lệ bịa thật lúc inference cao hơn những gì dev set (lọc cùng cách) cho
+    thấy. Dev set phải giữ nguyên mẫu trượt mới đo trung thực.
+    """
+    if not gold_docs:
+        return "khong_co_weak_gold"
+    if not any(e.doc_id in gold_docs for e in evs):
+        return "retrieval_truot_gold"
+    if seq_len > MAX_SEQ:
+        return "vuot_max_seq"
+    return ""
+
+
+def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path) -> None:
+    """Sinh tập SFT thật: câu hỏi -> Evidence từ chính Retriever của inference -> prompt.
+
+    Ghi `prompt` và `answer` TÁCH RIÊNG chứ không nối sẵn: prompt-loss masking cần biết
+    ranh giới, và nối rồi tách lại bằng chuỗi là mời lỗi khi answer tình cờ chứa
+    "Trả lời:". 69,8% 8-gram của answer là nguyên văn từ gold passage (§EDA) nên đây là
+    bài trích — masking phần prompt là bắt buộc, không phải tuỳ chọn.
+    """
+    gold = nap_gold()
+    bo = {"khong_co_weak_gold": 0, "retrieval_truot_gold": 0, "vuot_max_seq": 0}
+    giu = 0
+    t0 = time.time()
+    with ra.open("w", encoding="utf-8") as f:
+        for i, row in enumerate(rows):
+            ranked = r.rank(row["question"])
+            evs = chon_evidence(ranked, r.docs, top_n=TOP_N, max_chars=MAX_CHARS)
+            prompt = dung_prompt(row["question"], evs)
+            seq = len(tok.encode(prompt).ids) + len(tok.encode(row["answer"]).ids)
+            ly_do = giu_mau(evs, gold.get(row["id"]), seq)
+            if ly_do:
+                bo[ly_do] += 1
+            else:
+                giu += 1
+                f.write(json.dumps({
+                    "id": row["id"],
+                    "question": row["question"],
+                    "prompt": prompt,
+                    "answer": row["answer"],
+                    "seq_len": seq,
+                    "doc_ids": [e.doc_id for e in evs],
+                }, ensure_ascii=False) + "\n")
+            if (i + 1) % 200 == 0:
+                con = (len(rows) - i - 1) * (time.time() - t0) / (i + 1)
+                print(f"  ... {i+1}/{len(rows)}  giữ {giu}  còn ~{con/60:.0f} phút", flush=True)
+
+    n = len(rows)
+    print(f"\nvào {n:,}  giữ {giu:,} = {giu/n:.1%}")
+    for k, v in bo.items():
+        print(f"  loại {k:24s} {v:,} = {v/n:.1%}")
+    print(f"  -> {ra}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--do-token", action="store_true")
@@ -158,6 +240,7 @@ def main() -> None:
     ap.add_argument("--model", default="", help="đường dẫn reranker; rỗng = BM25 thuần")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--pool", type=int, default=50)
+    ap.add_argument("--ra", default="", help="file jsonl đầu ra; mặc định CLEAN/sft.jsonl")
     a = ap.parse_args()
 
     rows = [json.loads(l) for l in (CLEAN / "train_sft.jsonl").open(encoding="utf-8")]
@@ -177,12 +260,16 @@ def main() -> None:
         reranker=reranker,
         pool=a.pool,
     )
-    if a.do_token:
-        from tokenizers import Tokenizer
+    from tokenizers import Tokenizer
 
-        do_token(rows, r, Tokenizer.from_file(os.environ["QWEN_TOKENIZER"]), a.batch_size)
+    tok = Tokenizer.from_file(os.environ["QWEN_TOKENIZER"])
+    if a.do_token:
+        do_token(rows, r, tok, a.batch_size)
         return
-    raise SystemExit("chưa cài phần sinh tập — chạy --do-token trước để chốt ngân sách")
+    # Không mặc định ghi vào CLEAN: khi CLEAN là output kernel trước thì nó read-only,
+    # và lỗi đó chỉ nổ SAU 3,5 giờ GPU. Cùng lớp lỗi với bm25.pkl ở `nap_index`.
+    mac_dinh = CLEAN / "sft.jsonl" if os.access(CLEAN, os.W_OK) else Path("sft.jsonl")
+    sinh_tap(rows, r, tok, Path(a.ra) if a.ra else mac_dinh)
 
 
 if __name__ == "__main__":
