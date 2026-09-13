@@ -100,19 +100,45 @@ python -m compileall -q src tests
 - **System prompt** — `src/legalqa/prompt.py` cố tình chưa có. v9.2 `SYSTEM_PROMPT` chứa
   ba miếng vá triệu chứng ở ba tầng khác nhau (dặn model "không trình bày quá trình suy
   luận nội bộ", regex phạt CJK trong `verifier.py`, xoá câu trùng lặp). Ba miếng vá chỉ
-  cùng cần thiết nếu có **một** nguyên nhân thượng nguồn. Đang đo nguyên nhân đó
-  (`scripts/probe_fp16_overflow.py`); chép nguyên system prompt sang v10 trước khi biết
-  kết quả là chép cả vá lẫn bệnh.
+  cùng cần thiết nếu có **một** nguyên nhân thượng nguồn. Đã đo (bảng dưới): nguyên
+  nhân là base model chưa SFT, không phải thinking mode và không phải CJK drift. Nên
+  **đừng** chép sang v10 câu "không trình bày quá trình suy luận nội bộ" (chữa bệnh
+  không tồn tại — probe đo `mốc thinking 0` ở cả 6 cấu hình) lẫn regex phạt CJK
+  (`CJK 0 ký tự` ở cả 6 cấu hình).
 - **Qwen SFT** — chưa dựng.
 - **Sanitizer câu trả lời cuối** — chưa dựng.
 
-## Nghi can của bug generator (đang đo)
+## Nghi can của bug generator (đã đo — v10-probe-and-eval v5, T4 x2)
 
-Triệu chứng: nhồi > 1 chunk thì model lặp từ và sinh ký tự Trung Quốc.
+Triệu chứng báo cáo: nhồi > 1 chunk thì model lặp từ và sinh ký tự Trung Quốc.
+**Không tái lập được trên base model.** Đo 6 cấu hình (fp16/fp32 × raw/chat × 1/3/5
+chunk), mỗi cấu hình sinh 1300 token:
+
+| n_chunk | lặp 5-gram raw | lặp 5-gram chat |
+|---|---|---|
+| 1 | 72,7% | 98,2% |
+| 3 | 71,4% | 55,4% |
+| 5 | 71,4% | 3,2% |
+
+Lặp **giảm** theo n_chunk, nặng nhất ở 1 chunk — ngược hẳn triệu chứng báo cáo. CJK 0
+ký tự ở cả 6. Nên nguyên nhân nằm ở tầng TRÊN base model.
 
 | nghi can | trạng thái |
 |---|---|
-| fp16 overflow | **loại** — max \|activation\| 62,9 / trần 65.504; fp16 ≡ fp32 byte-identical |
+| fp16 overflow | **loại** — max \|activation\| 62,9 / trần 65.504 (lượt đo trước); lượt này fp32 raw 1/3/5 chunk trả text TRÙNG TỪNG KÝ TỰ với fp16, `tensor không hữu hạn 0` |
 | sampling | **loại** — `do_sample: false`, `repetition_penalty 1,1`, `no_repeat_ngram_size 5` đều đã bật |
-| Qwen3 thinking mode | **đang đo** — `main:core/models.py` có `except TypeError` gọi lại `apply_chat_template` **bỏ** `enable_thinking`, tức thinking mặc định BẬT âm thầm |
-| LoRA adapter đã SFT | chưa loại — probe chỉ nạp base; `main` có commit `slice-aware loss`, prompt loss không mask sẽ dạy model sinh lại prompt = lặp |
+| Qwen3 thinking mode | **loại** — `enable_thinking=False` được nhận, `mốc thinking 0` ở cả 6 cấu hình |
+| nhét nhiều chunk | **loại** — lặp giảm 98,2% → 3,2% khi tăng 1 → 5 chunk |
+| sinh CJK | **không tái lập** — 0 ký tự CJK ở cả 6 cấu hình |
+| LoRA adapter đã SFT | **nghi can chính còn lại** — probe chỉ nạp base; `main` có commit `slice-aware loss`, prompt loss không mask sẽ dạy model sinh lại prompt = lặp |
+
+Nhưng base model **cũng không dùng được như hiện tại**: 5/6 cấu hình chạy hết trần 1300
+token mà không tự dừng, và nội dung là bám cụm rồi đếm số (`"...18 tuổi trở lên;"` tới
+số 80; `"245, 246, 247, ..."`). Ca duy nhất tự dừng là chat 3 chunk (161 token) và cũng
+là ca duy nhất dẫn được số Điều. Đây là hành vi base chưa SFT, không phải lỗi số học.
+
+**Hệ quả:** Qwen SFT là điều kiện CẦN của v10, không phải bước tối ưu.
+
+Cảnh báo về chỉ số: chat 5 chunk có lặp 5-gram 3,2% — sạch nhất bảng — nhưng output là
+`"245, 246, 247, ..."`. Đếm số không sinh 5-gram lặp nào. Đừng dùng riêng lặp 5-gram
+làm cổng chất lượng.
