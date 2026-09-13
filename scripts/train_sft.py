@@ -188,6 +188,7 @@ def sinh_va_cham(model, tok, dev: list[dict], max_new: int, bs: int) -> dict:
     """
     import torch
 
+    t_eval = time.time()
     model.eval()
     du_doan: dict[str, str] = {}
     for i in range(0, len(dev), bs):
@@ -212,6 +213,12 @@ def sinh_va_cham(model, tok, dev: list[dict], max_new: int, bs: int) -> dict:
                 max_new_tokens=max_new,
                 do_sample=False,
                 pad_token_id=tok.pad_token_id,
+                # TƯỜNG MINH: `model.config.use_cache=False` đặt cho train và không bao
+                # giờ bật lại, mà `GenerationConfig.use_cache` mặc định None nên kế thừa
+                # từ đó. Không có KV cache thì sinh 1.024 token = 1.024 lần forward lại
+                # cả tiền tố ~4.000 token — không ném lỗi, chỉ đốt sạch 12 giờ phiên
+                # Kaggle. Ở eval `model.eval()` nên checkpointing tắt, cache an toàn.
+                use_cache=True,
             )
         for r, seq in zip(lo, out):
             du_doan[r["id"]] = tok.decode(
@@ -230,6 +237,10 @@ def sinh_va_cham(model, tok, dev: list[dict], max_new: int, bs: int) -> dict:
             {k: du_doan[k] for k in truot if k in du_doan}, {k: ref[k] for k in truot}
         )["meteor"]
     diem["do_dai_tb"] = sum(len(v.split()) for v in du_doan.values()) / max(1, len(du_doan))
+    # Đo, đừng ước lượng: ngân sách phiên Kaggle là 12 giờ và `--gio-toi-da` giả định
+    # eval tốn ~20 phút. Nếu số thật khác xa thì phải biết ngay lần eval đầu, không phải
+    # suy ra từ lúc kernel chết vì hết giờ.
+    diem["giay_eval"] = round(time.time() - t_eval, 1)
     return diem
 
 
