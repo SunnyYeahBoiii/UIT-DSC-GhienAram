@@ -123,6 +123,38 @@ def clean_train() -> dict[str, int]:
     return dict(stat)
 
 
+def ghi_warmup() -> int:
+    """Ghi warmup_sft.jsonl — 500 câu của `warmup.json`, dùng làm tập dev.
+
+    Ba khác biệt CÓ CHỦ ĐÍCH so với `clean_train`, mỗi cái đều để phép đo khỏi dễ hơn
+    thực tế:
+
+    1. `answer` giữ NGUYÊN VĂN, không qua `clean_reference_answer`. Leaderboard chấm với
+       reference nguyên trạng của BTC — còn teaser cuối bài, caption ảnh, ký tự vô hình.
+       Model train trên target sạch sẽ không sinh teaser, nên mất một ít recall METEOR;
+       chấm với target sạch là giấu đúng phần mất đó đi. Chênh giữa hai cách chấm chính
+       là cái giá của quyết định làm sạch, và nó phải đo được.
+    2. KHÔNG lọc `is_usable_for_sft`, không khử trùng. Bỏ mẫu khó khỏi dev là tự nâng
+       điểm.
+    3. Giữ cả câu mà retrieval sẽ trượt gold. Tập train đã loại những mẫu đó (xem
+       `build_sft.giu_mau`), nên nếu dev cũng loại thì không còn chỗ nào phát hiện được
+       model bịa khi context thiếu — đúng thứ cần đo nhất.
+    """
+    raw = json.loads((DATA_DIR.parent / "warmup" / "warmup.json").read_text(encoding="utf-8"))
+    items = raw.items() if isinstance(raw, dict) else ((str(i), r) for i, r in enumerate(raw))
+    out = OUT_DIR / "warmup_sft.jsonl"
+    n = 0
+    with out.open("w", encoding="utf-8") as f:
+        for qid, rec in items:
+            f.write(json.dumps({
+                "id": qid,
+                "question": (rec.get("question") or "").strip(),
+                "answer": rec.get("answer") or "",
+            }, ensure_ascii=False) + "\n")
+            n += 1
+    return n
+
+
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +181,9 @@ def main() -> None:
     print(f"  trung question      {t.get('trung_question', 0):,}")
     print(f"  giu                 {t['giu']:,}")
     print(f"  -> {OUT_DIR/'train_sft.jsonl'}")
+
+    print(f"\n== WARMUP (dev, answer THÔ) ==\n  {ghi_warmup():,} câu"
+          f"  -> {OUT_DIR/'warmup_sft.jsonl'}")
 
 
 if __name__ == "__main__":

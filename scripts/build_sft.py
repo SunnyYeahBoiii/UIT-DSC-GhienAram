@@ -112,9 +112,9 @@ def nap_index(chunks: dict[str, Chunk]) -> ChunkIndex:
     return idx
 
 
-def nap_gold() -> dict[str, set[str]]:
+def nap_gold(ten: str = "gold.jsonl") -> dict[str, set[str]]:
     g: dict[str, set[str]] = {}
-    with (CLEAN / "gold.jsonl").open(encoding="utf-8") as f:
+    with (CLEAN / ten).open(encoding="utf-8") as f:
         for line in f:
             o = json.loads(line)
             g[o["qid"]] = set(o["gold_docs"])
@@ -191,7 +191,7 @@ def giu_mau(evs, gold_docs: set[str] | None, seq_len: int) -> str:
     return ""
 
 
-def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path) -> None:
+def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path, ten_gold: str, giu_het: bool) -> None:
     """Sinh tập SFT thật: câu hỏi -> Evidence từ chính Retriever của inference -> prompt.
 
     Ghi `prompt` và `answer` TÁCH RIÊNG chứ không nối sẵn: prompt-loss masking cần biết
@@ -199,7 +199,7 @@ def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path) -> None:
     "Trả lời:". 69,8% 8-gram của answer là nguyên văn từ gold passage (§EDA) nên đây là
     bài trích — masking phần prompt là bắt buộc, không phải tuỳ chọn.
     """
-    gold = nap_gold()
+    gold = nap_gold(ten_gold)
     bo = {"khong_co_weak_gold": 0, "retrieval_truot_gold": 0, "vuot_max_seq": 0}
     giu = 0
     t0 = time.time()
@@ -212,16 +212,21 @@ def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path) -> None:
             ly_do = giu_mau(evs, gold.get(row["id"]), seq)
             if ly_do:
                 bo[ly_do] += 1
-            else:
-                giu += 1
-                f.write(json.dumps({
-                    "id": row["id"],
-                    "question": row["question"],
-                    "prompt": prompt,
-                    "answer": row["answer"],
-                    "seq_len": seq,
-                    "doc_ids": [e.doc_id for e in evs],
-                }, ensure_ascii=False) + "\n")
+            # `giu_het` cho tập dev: ghi cả mẫu bị loại, kèm `ly_do`. Loại mẫu khó khỏi
+            # dev là tự nâng điểm, và mẫu retrieval trượt gold chính là chỗ duy nhất
+            # phát hiện được model bịa khi context thiếu.
+            if ly_do and not giu_het:
+                continue
+            giu += not ly_do
+            f.write(json.dumps({
+                "id": row["id"],
+                "question": row["question"],
+                "prompt": prompt,
+                "answer": row["answer"],
+                "seq_len": seq,
+                "doc_ids": [e.doc_id for e in evs],
+                "ly_do_loai": ly_do,
+            }, ensure_ascii=False) + "\n")
             if (i + 1) % 200 == 0:
                 con = (len(rows) - i - 1) * (time.time() - t0) / (i + 1)
                 print(f"  ... {i+1}/{len(rows)}  giữ {giu}  còn ~{con/60:.0f} phút", flush=True)
@@ -241,9 +246,13 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--pool", type=int, default=50)
     ap.add_argument("--ra", default="", help="file jsonl đầu ra; mặc định CLEAN/sft.jsonl")
+    ap.add_argument("--nguon", default="train_sft.jsonl")
+    ap.add_argument("--gold", default="gold.jsonl")
+    ap.add_argument("--giu-het", action="store_true",
+                    help="ghi cả mẫu bị loại kèm ly_do_loai — dùng cho tập dev")
     a = ap.parse_args()
 
-    rows = [json.loads(l) for l in (CLEAN / "train_sft.jsonl").open(encoding="utf-8")]
+    rows = [json.loads(l) for l in (CLEAN / a.nguon).open(encoding="utf-8")]
     if a.n:
         rows = rows[: a.n]
 
@@ -269,7 +278,7 @@ def main() -> None:
     # Không mặc định ghi vào CLEAN: khi CLEAN là output kernel trước thì nó read-only,
     # và lỗi đó chỉ nổ SAU 3,5 giờ GPU. Cùng lớp lỗi với bm25.pkl ở `nap_index`.
     mac_dinh = CLEAN / "sft.jsonl" if os.access(CLEAN, os.W_OK) else Path("sft.jsonl")
-    sinh_tap(rows, r, tok, Path(a.ra) if a.ra else mac_dinh)
+    sinh_tap(rows, r, tok, Path(a.ra) if a.ra else mac_dinh, a.gold, a.giu_het)
 
 
 if __name__ == "__main__":
