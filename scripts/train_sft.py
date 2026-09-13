@@ -242,6 +242,13 @@ def main() -> None:
     ap.add_argument("--gen-bs", type=int, default=4)
     ap.add_argument("--kien-nhan", type=int, default=3, help="số lần eval không tiến bộ thì dừng")
     ap.add_argument("--seed", type=int, default=0)
+    # Phiên Kaggle chết cứng ở 12 giờ, và kernel chết vì hết giờ thì output KHÔNG được
+    # lưu — mất cả `tot_nhat/`. Dừng chủ động trước mốc đó để còn ghi được checkpoint.
+    ap.add_argument("--gio-toi-da", type=float, default=10.5)
+    # Nối tiếp phiên trước: nạp adapter đã có thay vì khởi tạo B=0. KHÔNG khôi phục
+    # optimizer/scheduler — mỗi phiên là một chu kỳ cosine riêng. Đặt `--lr` phiên sau
+    # thấp hơn (vd 3e-5) để không hất adapter đã hội tụ ra khỏi cực tiểu.
+    ap.add_argument("--tiep", default="", help="thư mục adapter của phiên trước")
     a = ap.parse_args()
 
     import torch
@@ -265,25 +272,36 @@ def main() -> None:
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
-    model = get_peft_model(
-        model,
-        LoraConfig(
-            r=a.r,
-            lora_alpha=a.alpha,
-            lora_dropout=a.dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-            # q/k/v/o + MLP. Chỉ gắn vào attention là cách thường thấy nhưng đây là bài
-            # TRÍCH văn bản: phần quyết định copy đúng chữ nào nằm ở MLP nhiều hơn.
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj"],
-        ),
-    )
+    if a.tiep:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, a.tiep, is_trainable=True)
+        print("nối tiếp adapter:", a.tiep)
+    else:
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                r=a.r,
+                lora_alpha=a.alpha,
+                lora_dropout=a.dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                # q/k/v/o + MLP. Chỉ gắn vào attention là cách thường thấy nhưng đây là
+                # bài TRÍCH văn bản: phần quyết định copy đúng chữ nào nằm ở MLP hơn.
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                "gate_proj", "up_proj", "down_proj"],
+            ),
+        )
     model.print_trainable_parameters()
     than = tim_than(model)
 
     rows = [m for m in (ma_hoa(r, tok, a.max_seq) for r in nap(Path(a.data))) if m]
-    dev = nap(Path(a.dev), a.dev_n)
+    # Xáo trước khi cắt: dev.jsonl giữ nguyên thứ tự warmup.json, lấy 120 dòng đầu là
+    # lấy một lát cắt tuỳ hứng — tỉ lệ nhóm trượt gold trong đó không phản ánh cả tập,
+    # mà `meteor_truot` đọc đúng nhóm đó. Seed cố định để hai lần chạy cùng một dev.
+    dev = nap(Path(a.dev))
+    random.Random(a.seed).shuffle(dev)
+    dev = dev[: a.dev_n] if a.dev_n else dev
     print(f"train {len(rows):,} mẫu | dev {len(dev):,} mẫu", flush=True)
 
     tong_buoc = int(len(rows) * a.epochs / (a.bs * a.accum))
@@ -355,6 +373,12 @@ def main() -> None:
                         dung = True
                         break
             if buoc >= tong_buoc:
+                dung = True
+                break
+            if (time.time() - t0) / 3600 >= a.gio_toi_da:
+                model.save_pretrained(ra / "cuoi")
+                print(f"  hết {a.gio_toi_da} giờ ở bước {buoc} — lưu {ra/'cuoi'} để "
+                      f"chạy tiếp bằng --tiep", flush=True)
                 dung = True
                 break
         if dung:
