@@ -63,3 +63,39 @@ def test_is_usable_trailing_ellipsis():
 def test_is_usable_empty():
     """Answer rỗng → False."""
     assert not is_usable_for_sft("q", "")
+
+
+def test_caption_anh_khong_phan_biet_hoa_thuong():
+    """Bản trước chỉ bắt "(Hình từ Internet)" nên lọt 135/6.929 dòng (1,9%) qua 4 biến
+    thể chữ thường. Fixture dùng đúng 4 biến thể đã đo được, không phải biến thể bịa."""
+    for bien_the in ("(Hình từ internet)", "(hình từ Internet)", "(hình từ internet)"):
+        out = clean_reference_answer(f"Căn cứ Điều 5.\n{bien_the}\nNội dung tiếp theo.")
+        assert "nternet" not in out, bien_the
+
+
+def test_nbsp_thanh_space_chu_khong_bi_xoa():
+    """948 lần U+00A0 trong tập. Xoá hẳn là dính hai từ lại: "kinh doanh" -> "kinhdoanh"."""
+    out = clean_reference_answer("Căn cứ Điều 5 về kinh doanh." + "x" * 200)
+    assert "kinh doanh" in out
+    assert " " not in out
+
+
+def test_bom_bi_xoa_de_duoi_cau_doc_dung():
+    """90 lần U+FEFF nằm SAU dấu chấm cuối, làm `endswith(".")` trả False — mọi phép đo
+    hình dạng đuôi đều lệch, và token cuối của target là ký tự vô nghĩa."""
+    out = clean_reference_answer("Căn cứ Điều 5. Nội dung." + "x" * 200 + ".﻿")
+    assert out.endswith(".")
+
+
+def test_teaser_cau_hoi_cuoi_bi_cat_nhung_giu_lai_phan_than():
+    """14,2% target kết thúc bằng tiêu đề bài kế tiếp. Cắt DÒNG chứ không bỏ mẫu."""
+    than = "Căn cứ Điều 5 Nghị định 90/2017/NĐ-CP thì mức phạt là 5.000.000 đồng. " * 5
+    out = clean_reference_answer(than + "\nLàng nghề cần đáp ứng điều kiện gì?")
+    assert "Làng nghề" not in out
+    assert "5.000.000 đồng" in out
+
+
+def test_teaser_khong_cat_duoc_thi_bi_loai():
+    """15/986 mẫu chỉ có một dòng và dòng đó là câu hỏi — không cứu được bằng cắt dòng."""
+    a = "Mẫu 08/CK-TNCN bản cam kết tổng thu nhập chưa đến mức chịu thuế như thế nào? " * 4
+    assert not is_usable_for_sft("q", clean_reference_answer(a))
