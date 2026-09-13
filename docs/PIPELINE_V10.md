@@ -114,18 +114,18 @@ Triệu chứng báo cáo: nhồi > 1 chunk thì model lặp từ và sinh ký t
 **Không tái lập được trên base model.** Đo 6 cấu hình (fp16/fp32 × raw/chat × 1/3/5
 chunk), mỗi cấu hình sinh 1300 token:
 
-| n_chunk | lặp 5-gram raw | lặp 5-gram chat |
-|---|---|---|
-| 1 | 72,7% | 98,2% |
-| 3 | 71,4% | 55,4% |
-| 5 | 71,4% | 3,2% |
+| n_chunk | raw fp16 | raw fp32 | chat fp16 | chat fp32 |
+|---|---|---|---|---|
+| 1 | 72,7% | 72,7% | 98,2% | 98,2% |
+| 3 | 71,4% | 71,4% | 55,4% | 55,4% |
+| 5 | 71,4% | 69,6% | 3,2% | 3,2% |
 
 Lặp **giảm** theo n_chunk, nặng nhất ở 1 chunk — ngược hẳn triệu chứng báo cáo. CJK 0
 ký tự ở cả 6. Nên nguyên nhân nằm ở tầng TRÊN base model.
 
 | nghi can | trạng thái |
 |---|---|
-| fp16 overflow | **loại** — max \|activation\| 62,9 / trần 65.504 (lượt đo trước); lượt này fp32 raw 1/3/5 chunk trả text TRÙNG TỪNG KÝ TỰ với fp16, `tensor không hữu hạn 0` |
+| fp16 overflow | **loại** — max \|activation\| 62,9 / trần 65.504 (lượt đo trước); lượt này 11/12 cấu hình fp32 trả text TRÙNG TỪNG KÝ TỰ với fp16, `tensor không hữu hạn 0` ở cả 12. Chỗ lệch duy nhất là raw 5 chunk (prompt 7.159 token): 71,4% vs 69,6%, đuôi khác — trôi số học tích luỹ ở prompt dài nhất, cả hai đều đã suy biến sẵn nên không đổi kết luận |
 | sampling | **loại** — `do_sample: false`, `repetition_penalty 1,1`, `no_repeat_ngram_size 5` đều đã bật |
 | Qwen3 thinking mode | **loại** — `enable_thinking=False` được nhận, `mốc thinking 0` ở cả 6 cấu hình |
 | nhét nhiều chunk | **loại** — lặp giảm 98,2% → 3,2% khi tăng 1 → 5 chunk |
