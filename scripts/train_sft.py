@@ -70,11 +70,22 @@ def ma_hoa(row: dict, tok, max_seq: int) -> dict | None:
     `add_generation_prompt=True` để phần prompt kết thúc đúng chỗ model bắt đầu sinh —
     ranh giới này chính là ranh giới mask.
     """
+    # MIGRATION_GUIDE_V5: từ transformers 5.x `apply_chat_template` trả BatchEncoding
+    # thay vì list[int] trần. Lấy ["input_ids"] với return_dict=True chạy đúng ở CẢ hai
+    # đời, còn return_dict=False là API cũ có thể biến mất.
+    #
+    # Lỗi này suýt im lặng: `len(BatchEncoding)` là SỐ KHOÁ (2), nên nếu `p_ids + a_ids`
+    # không ném TypeError thì `n_prompt=2` và mask prompt-loss hỏng toàn bộ — model học
+    # sinh cả prompt mà loss vẫn trông bình thường. Vì thế mới có assert bên dưới.
     p_ids = tok.apply_chat_template(
         [{"role": "user", "content": row["prompt"]}],
         add_generation_prompt=True,
         tokenize=True,
-    )
+        return_dict=True,
+    )["input_ids"]
+    if p_ids and not isinstance(p_ids[0], int):
+        p_ids = p_ids[0]  # một số phiên bản bọc thêm chiều batch
+    assert p_ids and isinstance(p_ids[0], int), f"p_ids không phải list[int]: {type(p_ids)}"
     a_ids = tok(row["answer"], add_special_tokens=False)["input_ids"] + [tok.eos_token_id]
     if len(p_ids) + len(a_ids) > max_seq:
         return None
