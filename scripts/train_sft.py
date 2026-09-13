@@ -351,6 +351,23 @@ def main() -> None:
     order = list(range(len(rows)))
     dung = False
 
+    # `from_pretrained` trả model ở chế độ EVAL. `GradientCheckpointingLayer.__call__`
+    # chỉ checkpoint khi `self.training`, nên quên train() thì checkpointing im lặng tắt
+    # — v10-train-sft v7 cấp phát 14,22/14,56 GiB rồi OOM ở batch đầu, traceback đi thẳng
+    # qua `modeling_layers.py:110 super().__call__` chứ không qua torch/utils/checkpoint.
+    # `model.train()` chỉ nằm ở cuối `cham_dev`, tức trước lần eval đầu tiên model chưa
+    # từng ở train mode. Hệ quả thứ hai, không ai thấy: LoRA dropout cũng không chạy.
+    model.train()
+    assert model.training, "model không ở train mode"
+    # Nhận cả hai tên thuộc tính: transformers đặt cờ `gradient_checkpointing` trên lớp,
+    # và gắn `_gradient_checkpointing_func`. Kiểm cả hai để assert không tự đổ vì một lần
+    # đổi tên nội bộ — thứ cần bắt là "không lớp nào bật", không phải tên biến.
+    _ckpt = [m for m in model.modules()
+             if getattr(m, "gradient_checkpointing", False)
+             or getattr(m, "_gradient_checkpointing_func", None) is not None]
+    assert _ckpt, "gradient checkpointing không gắn vào lớp nào — sẽ OOM ở batch đầu"
+    print(f"train mode | {len(_ckpt)} lớp bật gradient checkpointing", flush=True)
+
     for ep in range(math.ceil(a.epochs)):
         random.shuffle(order)
         for i in range(0, len(order), a.bs):
