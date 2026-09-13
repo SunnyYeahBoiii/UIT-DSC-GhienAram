@@ -222,6 +222,15 @@ def sinh_va_cham(model, tok, dev: list[dict], max_new: int, bs: int) -> dict:
     return diem
 
 
+def _LOP_MODEL() -> list:
+    """Các lớp Auto* thử theo thứ tự. Import trong hàm vì transformers cũ không có
+    `AutoModelForImageTextToText` — thiếu lớp nào thì bỏ qua lớp đó, không vỡ."""
+    import transformers
+
+    ten = ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoModel")
+    return [getattr(transformers, t) for t in ten if hasattr(transformers, t)]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -253,7 +262,7 @@ def main() -> None:
 
     import torch
     from peft import LoraConfig, get_peft_model
-    from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+    from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
     random.seed(a.seed)
     torch.manual_seed(a.seed)
@@ -266,9 +275,20 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"
 
-    model = AutoModelForCausalLM.from_pretrained(
-        a.model, dtype=torch.float16, attn_implementation="sdpa"
-    ).cuda()
+    # Model nền là biến thể Qwen đa phương thức: `architectures` không phải ForCausalLM
+    # nên AutoModelForCausalLM có thể từ chối ánh xạ. Thử lần lượt thay vì đoán, và IN RA
+    # lớp nào nhận — `tim_than` ở dưới dò đường tới hidden state dựa vào đúng lớp đó.
+    model = None
+    for lop in _LOP_MODEL():
+        try:
+            model = lop.from_pretrained(
+                a.model, dtype=torch.float16, attn_implementation="sdpa"
+            ).cuda()
+            print("nạp bằng", lop.__name__, flush=True)
+            break
+        except (ValueError, KeyError) as e:
+            print(f"{lop.__name__} không nhận: {e}", flush=True)
+    assert model is not None, "không lớp Auto* nào nạp được model nền"
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
