@@ -79,10 +79,15 @@ def nap_index(chunks: dict[str, Chunk]) -> ChunkIndex:
     thẳng `ChunkIndex.load` là chết sau 26 phút dựng dữ liệu, đúng ở bước cuối cùng.
     Build mất ~50s, rẻ hơn nhiều so với mất cả lượt chạy.
     """
-    cache = CLEAN / "bm25.pkl"
+    if (CLEAN / "bm25.pkl").exists():
+        return ChunkIndex.load(CLEAN / "bm25.pkl")
+    # Ghi cache cạnh CLEAN nếu ghi được, không thì vào cwd: khi CLEAN là output của
+    # kernel trước thì nó nằm dưới /kaggle/input, read-only. Build xong mà chết ở
+    # `save` là mất trắng 50s và cả lượt chạy.
+    cache = CLEAN / "bm25.pkl" if os.access(CLEAN, os.W_OK) else Path("bm25.pkl")
     if cache.exists():
         return ChunkIndex.load(cache)
-    print(f"không có {cache} — build (~50s)", flush=True)
+    print(f"không có bm25.pkl trong {CLEAN} — build (~50s) -> {cache}", flush=True)
     idx = ChunkIndex()
     idx.build(list(chunks.values()))
     idx.save(cache)
