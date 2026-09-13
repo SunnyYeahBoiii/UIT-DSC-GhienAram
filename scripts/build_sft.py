@@ -5,21 +5,23 @@ hai trường `question` và `answer` — KHÔNG có context. Context lúc infer
 sinh ra, có nhiễu, thiếu Điều, sai thứ tự. Train trên gold sạch rồi thả vào context nhiễu
 là train-inference mismatch: model chưa từng thấy căn cứ sai nằm cạnh căn cứ đúng.
 
-Nên dùng chính `Retriever` mà inference dùng, cùng tham số. Khác một điểm duy nhất:
-mẫu nào retrieval không lấy được document weak-gold thì BỎ, không chèn gold vào (xem
-`--gold` bên dưới).
+Nên dùng chính `Retriever` mà inference dùng, cùng tham số.
 
-Chạy đo ngân sách (không cần GPU, BM25 thuần):
+Chạy đo ngân sách:
+    # máy dev, BM25 thuần (cận dưới — không GPU nên không rerank được)
     QWEN_TOKENIZER=... PYTHONPATH=src python scripts/build_sft.py --do-token --n 300
+    # Kaggle, có cross-encoder
+    QWEN_TOKENIZER=... PYTHONPATH=src python scripts/build_sft.py --do-token --n 300 \
+        --model $MODEL --batch-size 32
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import pickle
 import statistics
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, "src")
@@ -28,9 +30,15 @@ from legalqa.bm25 import ChunkIndex
 from legalqa.chunking import Chunk
 from legalqa.corpus import Article, Document
 from legalqa.prompt import dung_prompt
-from legalqa.retrieve import Retriever
+from legalqa.retrieve import Retriever, chon_evidence
 
-CLEAN = Path("data/clean")
+CLEAN = Path(os.environ.get("CLEAN_DIR", "data/clean"))
+
+# Các cấu hình quét trong MỘT lần rank. Rerank là phần đắt (pool 50 cặp qua XLM-R large
+# mỗi câu); `chon_evidence` chỉ đọc lại list đã xếp hạng nên gần như miễn phí. Tính lại
+# `rank()` cho từng cấu hình là nhân thời gian GPU lên đúng số cấu hình mà không đổi
+# lấy một con số mới nào.
+CAU_HINH = ((5, 24_000), (5, 12_000), (3, 12_000), (5, 8_000), (3, 8_000))
 
 
 def nap_docs() -> dict[str, Document]:
@@ -53,17 +61,18 @@ def nap_docs() -> dict[str, Document]:
 
 
 def nap_chunks() -> dict[str, Chunk]:
+    keys = ("chunk_id", "doc_id", "start", "end", "text")
     chunks: dict[str, Chunk] = {}
     with (CLEAN / "chunks.jsonl").open(encoding="utf-8") as f:
         for line in f:
             o = json.loads(line)
-            c = Chunk(**o) if isinstance(o, dict) else Chunk(*o)
+            c = Chunk(**{k: o[k] for k in keys})
             chunks[c.chunk_id] = c
     return chunks
 
 
 def nap_gold() -> dict[str, set[str]]:
-    g = {}
+    g: dict[str, set[str]] = {}
     with (CLEAN / "gold.jsonl").open(encoding="utf-8") as f:
         for line in f:
             o = json.loads(line)
@@ -71,59 +80,83 @@ def nap_gold() -> dict[str, set[str]]:
     return g
 
 
-def do_token(rows: list[dict], r: Retriever, tok, top_n: int, max_chars: int) -> None:
+def do_token(rows: list[dict], r: Retriever, tok, batch: int) -> None:
     """Đo độ dài prompt THẬT để chốt `max_seq_len`, trước khi sinh cả tập.
 
     Không đoán từ số ký tự: tỉ lệ token/ký tự của tiếng Việt luật khác hẳn tiếng Anh, và
     `max_chars=24_000` kế thừa từ v9.2 (configs/kaggle_inference_t4.yaml) được đặt cho
-    context Qwen 3B chứ không cho seq len lúc train.
+    context Qwen 3B lúc suy luận, KHÔNG cho seq len lúc train.
+
+    Cột `gold` là tỉ lệ Evidence trả về chứa ít nhất một Document weak-gold. Đây mới là
+    đại lượng quyết định: cắt ngân sách rẻ hay đắt tuỳ nó tụt bao nhiêu, không tuỳ token
+    giảm bao nhiêu. Một mẫu SFT mà context không chứa gold là mẫu dạy model bịa.
     """
     gold = nap_gold()
-    dai = []
-    co_gold = trung_gold = 0
-    for row in rows:
-        evs = r.evidence(row["question"], top_n=top_n, max_chars=max_chars)
+    # dict[(top_n, max_chars)] -> (list token prompt, list token đáp, số Evidence, gold hit)
+    kq = {c: ([], [], 0, 0) for c in CAU_HINH}
+    ans_tok = {}
+    t0 = time.time()
+    for i, row in enumerate(rows):
+        ranked = r.rank(row["question"])  # phần đắt, dùng chung cho mọi cấu hình
         g = gold.get(row["id"])
-        if g:
-            co_gold += 1
-            trung_gold += any(e.doc_id in g for e in evs)
-        p = dung_prompt(row["question"], evs)
-        dai.append((len(tok.encode(p).ids), len(tok.encode(row["answer"]).ids), len(evs)))
-    pr = sorted(x for x, _, _ in dai)
-    tong = sorted(x + y for x, y, _ in dai)
-    n = len(pr)
-    q = lambda xs, k: xs[int(k * (len(xs) - 1))]
-    print(f"n={n}  top_n={top_n}  max_chars={max_chars}")
-    print(f"  gold trong Evidence: {trung_gold}/{co_gold} ({trung_gold/max(1,co_gold):.1%})")
-    print(f"  Evidence/câu : mean {statistics.mean(z for _, _, z in dai):.1f}")
-    print(f"  prompt token : p50 {q(pr,.5)} p90 {q(pr,.9)} p95 {q(pr,.95)} max {pr[-1]}")
-    print(f"  prompt+answer: p50 {q(tong,.5)} p90 {q(tong,.9)} p95 {q(tong,.95)} max {tong[-1]}")
-    for cap in (2048, 3072, 4096, 6144, 8192):
-        v = sum(1 for x in tong if x > cap)
-        print(f"  vượt {cap:5d}: {v} ({v/n:.1%})")
+        a_tok = len(tok.encode(row["answer"]).ids)
+        ans_tok[row["id"]] = a_tok
+        for cfg in CAU_HINH:
+            top_n, max_chars = cfg
+            evs = chon_evidence(ranked, r.docs, top_n=top_n, max_chars=max_chars)
+            p_tok = len(tok.encode(dung_prompt(row["question"], evs)).ids)
+            pr, an, so_ev, hit = kq[cfg]
+            pr.append(p_tok)
+            an.append(a_tok)
+            kq[cfg] = (pr, an, so_ev + len(evs), hit + bool(g and any(e.doc_id in g for e in evs)))
+        if (i + 1) % 50 == 0:
+            print(f"  ... {i+1}/{len(rows)}  {(time.time()-t0)/(i+1):.2f}s/câu", flush=True)
+
+    co_gold = sum(1 for row in rows if gold.get(row["id"]))
+    n = len(rows)
+    print(f"\nn={n}  câu có weak gold: {co_gold}  ({(time.time()-t0)/n:.2f}s/câu)")
+    print("\n| top_n | max_chars | gold | ev/câu | p50 | p90 | p95 | max | >4096 | >6144 | >8192 |")
+    print("|------:|----------:|-----:|-------:|----:|----:|----:|----:|------:|------:|------:|")
+    for cfg in CAU_HINH:
+        pr, an, so_ev, hit = kq[cfg]
+        tong = sorted(x + y for x, y in zip(pr, an))
+        q = lambda xs, k: xs[int(k * (len(xs) - 1))]
+        vuot = [f"{sum(1 for x in tong if x > c)/n:5.1%}" for c in (4096, 6144, 8192)]
+        print(f"| {cfg[0]} | {cfg[1]:,} | {hit/max(1,co_gold):.1%} | {so_ev/n:.1f} |"
+              f" {q(tong,.5)} | {q(tong,.9)} | {q(tong,.95)} | {tong[-1]} | "
+              + " | ".join(vuot) + " |")
+    print("\n(p50/p90/p95/max và cột >N là prompt + answer, tức seq len thật lúc train)")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--do-token", action="store_true")
     ap.add_argument("--n", type=int, default=0, help="0 = cả tập")
-    ap.add_argument("--top-n", type=int, default=5)
-    ap.add_argument("--max-chars", type=int, default=24_000)
+    ap.add_argument("--model", default="", help="đường dẫn reranker; rỗng = BM25 thuần")
+    ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument("--pool", type=int, default=50)
     a = ap.parse_args()
 
     rows = [json.loads(l) for l in (CLEAN / "train_sft.jsonl").open(encoding="utf-8")]
     if a.n:
         rows = rows[: a.n]
+
+    reranker = None
+    if a.model:
+        from legalqa.rerank import CrossEncoderReranker
+
+        reranker = CrossEncoderReranker(a.model, batch_size=a.batch_size)
     r = Retriever(
         index=ChunkIndex.load(CLEAN / "bm25.pkl"),
         chunks=nap_chunks(),
         docs=nap_docs(),
+        reranker=reranker,
+        pool=a.pool,
     )
     if a.do_token:
         from tokenizers import Tokenizer
 
-        do_token(rows, r, Tokenizer.from_file(os.environ["QWEN_TOKENIZER"]),
-                 a.top_n, a.max_chars)
+        do_token(rows, r, Tokenizer.from_file(os.environ["QWEN_TOKENIZER"]), a.batch_size)
         return
     raise SystemExit("chưa cài phần sinh tập — chạy --do-token trước để chốt ngân sách")
 
