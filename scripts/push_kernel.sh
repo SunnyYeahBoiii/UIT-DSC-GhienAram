@@ -19,6 +19,10 @@ MODELS="${3:-}"
 # `request.machine_shape = acc or meta["machine_shape"]` (kaggle_api_extended.py:6330).
 # Tức API BIẾT loại GPU — ghi chú cũ ở dưới nói ngược là sai, đã sửa.
 SHAPE="${4:-NvidiaTeslaT4}"
+# $5 = kernel_sources, phân cách bằng dấu phẩy. Dùng output của kernel trước làm input:
+# dựng lại clean/chunk/gold mất 26 phút, và kernel bật GPU thì 26 phút đó đốt quota
+# GPU dù không chạm GPU. Ngân sách là 30 GPU-h/tuần nên đây không phải tối ưu vặt.
+KERNELS="${5:-}"
 
 # Kiểm cú pháp mọi cell TRƯỚC khi đẩy. Notebook sinh bằng script từng mất "\n" cuối dòng
 # -> mọi dòng nối liền nhau, JSON vẫn hợp lệ nên không ai biết cho tới khi Kaggle ném
@@ -32,6 +36,10 @@ MS="[]"
 if [ -n "$MODELS" ]; then
   MS="[$(echo "$MODELS" | sed 's/[^,]*/"&"/g')]"
 fi
+KS="[]"
+if [ -n "$KERNELS" ]; then
+  KS="[$(echo "$KERNELS" | sed 's/[^,]*/"&"/g')]"
+fi
 cat > "$DIR/kernel-metadata.json" <<JSON
 {
   "id": "sunny070306/$SLUG",
@@ -44,7 +52,7 @@ cat > "$DIR/kernel-metadata.json" <<JSON
   "enable_internet": true,
   "dataset_sources": ["sunny070306/official", "sunny070306/legalqa-v10-src", "sunny070306/legalqa-warmup"],
   "competition_sources": [],
-  "kernel_sources": [],
+  "kernel_sources": $KS,
   "model_sources": $MS,
   "machine_shape": "$SHAPE"
 }

@@ -71,6 +71,24 @@ def nap_chunks() -> dict[str, Chunk]:
     return chunks
 
 
+def nap_index(chunks: dict[str, Chunk]) -> ChunkIndex:
+    """Nạp bm25.pkl, tự build nếu chưa có.
+
+    `build_chunks.py` KHÔNG sinh bm25.pkl — nó do `eval_retrieval.load_index()` dựng
+    rồi cache. Trên Kaggle chỉ chạy clean/chunk/gold nên file không tồn tại, và gọi
+    thẳng `ChunkIndex.load` là chết sau 26 phút dựng dữ liệu, đúng ở bước cuối cùng.
+    Build mất ~50s, rẻ hơn nhiều so với mất cả lượt chạy.
+    """
+    cache = CLEAN / "bm25.pkl"
+    if cache.exists():
+        return ChunkIndex.load(cache)
+    print(f"không có {cache} — build (~50s)", flush=True)
+    idx = ChunkIndex()
+    idx.build(list(chunks.values()))
+    idx.save(cache)
+    return idx
+
+
 def nap_gold() -> dict[str, set[str]]:
     g: dict[str, set[str]] = {}
     with (CLEAN / "gold.jsonl").open(encoding="utf-8") as f:
@@ -146,9 +164,10 @@ def main() -> None:
         from legalqa.rerank import CrossEncoderReranker
 
         reranker = CrossEncoderReranker(a.model, batch_size=a.batch_size)
+    chunks = nap_chunks()
     r = Retriever(
-        index=ChunkIndex.load(CLEAN / "bm25.pkl"),
-        chunks=nap_chunks(),
+        index=nap_index(chunks),
+        chunks=chunks,
         docs=nap_docs(),
         reranker=reranker,
         pool=a.pool,
