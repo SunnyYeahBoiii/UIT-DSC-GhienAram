@@ -45,7 +45,12 @@ def expand_to_evidence(
                 article_number=number,
                 text=text,
             )
-        # Span quá dài — cắt quanh Chunk, giữ heading của Điều đầu tiên
+        # Span quá dài — cắt quanh Chunk, giữ heading của Điều đầu tiên.
+        # `number` vẫn là TẤT CẢ Điều chạm, không lọc lại theo cửa sổ: đã đo trên
+        # 206.647 Evidence có Điều, 85.205 (41,2%) đi đường này, 26.532 trong đó chạm
+        # nhiều Điều — và 0 trường hợp cửa sổ đánh rơi một Điều đã khai. Không phải may:
+        # cửa sổ 900 từ dựng quanh TÂM Chunk 256 từ nên luôn chứa trọn Chunk, mà mọi
+        # Điều trong `touched` đều giao với Chunk. Đừng thêm bước lọc, nó không bắt gì.
         return _window_around_chunk(doc, chunk, touched[0], max_words, number)
 
     # Document không có Điều nào (15,9% corpus) — đường lui: cửa sổ quanh Chunk
