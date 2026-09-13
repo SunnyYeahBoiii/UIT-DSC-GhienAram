@@ -63,3 +63,27 @@ def test_doc_title_khong_bao_gio_la_slug_tho():
     doc.articles = parse_articles(doc.passage)
     ev = expand_to_evidence(doc, chunk_document(doc)[0])
     assert "-" not in ev.doc_title or "Thông tư" in ev.doc_title
+
+
+def test_heading_chen_vao_cua_so_la_nguyen_van_khong_phai_ban_normalize():
+    """`Article.heading` bị `re.sub(r"\\s+", " ")` + cắt 200 ký tự trong corpus.py — nó là
+    NHÃN, không phải lát cắt. Đo: 4.301/85.205 Evidence đường cửa sổ có heading khác
+    nguyên văn Passage, 10.660 bị cắt cụt. Dán nhãn đó vào `text` là phá ràng buộc giữ
+    nguyên văn theo offset, đúng chỗ 75,9% reference answer trích nguyên văn."""
+    tieu_de = "Điều 9.  Tiêu đề có  space thừa và " + "x" * 250
+    doc = _doc(tieu_de + "\n" + " ".join(f"w{i}" for i in range(5000)) + "\n")
+    assert len(doc.articles[0].heading) == 200, "fixture phải chạm ngưỡng cắt"
+    # Chunk ở GIỮA thân Điều để cửa sổ không tự trùm heading
+    chunk = chunk_document(doc, size=256, stride=256)[9]
+    ev = expand_to_evidence(doc, chunk, max_words=200)
+    assert ev.text.startswith(tieu_de + "\n"), "heading phải nguyên văn, đủ dài, đủ space"
+
+
+def test_cua_so_da_trum_heading_thi_khong_dan_lai():
+    """20,9% Evidence đường cửa sổ in heading hai lần. Hai dòng "Điều 5." liền nhau dạy
+    model rằng có hai Điều."""
+    doc = _doc(_art(5, 5000))
+    # Chunk NGẮN ở ngay đầu Điều -> tâm cửa sổ gần offset 0 -> cửa sổ tự trùm heading
+    chunk = chunk_document(doc, size=40, stride=40)[0]
+    ev = expand_to_evidence(doc, chunk, max_words=200)
+    assert ev.text.count("Điều 5.") == 1

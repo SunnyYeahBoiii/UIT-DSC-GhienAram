@@ -79,7 +79,12 @@ def _window_around_chunk(
     if not doc.passage.strip():
         return Evidence(doc.doc_id, doc.title, number, "")
 
-    heading = f"{article.heading}\n" if article is not None else ""
+    # KHÔNG dùng `article.heading`: corpus.py normalize `\s+` -> " " và cắt cụt 200 ký tự
+    # cho heading (nó là nhãn hiển thị, không phải lát cắt). Đo trên 85.205 Evidence đi
+    # đường này: 4.301 (5,0%) heading khác nguyên văn Passage, 10.660 (12,5%) bị cắt cụt
+    # giữa chừng. Dán chuỗi đó vào `text` là phá ràng buộc "giữ nguyên văn theo offset"
+    # đúng ở chỗ 75,9% reference answer trích nguyên văn.
+    heading = _heading_nguyen_van(doc, article) if article is not None else ""
     budget = max(1, max_words - len(heading.split()))
 
     # Ước lượng khoảng ký tự từ ngân sách từ: dùng mật độ ký tự/từ thật của Passage
@@ -92,9 +97,23 @@ def _window_around_chunk(
     end = min(len(doc.passage), start + int(budget * chars_per_word))
     body = doc.passage[start:end]
 
+    # Cửa sổ đã trùm heading rồi thì đừng dán lại: đo được 17.811/85.205 (20,9%) Evidence
+    # đường cửa sổ in heading hai lần. Model đọc hai dòng "Điều 5." liền nhau sẽ tưởng
+    # có hai Điều.
+    if article is not None and start <= article.start:
+        heading = ""
+
     return Evidence(
         doc_id=doc.doc_id,
         doc_title=doc.title,
         article_number=number,
         text=heading + body,
     )
+
+
+def _heading_nguyen_van(doc: Document, article: Article) -> str:
+    """Dòng heading cắt THẲNG từ Passage theo offset, kèm "\n" — không qua
+    `Article.heading` (đã normalize whitespace + cắt 200 ký tự)."""
+    nl = doc.passage.find("\n", article.start)
+    end = nl if nl != -1 and nl < article.end else article.end
+    return doc.passage[article.start : end] + "\n"
