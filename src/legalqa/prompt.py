@@ -12,7 +12,15 @@ tại, và 75,9% reference answer trích NGUYÊN VĂN — bịa một ký tự l
 """
 from __future__ import annotations
 
+import os
+
 from .evidence import Evidence
+
+# Tắt số hiệu văn bản khỏi dòng nhận dạng. Vì sao cần cờ: adapter b318 được train trên
+# prompt CHƯA có số hiệu; suy luận bằng prompt có số hiệu là đưa model vào phân phối nó
+# chưa từng thấy. Cờ để prompt lúc suy luận khớp đúng checkpoint đang dùng, không phải
+# để bật/tắt theo ý thích — đặt LEGALQA_SO_HIEU=0 khi chạy checkpoint đời cũ.
+CO_SO_HIEU = os.environ.get("LEGALQA_SO_HIEU", "1") != "0"
 
 # Nhãn cho Evidence gốc từ retrieval (`relation` rỗng). Không để trống: model cần biết
 # đoạn này là căn cứ chính, không phải một đoạn phụ trợ bị trôi mất nhãn.
@@ -28,7 +36,7 @@ def _tieu_de(ev: Evidence) -> str:
     # Số hiệu đứng TRƯỚC tiêu đề: tiêu đề là dòng ALL-CAPS crawl từ HTML, không mang số
     # hiệu lẫn năm ban hành, nên ở eval b318 model bịa năm văn bản 49/120 câu. Đo trên
     # cùng 120 câu: số hiệu này xuất hiện nguyên văn trong đáp án 65%.
-    so = f"{ev.doc_number} " if ev.doc_number else ""
+    so = f"{ev.doc_number} " if (ev.doc_number and CO_SO_HIEU) else ""
     return f"{dieu}{so}{ev.doc_title}"
 
 

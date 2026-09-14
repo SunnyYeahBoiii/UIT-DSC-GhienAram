@@ -93,3 +93,21 @@ def test_khong_co_so_hieu_thi_khong_de_lai_khoang_trang_thua():
     # bản cũ, không được thành "Điều 127,  Tiêu đề" hai space.
     out = dung_can_cu([_ev(doc_title="Tiêu đề", doc_number="")])
     assert "Điều 127, Tiêu đề" in out
+
+
+def test_cờ_tắt_số_hiệu_cho_checkpoint_đời_cũ(monkeypatch):
+    """b318 được train trên prompt chưa có số hiệu. Suy luận bằng prompt có số hiệu là
+    đổi phân phối input dưới chân checkpoint — cờ này là thứ duy nhất chặn việc đó."""
+    import importlib
+
+    from legalqa import prompt as mod
+
+    monkeypatch.setenv("LEGALQA_SO_HIEU", "0")
+    cu = importlib.reload(mod)
+    try:
+        out = cu.dung_can_cu([_ev(doc_title="Tiêu đề", doc_number="87/2018/NĐ-CP")])
+        assert "87/2018/NĐ-CP" not in out
+        assert "Điều 127, Tiêu đề" in out
+    finally:
+        monkeypatch.delenv("LEGALQA_SO_HIEU")
+        importlib.reload(mod)
