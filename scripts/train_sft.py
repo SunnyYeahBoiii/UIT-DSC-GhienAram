@@ -185,7 +185,9 @@ def tim_than(model):
     raise SystemExit("không tìm được phần Transformer — kiểm lại cấu trúc model")
 
 
-def sinh_va_cham(model, tok, dev: list[dict], max_new: int, bs: int) -> dict:
+def sinh_va_cham(
+    model, tok, dev: list[dict], max_new: int, bs: int, ra: Path = None, buoc: int = 0
+) -> dict:
     """Sinh câu trả lời trên dev rồi chấm bằng code BTC.
 
     Greedy, không sampling: đang đo chất lượng checkpoint chứ không đo may rủi. Sampling
@@ -247,6 +249,24 @@ def sinh_va_cham(model, tok, dev: list[dict], max_new: int, bs: int) -> dict:
             {k: du_doan[k] for k in truot if k in du_doan}, {k: ref[k] for k in truot}
         )["meteor"]
     diem["do_dai_tb"] = sum(len(v.split()) for v in du_doan.values()) / max(1, len(du_doan))
+
+    # Ghi nguyên văn output mỗi lần eval. Điểm số nói model tốt lên bao nhiêu, KHÔNG nói
+    # nó sai kiểu gì — trích nhầm Điều, bịa khi thiếu căn cứ, hay cụt câu. Muốn biết thì
+    # phải đọc chữ. Kèm `ly_do_loai` để lọc nhanh nhóm retrieval trượt gold, đúng nhóm
+    # `meteor_truot` đang giảm dần.
+    if ra is not None:
+        with (ra / f"du_doan_b{buoc}.jsonl").open("w", encoding="utf-8") as f:
+            for r in dev:
+                if r["id"] not in du_doan:
+                    continue
+                f.write(json.dumps({
+                    "id": r["id"],
+                    "question": r["question"],
+                    "du_doan": du_doan[r["id"]],
+                    "dap_an": r["answer"],
+                    "ly_do_loai": r.get("ly_do_loai"),
+                    "doc_ids": r.get("doc_ids"),
+                }, ensure_ascii=False) + "\n")
     # Đo, đừng ước lượng: ngân sách phiên Kaggle là 12 giờ và `--gio-toi-da` giả định
     # eval tốn ~20 phút. Nếu số thật khác xa thì phải biết ngay lần eval đầu, không phải
     # suy ra từ lúc kernel chết vì hết giờ.
@@ -424,7 +444,7 @@ def main() -> None:
                 )
 
             if buoc % a.eval_steps == 0 or buoc == tong_buoc:
-                d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs)
+                d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs, ra, buoc)
                 d |= {"buoc": buoc, "loss": loss.item(), "gnorm": gnorm}
                 lich_su.append(d)
                 (ra / "lich_su.json").write_text(
