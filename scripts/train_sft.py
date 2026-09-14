@@ -337,6 +337,10 @@ def main() -> None:
     # optimizer/scheduler — mỗi phiên là một chu kỳ cosine riêng. Đặt `--lr` phiên sau
     # thấp hơn (vd 3e-5) để không hất adapter đã hội tụ ra khỏi cực tiểu.
     ap.add_argument("--tiep", default="", help="thư mục adapter của phiên trước")
+    # `lich_su.json` chỉ ghi các mốc EVAL, nên nó nói 200 trong khi `cuoi/` của phiên 1 là
+    # bước 248 (dừng theo `--gio-toi-da` giữa hai lần eval). Lệch 48 bước giữa nhãn và
+    # trọng số. Phiên sau không cần cờ này vì đã ghi `cuoi_buoc.json`; cờ để vá phiên 1.
+    ap.add_argument("--moc", type=int, default=0, help="bước thật của adapter --tiep")
     a = ap.parse_args()
 
     import torch
@@ -413,8 +417,38 @@ def main() -> None:
     sched = get_cosine_schedule_with_warmup(opt, int(0.03 * tong_buoc), tong_buoc)
     scaler = torch.amp.GradScaler("cuda")
 
+    # NỐI TIẾP CẢ LỊCH SỬ, không chỉ trọng số. `--tiep` trước đây chỉ nạp adapter, còn
+    # `buoc` về 0 và `tot_nhat` về -1, kéo theo hai hệ quả sai:
+    #   1. Phiên mới lưu `tot_nhat/` ngay ở lần eval đầu KỂ CẢ khi thua phiên trước
+    #      (0,5801 ở b200), tức thư mục mang tên "tốt nhất" lại chứa adapter kém hơn.
+    #   2. `du_doan_b70.jsonl` của phiên 2 đè lên cùng tên của phiên 1, và đường METEOR
+    #      đứt làm hai mảnh không ghép được.
+    # Đọc `lich_su.json` nằm cạnh adapter: phiên trước ghi nó cùng chỗ với `cuoi/`.
     lich_su: list[dict] = []
     tot_nhat, khong_tien_bo, buoc = -1.0, 0, 0
+    moc = 0  # bước tích luỹ của các phiên trước, chỉ dùng để ĐÁNH SỐ
+    if a.tiep:
+        q = Path(a.tiep).parent / "lich_su.json"
+        if q.exists():
+            lich_su = json.loads(q.read_text(encoding="utf-8"))
+            if lich_su:
+                moc = max(d["buoc"] for d in lich_su)
+                tot_nhat = max(d["meteor"] for d in lich_su)
+                print(f"nối lịch sử: {len(lich_su)} mốc, bước tới {moc}, "
+                      f"METEOR tốt nhất {tot_nhat:.4f}", flush=True)
+        else:
+            print(f"CẢNH BÁO: không thấy {q} — bộ đếm bước và tot_nhat khởi động lại từ 0",
+                  flush=True)
+        # Bước THẬT của adapter, nếu phiên trước có ghi. Ưu tiên hơn mốc eval vì train
+        # còn chạy tiếp sau lần eval cuối rồi mới dừng theo giờ: phiên 1 eval lần cuối ở
+        # b200 nhưng `cuoi/` là b248.
+        qb = Path(a.tiep).parent / "cuoi_buoc.json"
+        if qb.exists():
+            moc = json.loads(qb.read_text(encoding="utf-8"))["buoc"]
+            print(f"bước thật của adapter: {moc} (từ cuoi_buoc.json)", flush=True)
+        if a.moc:
+            moc = a.moc
+            print(f"bước thật của adapter: {moc} (ép bằng --moc)", flush=True)
     t0 = time.time()
     order = list(range(len(rows)))
     dung = False
@@ -464,20 +498,23 @@ def main() -> None:
 
             if buoc % 10 == 0:
                 print(
-                    f"  b{buoc}/{tong_buoc} ep{ep} loss {loss.item():.4f} "
+                    f"  b{moc+buoc}/{moc+tong_buoc} ep{ep} loss {loss.item():.4f} "
                     f"gnorm {gnorm:.2f} lr {sched.get_last_lr()[0]:.2e} "
                     f"{(time.time()-t0)/60:.0f}p",
                     flush=True,
                 )
 
             if buoc % a.eval_steps == 0 or buoc == tong_buoc:
-                d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs, ra, buoc)
-                d |= {"buoc": buoc, "loss": loss.item(), "gnorm": gnorm}
+                # Điều kiện eval và lịch scheduler chạy theo `buoc` NỘI BỘ (0..tong_buoc),
+                # còn nhãn ghi ra file theo `moc+buoc` — hai đại lượng khác nhau, trộn
+                # vào nhau thì phiên nối tiếp sẽ eval sai nhịp.
+                d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs, ra, moc + buoc)
+                d |= {"buoc": moc + buoc, "loss": loss.item(), "gnorm": gnorm}
                 lich_su.append(d)
                 (ra / "lich_su.json").write_text(
                     json.dumps(lich_su, ensure_ascii=False, indent=1), encoding="utf-8"
                 )
-                print(f"  == EVAL b{buoc}: {d}", flush=True)
+                print(f"  == EVAL b{moc+buoc}: {d}", flush=True)
                 if d["meteor"] > tot_nhat:
                     tot_nhat, khong_tien_bo = d["meteor"], 0
                     model.save_pretrained(ra / "tot_nhat")
@@ -493,14 +530,34 @@ def main() -> None:
                 break
             if (time.time() - t0) / 3600 >= a.gio_toi_da:
                 model.save_pretrained(ra / "cuoi")
-                print(f"  hết {a.gio_toi_da} giờ ở bước {buoc} — lưu {ra/'cuoi'} để "
+                # Ghi bước THẬT cạnh adapter: `lich_su.json` chỉ có mốc eval nên phiên
+                # sau không suy ra được chỗ dừng, và nhãn bước sẽ lệch.
+                (ra / "cuoi_buoc.json").write_text(
+                    json.dumps({"buoc": moc + buoc}), encoding="utf-8"
+                )
+                print(f"  hết {a.gio_toi_da} giờ ở bước {moc+buoc} — lưu {ra/'cuoi'} để "
                       f"chạy tiếp bằng --tiep", flush=True)
                 dung = True
                 break
         if dung:
             break
 
-    print(f"\nMETEOR tốt nhất {tot_nhat:.4f} -> {ra/'tot_nhat'}")
+    # LUÔN lưu `cuoi/`, không chỉ ở nhánh hết giờ. Bản trước chỉ lưu khi `--gio-toi-da`
+    # cắt ngang, nên một phiên chạy trọn `tong_buoc` sẽ kết thúc mà KHÔNG có adapter cuối
+    # — phiên sau mất chỗ bám để `--tiep`, và toàn bộ số giờ GPU đó chỉ còn lại `tot_nhat/`
+    # nếu may mắn vượt mốc. Ghi lại là rẻ (83 MB), mất là không lấy lại được.
+    model.save_pretrained(ra / "cuoi")
+    (ra / "cuoi_buoc.json").write_text(json.dumps({"buoc": moc + buoc}), encoding="utf-8")
+    print(f"adapter cuối ở bước {moc+buoc} -> {ra/'cuoi'}")
+
+    # Nói rõ phiên này CÓ vượt mốc cũ hay không. Nếu không, `tot_nhat/` không tồn tại
+    # trong output và adapter tốt nhất vẫn là của phiên trước — im lặng ở đây thì người
+    # đọc log tưởng thư mục có sẵn.
+    if (ra / "tot_nhat").exists():
+        print(f"\nMETEOR tốt nhất {tot_nhat:.4f} -> {ra/'tot_nhat'}")
+    else:
+        print(f"\nphiên này KHÔNG vượt mốc cũ {tot_nhat:.4f} — adapter tốt nhất vẫn là "
+              f"của phiên trước, output chỉ có {ra/'cuoi'}")
     print(f"đường eval: {ra/'lich_su.json'}")
 
 
