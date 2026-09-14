@@ -483,9 +483,25 @@ def main() -> None:
         help="Guard against using the leakage-safe split adapter for public inference",
     )
     parser.add_argument(
+        "--expected-generator-adapter-fingerprint",
+        default=None,
+        help=(
+            "Optional SHA-256 identity guard for the completed QLoRA adapter. "
+            "The run stops before retrieval if the attached adapter differs."
+        ),
+    )
+    parser.add_argument(
         "--selection-weights",
         default=None,
         help="Optional YAML produced by evaluate_selector.py",
+    )
+    parser.add_argument(
+        "--expected-run-fingerprint",
+        default=None,
+        help=(
+            "Optional resolved-config identity guard. Use this for controlled "
+            "ablations so any unexpected retrieval/generation/selector change fails fast."
+        ),
     )
     parser.add_argument(
         "--require-selection-weights",
@@ -695,6 +711,16 @@ def main() -> None:
     model_identity["generator_adapter"] = (
         adapter_fingerprint(generator_adapter) if generator_adapter else None
     )
+    if (
+        args.expected_generator_adapter_fingerprint
+        and model_identity["generator_adapter"]
+        != args.expected_generator_adapter_fingerprint
+    ):
+        raise RuntimeError(
+            "Generator adapter fingerprint mismatch: "
+            f"expected={args.expected_generator_adapter_fingerprint}, "
+            f"actual={model_identity['generator_adapter']}"
+        )
 
     config = load_config(args.config)
     config["paths"]["warmup"] = None
@@ -774,6 +800,11 @@ def main() -> None:
     run_fingerprint = hashlib.sha256(
         json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
+    if args.expected_run_fingerprint and run_fingerprint != args.expected_run_fingerprint:
+        raise RuntimeError(
+            "Run fingerprint mismatch; this is not the requested controlled ablation: "
+            f"expected={args.expected_run_fingerprint}, actual={run_fingerprint}."
+        )
     dense_index_dir = Path(args.dense_index_input or args.dense_index_dir)
     if args.dense_index_input:
         validate_dense_index_input(
