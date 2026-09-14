@@ -25,7 +25,11 @@ def _tieu_de(ev: Evidence) -> str:
     ở dạng model copy lại được. 28,1% Evidence là cửa sổ lui không có số Điều (§7);
     những đoạn đó chỉ nêu tên văn bản, đừng bịa số."""
     dieu = f"Điều {ev.article_number}, " if ev.article_number else ""
-    return f"{dieu}{ev.doc_title}"
+    # Số hiệu đứng TRƯỚC tiêu đề: tiêu đề là dòng ALL-CAPS crawl từ HTML, không mang số
+    # hiệu lẫn năm ban hành, nên ở eval b318 model bịa năm văn bản 49/120 câu. Đo trên
+    # cùng 120 câu: số hiệu này xuất hiện nguyên văn trong đáp án 65%.
+    so = f"{ev.doc_number} " if ev.doc_number else ""
+    return f"{dieu}{so}{ev.doc_title}"
 
 
 def dung_can_cu(evidences: list[Evidence]) -> str:

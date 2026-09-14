@@ -439,6 +439,7 @@ def _sua_doi_cua(
                     doc_title=src.title,
                     article_number=am.src_article,
                     text=src.passage[am.start : am.end],
+                    doc_number=src.number,
                     # Nhãn nêu Điều CỤ THỂ bị sửa, không nêu cả cụm "126, 127": Evidence
                     # gốc chứa nhiều Điều thì model phải biết khoản này thay Điều nào.
                     relation=(
@@ -527,6 +528,7 @@ def _article_evidence(doc: Document | None, number: str) -> Evidence | None:
                 doc_title=doc.title,
                 article_number=a.number,
                 text=doc.passage[a.start : a.end],
+                doc_number=doc.number,
                 relation="Được dẫn chiếu",
             )
     return None

@@ -76,3 +76,20 @@ def test_danh_so_can_cu_tu_1():
     out = dung_can_cu([_ev(), _ev(text="khác")])
     assert out.startswith("[1] ")
     assert "\n[2] " in out
+
+
+def test_so_hieu_van_ban_vao_prompt_truoc_tieu_de():
+    """Tiêu đề ALL-CAPS crawl từ HTML không mang số hiệu lẫn năm ban hành: đo ở eval
+    b318, 49/120 câu model bịa ra năm văn bản không có trong prompt. Số hiệu phải nằm
+    trong prompt ở dạng model copy lại được, và đứng TRƯỚC tiêu đề vì 65% đáp án mở đầu
+    bằng cụm dẫn chiếu "Căn cứ Điều X <số hiệu>"."""
+    out = dung_can_cu([_ev(doc_title="NGHỊ ĐỊNH QUY ĐỊNH VỀ KINH DOANH KHÍ",
+                           doc_number="87/2018/NĐ-CP")])
+    assert "Điều 127, 87/2018/NĐ-CP NGHỊ ĐỊNH QUY ĐỊNH VỀ KINH DOANH KHÍ" in out
+
+
+def test_khong_co_so_hieu_thi_khong_de_lai_khoang_trang_thua():
+    # 5/120 Document dev không parse được số hiệu; dòng nhận dạng của chúng phải y hệt
+    # bản cũ, không được thành "Điều 127,  Tiêu đề" hai space.
+    out = dung_can_cu([_ev(doc_title="Tiêu đề", doc_number="")])
+    assert "Điều 127, Tiêu đề" in out

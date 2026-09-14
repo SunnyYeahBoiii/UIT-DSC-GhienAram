@@ -17,6 +17,11 @@ class Evidence:
     doc_title: str
     article_number: str | None
     text: str
+    # Số hiệu văn bản ("23/2019/NĐ-CP"). Đo trên 120 câu dev: đáp án trích đúng số hiệu
+    # này 65%, trong khi prompt cũ chỉ có tiêu đề ALL-CAPS crawl từ HTML — không mang số
+    # hiệu lẫn năm ban hành. Hệ quả đo được ở eval b318: 49/120 câu model BỊA ra năm văn
+    # bản không hề có trong prompt. Đưa số hiệu vào để model copy thay vì đoán.
+    doc_number: str = ""
     # Quan hệ với Evidence đã sinh ra nó ("Sửa đổi Điều 127 của ..."). Rỗng với
     # Evidence gốc từ retrieval. Prompt dán nhãn này để model biết đoạn nào sửa đoạn nào.
     relation: str = ""
@@ -44,6 +49,7 @@ def expand_to_evidence(
                 doc_title=doc.title,
                 article_number=number,
                 text=text,
+                doc_number=doc.number,
             )
         # Span quá dài — cắt quanh Chunk, giữ heading của Điều đầu tiên.
         # `number` vẫn là TẤT CẢ Điều chạm, không lọc lại theo cửa sổ: đã đo trên
@@ -77,7 +83,7 @@ def _window_around_chunk(
     để phân khoản, normalize whitespace là mất cấu trúc model cần để trích đúng khoản.
     """
     if not doc.passage.strip():
-        return Evidence(doc.doc_id, doc.title, number, "")
+        return Evidence(doc.doc_id, doc.title, number, "", doc_number=doc.number)
 
     # KHÔNG dùng `article.heading`: corpus.py normalize `\s+` -> " " và cắt cụt 200 ký tự
     # cho heading (nó là nhãn hiển thị, không phải lát cắt). Đo trên 85.205 Evidence đi
@@ -108,6 +114,7 @@ def _window_around_chunk(
         doc_title=doc.title,
         article_number=number,
         text=heading + body,
+        doc_number=doc.number,
     )
 
 
