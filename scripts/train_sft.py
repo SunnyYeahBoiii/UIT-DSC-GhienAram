@@ -269,11 +269,23 @@ def sinh_va_cham(
     diem = cham(du_doan, ref)
     # Tách riêng nhóm retrieval trượt gold: tập train đã loại hết nhóm này nên model
     # chưa từng thấy context thiếu căn cứ. Điểm trung bình sẽ che mất chỗ nó bịa.
-    truot = [r["id"] for r in dev if r.get("ly_do_loai")]
-    if truot:
-        diem["meteor_truot"] = cham(
-            {k: du_doan[k] for k in truot if k in du_doan}, {k: ref[k] for k in truot}
-        )["meteor"]
+    # ĐO RIÊNG TỪNG LÝ DO, đừng gộp. Bản trước lọc `if r.get("ly_do_loai")` nên
+    # `meteor_truot` là trung bình của 103 mẫu thuộc HAI nhóm khác bản chất — đo trên
+    # dev.jsonl: `retrieval_truot_gold` 59 và `khong_co_weak_gold` 44. Nhóm đầu là
+    # retrieval trượt, đo được "model có bịa khi context thiếu căn cứ không"; nhóm sau
+    # chỉ là không dựng được weak gold để đối chiếu, câu hỏi vẫn có thể trả lời tốt.
+    # Gộp lại thì một số đi xuống không cho biết nhóm nào kéo, tức không hành động được.
+    nhom: dict[str, list[str]] = {}
+    for r in dev:
+        if r.get("ly_do_loai"):
+            nhom.setdefault(r["ly_do_loai"], []).append(r["id"])
+    for ten, ids in nhom.items():
+        co = [k for k in ids if k in du_doan]
+        if co:
+            diem[f"meteor_{ten}"] = cham(
+                {k: du_doan[k] for k in co}, {k: ref[k] for k in co}
+            )["meteor"]
+            diem[f"n_{ten}"] = len(co)
     diem["do_dai_tb"] = sum(len(v.split()) for v in du_doan.values()) / max(1, len(du_doan))
 
     # Ghi nguyên văn output mỗi lần eval. Điểm số nói model tốt lên bao nhiêu, KHÔNG nói
