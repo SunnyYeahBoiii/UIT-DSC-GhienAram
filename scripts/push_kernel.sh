@@ -40,9 +40,23 @@ KS="[]"
 if [ -n "$KERNELS" ]; then
   KS="[$(echo "$KERNELS" | sed 's/[^,]*/"&"/g')]"
 fi
+# Chủ sở hữu lấy từ ~/.kaggle/kaggle.json chứ không ghi cứng "sunny070306": quota GPU
+# 30 giờ/tuần đã cạn nên phải chạy bằng tài khoản khác, mà `id` sai chủ thì Kaggle từ
+# chối push với lỗi 403 khó đọc. `dataset_sources` cũng theo chủ mới — dataset là riêng
+# từng tài khoản, trừ model nền được share thẳng nên giữ ref của chủ cũ.
+# Hỏi chính CLI, đừng đọc kaggle.json: máy này auth bằng `credentials.json` (OAuth,
+# `auth_method: ACCESS_TOKEN`) còn kaggle.json chỉ có khoá `key` — đọc `username` ở đó
+# ném KeyError. `kaggle config view` in ra username của auth ĐANG có hiệu lực, đúng thứ
+# quyết định kernel thuộc về ai.
+OWNER=$(kaggle config view 2>/dev/null | sed -n 's/^- username: //p')
+[ -n "$OWNER" ] || { echo "không đọc được username — chạy: kaggle config view"; exit 1; }
+echo "chủ sở hữu kernel: $OWNER"
+DS=${KAGGLE_DS:-official,legalqa-v10-src,legalqa-warmup}
+DSJ="[$(echo "$DS" | sed "s|[^,]*|\"$OWNER/&\"|g")]"
+
 cat > "$DIR/kernel-metadata.json" <<JSON
 {
-  "id": "sunny070306/$SLUG",
+  "id": "$OWNER/$SLUG",
   "title": "$SLUG",
   "code_file": "$SLUG.ipynb",
   "language": "python",
@@ -50,7 +64,7 @@ cat > "$DIR/kernel-metadata.json" <<JSON
   "is_private": true,
   "enable_gpu": true,
   "enable_internet": true,
-  "dataset_sources": ["sunny070306/official", "sunny070306/legalqa-v10-src", "sunny070306/legalqa-warmup"],
+  "dataset_sources": $DSJ,
   "competition_sources": [],
   "kernel_sources": $KS,
   "model_sources": $MS,
@@ -63,9 +77,9 @@ JSON
 # báo lỗi — client không validate, nhưng giá trị VẪN được gửi lên. Kết luận cũ dựa trên
 # "không báo lỗi", không dựa trên đọc lại giá trị thật.
 kaggle kernels push -p "$DIR"
-echo "https://www.kaggle.com/code/sunny070306/$SLUG"
+echo "https://www.kaggle.com/code/$OWNER/$SLUG"
 
 # Vẫn phải xác nhận: đặt được KHÔNG có nghĩa là đặt đúng. Đọc lại từ server sau khi đẩy.
 echo
 echo "  Kiểm accelerator thật sự nhận (đừng tin push, đọc lại từ server):"
-echo "    kaggle kernels pull sunny070306/$SLUG -m -p /tmp/k && grep machine_shape /tmp/k/kernel-metadata.json"
+echo "    kaggle kernels pull $OWNER/$SLUG -m -p /tmp/k && grep machine_shape /tmp/k/kernel-metadata.json"
