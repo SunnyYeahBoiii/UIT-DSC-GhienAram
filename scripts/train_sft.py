@@ -185,6 +185,32 @@ def tim_than(model):
     raise SystemExit("không tìm được phần Transformer — kiểm lại cấu trúc model")
 
 
+def ghi_du_doan(dev: list[dict], du_doan: dict[str, str], ra: Path, buoc: int) -> Path:
+    """Ghi nguyên văn output một lần eval ra `du_doan_b{buoc}.jsonl`.
+
+    Tách khỏi `sinh_va_cham` để test được mà không cần GPU: lỗi ở đây (thiếu khoá, ghi
+    hụt dòng) chỉ lộ sau 70 bước train ~2,7 giờ T4, quá đắt để phát hiện bằng cách chạy.
+
+    Điểm số nói model tốt lên bao nhiêu, KHÔNG nói nó sai kiểu gì — trích nhầm Điều, bịa
+    khi thiếu căn cứ, hay cụt câu. Muốn biết thì phải đọc chữ. Kèm `ly_do_loai` để lọc
+    nhanh nhóm retrieval trượt gold, đúng nhóm `meteor_truot` đang giảm dần.
+    """
+    duong = ra / f"du_doan_b{buoc}.jsonl"
+    with duong.open("w", encoding="utf-8") as f:
+        for r in dev:
+            if r["id"] not in du_doan:
+                continue
+            f.write(json.dumps({
+                "id": r["id"],
+                "question": r["question"],
+                "du_doan": du_doan[r["id"]],
+                "dap_an": r["answer"],
+                "ly_do_loai": r.get("ly_do_loai"),
+                "doc_ids": r.get("doc_ids"),
+            }, ensure_ascii=False) + "\n")
+    return duong
+
+
 def sinh_va_cham(
     model, tok, dev: list[dict], max_new: int, bs: int, ra: Path = None, buoc: int = 0
 ) -> dict:
@@ -255,18 +281,7 @@ def sinh_va_cham(
     # phải đọc chữ. Kèm `ly_do_loai` để lọc nhanh nhóm retrieval trượt gold, đúng nhóm
     # `meteor_truot` đang giảm dần.
     if ra is not None:
-        with (ra / f"du_doan_b{buoc}.jsonl").open("w", encoding="utf-8") as f:
-            for r in dev:
-                if r["id"] not in du_doan:
-                    continue
-                f.write(json.dumps({
-                    "id": r["id"],
-                    "question": r["question"],
-                    "du_doan": du_doan[r["id"]],
-                    "dap_an": r["answer"],
-                    "ly_do_loai": r.get("ly_do_loai"),
-                    "doc_ids": r.get("doc_ids"),
-                }, ensure_ascii=False) + "\n")
+        ghi_du_doan(dev, du_doan, ra, buoc)
     # Đo, đừng ước lượng: ngân sách phiên Kaggle là 12 giờ và `--gio-toi-da` giả định
     # eval tốn ~20 phút. Nếu số thật khác xa thì phải biết ngay lần eval đầu, không phải
     # suy ra từ lúc kernel chết vì hết giờ.
