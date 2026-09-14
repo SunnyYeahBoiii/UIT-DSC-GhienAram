@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import zipfile
@@ -147,6 +148,43 @@ def recovery_input_state(path: str | Path) -> dict[str, Any]:
     if recovery_path.is_file():
         return _read_bundle_state(recovery_path)
     raise RecoveryError(f"Recovery input không phải ZIP/thư mục: {recovery_path}")
+
+
+def recovery_content_fingerprint(path: str | Path) -> str:
+    """Path-independent identity for ZIP and extracted recovery aliases."""
+    recovery_path = Path(path).resolve()
+    state = recovery_input_state(recovery_path)
+    fingerprint = str(state.get("run_fingerprint", ""))
+    digest = hashlib.sha256()
+    if recovery_path.is_dir():
+        files = _checkpoint_files(recovery_path, fingerprint)
+        if not files or recovery_path / RECOVERY_STATE not in files:
+            raise RecoveryError(f"Thư mục recovery thiếu {RECOVERY_STATE}: {recovery_path}")
+        for item in files:
+            relative = item.relative_to(recovery_path).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            with item.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            digest.update(b"\0")
+    else:
+        try:
+            with zipfile.ZipFile(recovery_path) as archive:
+                files = sorted(
+                    (info for info in archive.infolist() if not info.is_dir()),
+                    key=lambda info: info.filename,
+                )
+                for info in files:
+                    digest.update(info.filename.encode("utf-8"))
+                    digest.update(b"\0")
+                    with archive.open(info) as handle:
+                        for block in iter(lambda: handle.read(1024 * 1024), b""):
+                            digest.update(block)
+                    digest.update(b"\0")
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise RecoveryError(f"Recovery ZIP không hợp lệ: {recovery_path}") from exc
+    return digest.hexdigest()
 
 
 def _restore_recovery_directory(

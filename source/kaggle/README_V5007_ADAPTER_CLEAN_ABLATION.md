@@ -28,7 +28,8 @@ The run must print these identities before expensive retrieval:
 ```text
 adapter: 590a732d4ea601e20b68d27407206265a52fd5753402ae2f9dc3e7084ccd850a
 dense:   b5c6eadb46ee7aceab44b8643fa8a5beefde5420c02cf2146e0fd30e38eccf23
-run:     8fc470f863a34338
+source:  5bc266cb8120439d9afdb695484927bf7c3e8d688e1e902d3de4ea859fba6192
+run:     b2b10d3ea7c9efbf
 ```
 
 Any mismatch is intentional failure: do not submit that run.
@@ -38,7 +39,8 @@ Any mismatch is intentional failure: do not submit that run.
 If the first session reports `PAUSED SAFELY`, save its
 `legalqa_recovery_latest.zip` as a Dataset. Attach exactly the same six inputs
 above plus this one recovery Dataset. Set `AUTO_RESUME = True`. The recovery
-fingerprint must be `8fc470f863a34338`.
+fingerprint must be `b2b10d3ea7c9efbf`. The ZIP or Dataset may have a Windows
+suffix/custom Kaggle slug; discovery uses its internal fingerprint, not its name.
 
 Never resume with a recovery from the original adapter (`de25...`) or from the
 newer full-pipeline run (`a090...`).
@@ -46,5 +48,5 @@ newer full-pipeline run (`a090...`).
 ## Completion
 
 The final cell accepts only a completed manifest with run fingerprint
-`8fc470f863a34338` and a ZIP containing exactly one non-empty 1,000-answer
+`b2b10d3ea7c9efbf` and a ZIP containing exactly one non-empty 1,000-answer
 `submission.json`.

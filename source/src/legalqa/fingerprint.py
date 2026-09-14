@@ -6,6 +6,18 @@ from pathlib import Path
 
 BLOCK_SIZE = 8 * 1024 * 1024
 
+RUNTIME_SOURCE_FILES = (
+    "SOURCE_CONTRACT.json",
+    "pyproject.toml",
+    "configs/kaggle_inference_t4.yaml",
+    "kaggle/run_end_to_end.py",
+    "kaggle/run_inference_only.py",
+    "scripts/preflight_kaggle.py",
+    "scripts/verify_v5007_adapter_ablation.py",
+)
+RUNTIME_SOURCE_DIRECTORIES = ("src", "wheelhouse")
+SOURCE_TEXT_SUFFIXES = {".json", ".py", ".toml", ".yaml", ".yml"}
+
 
 def sha256_file(path: str | Path) -> str:
     digest = hashlib.sha256()
@@ -98,5 +110,57 @@ def adapter_fingerprint(path: str | Path) -> str:
         digest.update(str(item.stat().st_size).encode("ascii"))
         digest.update(b"\0")
         digest.update(sha256_file(item).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def runtime_source_fingerprint(path: str | Path) -> str:
+    """Hash every source/dependency file that can affect public inference.
+
+    The A/B notebook itself is intentionally excluded so it can embed the
+    expected digest without creating a self-referential hash. Runtime code,
+    configuration, preflight/guard scripts, and the exact offline wheels are
+    all content-hashed.
+    """
+    root = Path(path)
+    files: set[Path] = set()
+    missing: list[str] = []
+    for relative in RUNTIME_SOURCE_FILES:
+        candidate = root / relative
+        if candidate.is_file():
+            files.add(candidate)
+        else:
+            missing.append(relative)
+    for relative in RUNTIME_SOURCE_DIRECTORIES:
+        directory = root / relative
+        if not directory.is_dir():
+            missing.append(relative + "/")
+            continue
+        files.update(
+            item
+            for item in directory.rglob("*")
+            if item.is_file()
+            and "__pycache__" not in item.parts
+            and ".ipynb_checkpoints" not in item.parts
+            and item.suffix.lower() != ".pyc"
+        )
+    if missing:
+        raise FileNotFoundError(f"Runtime source is incomplete under {root}: {missing}")
+
+    digest = hashlib.sha256()
+    for item in sorted(files, key=lambda value: value.relative_to(root).as_posix()):
+        relative = item.relative_to(root).as_posix()
+        if item.suffix.lower() in SOURCE_TEXT_SUFFIXES:
+            content = item.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            content_size = len(content)
+            content_sha = hashlib.sha256(content).hexdigest()
+        else:
+            content_size = item.stat().st_size
+            content_sha = sha256_file(item)
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(content_size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(content_sha.encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()

@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 from legalqa.fingerprint import (  # noqa: E402
     adapter_fingerprint,
     corpus_content_fingerprint,
+    runtime_source_fingerprint,
     sha256_file,
 )
 
@@ -40,7 +41,6 @@ EXPECTED = {
     "adapter_global_step": 169,
     "selector_sha256": "85a00e46e988b013741ab94c0b5bcf4777b6909aff4d2b3b60d00664f06ada38",
     "selector_schema": "selector-weights-v3-agentic-evidence",
-    "expected_run_fingerprint": "8fc470f863a34338",
 }
 
 
@@ -115,6 +115,9 @@ def validate_ablation_inputs(
     dense_index_dir: Path,
     adapter_dir: Path,
     selector_weights: Path,
+    source_dir: Path | None = None,
+    expected_source_fingerprint: str | None = None,
+    expected_run_fingerprint: str | None = None,
     expected: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate every non-model input for a one-variable adapter experiment."""
@@ -147,10 +150,23 @@ def validate_ablation_inputs(
     _require(isinstance(selector, dict), "Selector YAML must be an object")
     _require(selector.get("schema") == expected["selector_schema"], "Selector schema is not v0.5007 schema v3")
 
+    source_sha = None
+    if source_dir is not None or expected_source_fingerprint is not None:
+        _require(source_dir is not None, "source_dir is required with expected_source_fingerprint")
+        _require(
+            bool(expected_source_fingerprint),
+            "expected_source_fingerprint is required with source_dir",
+        )
+        source_sha = runtime_source_fingerprint(source_dir)
+        _require(
+            source_sha == expected_source_fingerprint,
+            "Runtime source differs from the pinned v0.5007 A/B source",
+        )
+
     return {
         "status": "ok",
         "experiment": "v5007-clean-adapter-a1",
-        "expected_run_fingerprint": expected["expected_run_fingerprint"],
+        "expected_run_fingerprint": expected_run_fingerprint,
         "inputs": {
             "questions_sha256": public_sha,
             "train_sha256": train_sha,
@@ -163,6 +179,7 @@ def validate_ablation_inputs(
             "adapter": adapter,
             "selector_sha256": selector_sha,
             "selector_schema": selector["schema"],
+            "source_fingerprint": source_sha,
         },
     }
 
@@ -175,6 +192,9 @@ def main() -> None:
     parser.add_argument("--dense-index-dir", type=Path, required=True)
     parser.add_argument("--adapter-dir", type=Path, required=True)
     parser.add_argument("--selector-weights", type=Path, required=True)
+    parser.add_argument("--source-dir", type=Path, required=True)
+    parser.add_argument("--expected-source-fingerprint", required=True)
+    parser.add_argument("--expected-run-fingerprint", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -185,6 +205,9 @@ def main() -> None:
         dense_index_dir=args.dense_index_dir,
         adapter_dir=args.adapter_dir,
         selector_weights=args.selector_weights,
+        source_dir=args.source_dir,
+        expected_source_fingerprint=args.expected_source_fingerprint,
+        expected_run_fingerprint=args.expected_run_fingerprint,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

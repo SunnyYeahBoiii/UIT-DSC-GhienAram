@@ -31,6 +31,7 @@ from legalqa.fingerprint import (  # noqa: E402
     adapter_fingerprint,
     checkpoint_fingerprint,
     corpus_content_fingerprint,
+    runtime_source_fingerprint,
     sha256_file,
 )
 from legalqa.models import (  # noqa: E402
@@ -42,7 +43,9 @@ from legalqa.models import (  # noqa: E402
 )
 from legalqa.pipeline import InferencePaused, generate_from_evidence  # noqa: E402
 from legalqa.recovery import (  # noqa: E402
+    RecoveryError,
     RecoveryManager,
+    recovery_content_fingerprint,
     recovery_input_state,
     restore_recovery_bundle,
 )
@@ -74,16 +77,41 @@ def discover_recovery_inputs(
 ) -> list[Path]:
     """Find inference recovery as a ZIP or as Kaggle's extracted Dataset."""
     input_root = Path(root)
-    candidates = set(input_root.rglob("legalqa_recovery_latest.zip"))
+    candidates = {
+        path
+        for path in input_root.rglob("*.zip")
+        if "recovery" in path.name.casefold()
+    }
     candidates.update(state.parent for state in input_root.rglob("recovery_state.json"))
-    if expected_fingerprint is not None:
-        candidates = {
-            candidate
-            for candidate in candidates
-            if str(recovery_input_state(candidate).get("run_fingerprint", ""))
-            == expected_fingerprint
-        }
-    return sorted(candidates, key=lambda path: (len(path.parts), path.as_posix()))
+    states: dict[Path, dict] = {}
+    for candidate in candidates:
+        try:
+            state = recovery_input_state(candidate)
+        except (FileNotFoundError, RecoveryError):
+            continue
+        if (
+            expected_fingerprint is None
+            or str(state.get("run_fingerprint", "")) == expected_fingerprint
+        ):
+            states[candidate] = state
+
+    groups: dict[str, list[Path]] = {}
+    for candidate in states:
+        identity = recovery_content_fingerprint(candidate)
+        groups.setdefault(identity, []).append(candidate)
+    selected = []
+    for aliases in groups.values():
+        selected.append(
+            min(
+                aliases,
+                key=lambda path: (
+                    0 if path.is_dir() else 1,
+                    len(path.parts),
+                    path.as_posix(),
+                ),
+            )
+        )
+    return sorted(selected, key=lambda path: (len(path.parts), path.as_posix()))
 
 
 def _safe_manifest_filename(value: object, label: str) -> str:
@@ -504,6 +532,11 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--expected-source-fingerprint",
+        default=None,
+        help="Optional SHA-256 guard for the exact runtime source and offline wheels.",
+    )
+    parser.add_argument(
         "--require-selection-weights",
         action="store_true",
         help="Fail instead of silently using the untuned selector",
@@ -639,6 +672,15 @@ def main() -> None:
     # a fail-fast artifact/version check aborts before generation.
     submission.unlink(missing_ok=True)
     environment = require_environment()
+    source_identity = runtime_source_fingerprint(PROJECT)
+    if (
+        args.expected_source_fingerprint
+        and source_identity != args.expected_source_fingerprint
+    ):
+        raise RuntimeError(
+            "Runtime source fingerprint mismatch: "
+            f"expected={args.expected_source_fingerprint}, actual={source_identity}"
+        )
 
     official_public_path = find_unique_file(input_root, "public-official.json")
     public_path = Path(args.questions_file) if args.questions_file else official_public_path
@@ -788,6 +830,7 @@ def main() -> None:
     }
     fingerprint_payload = {
         "cache_schema": CACHE_SCHEMA_VERSION,
+        "source": source_identity,
         "inputs": input_identity,
         "models": model_identity,
         "runtime": runtime_fingerprint,
@@ -954,6 +997,7 @@ def main() -> None:
             },
             "models": {key: str(value) if value else None for key, value in config["paths"]["models"].items()},
             "model_identity": model_identity,
+            "source_identity": source_identity,
             "index": index_report,
             "global_dense_index": dense_report,
             "train_memory_index": memory_report,
@@ -1020,6 +1064,7 @@ def main() -> None:
                 for key, value in config["paths"]["models"].items()
             },
             "model_identity": model_identity,
+            "source_identity": source_identity,
             "model_smoke": model_smoke_report,
             "runtime": config["runtime"],
             "index": index_report,
@@ -1065,6 +1110,7 @@ def main() -> None:
         },
         "models": {key: str(value) if value else None for key, value in config["paths"]["models"].items()},
         "model_identity": model_identity,
+        "source_identity": source_identity,
         "model_smoke": model_smoke_report,
         "runtime": config["runtime"],
         "retrieval_config": config["retrieval"],
