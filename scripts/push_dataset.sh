@@ -15,13 +15,22 @@ trap 'rm -rf "$DIR"' EXIT
 
 git archive "$BRANCH" | tar -x -C "$DIR"
 git log --oneline -1 "$BRANCH" > "$DIR/COMMIT.txt"
-cat > "$DIR/dataset-metadata.json" <<'JSON'
+# Chủ sở hữu hỏi CLI, không ghi cứng: quota GPU 30 giờ/tuần của sunny070306 đã cạn nên
+# phải chạy bằng tài khoản khác, mà dataset là riêng từng tài khoản.
+OWNER=$(kaggle config view 2>/dev/null | sed -n 's/^- username: //p')
+[ -n "$OWNER" ] || { echo "không đọc được username — chạy: kaggle config view"; exit 1; }
+
+cat > "$DIR/dataset-metadata.json" <<JSON
 {
   "title": "legalqa-v10-src",
-  "id": "sunny070306/legalqa-v10-src",
+  "id": "$OWNER/legalqa-v10-src",
   "licenses": [{"name": "unknown"}]
 }
 JSON
 
-kaggle datasets version -p "$DIR" -r zip -m "$(git log --oneline -1 "$BRANCH")"
-echo "https://www.kaggle.com/datasets/sunny070306/legalqa-v10-src"
+# `version` hỏng khi dataset chưa tồn tại trên tài khoản mới; thử create trước, im lặng
+# bỏ qua nếu đã có rồi mới lên version.
+MSG="$(git log --oneline -1 "$BRANCH")"
+kaggle datasets create -p "$DIR" -r zip 2>/dev/null \
+  || kaggle datasets version -p "$DIR" -r zip -m "$MSG"
+echo "https://www.kaggle.com/datasets/$OWNER/legalqa-v10-src"
