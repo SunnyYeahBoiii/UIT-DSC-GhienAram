@@ -55,7 +55,8 @@ def da_co(duong: Path) -> set[str]:
     return ids
 
 
-def pha_prompt(rows: list[dict], r: Retriever, ra: Path, han: float) -> None:
+def pha_prompt(rows: list[dict], r: Retriever, ra: Path, han: float,
+               max_chars: int = MAX_CHARS) -> None:
     xong = da_co(ra)
     con = [x for x in rows if x["id"] not in xong]
     print(f"pha 1 retrieval: {len(xong)} đã có, còn {len(con)}", flush=True)
@@ -63,7 +64,7 @@ def pha_prompt(rows: list[dict], r: Retriever, ra: Path, han: float) -> None:
     with ra.open("a", encoding="utf-8") as f:
         for i, row in enumerate(con):
             evs = chon_evidence(r.rank(row["question"]), r.docs,
-                                top_n=TOP_N, max_chars=MAX_CHARS)
+                                top_n=TOP_N, max_chars=max_chars)
             f.write(json.dumps({
                 "id": row["id"],
                 "question": row["question"],
@@ -218,6 +219,12 @@ def main() -> None:
     ap.add_argument("--bo-qua-pha1", action="store_true", help="prompts.jsonl đã đủ")
     ap.add_argument("--gio-pha1", type=float, default=3.0)
     ap.add_argument("--gio-pha2", type=float, default=7.0)
+    # Ngân sách ký tự phải KHỚP checkpoint đang chạy, không phải khớp mặc định hiện tại.
+    # `MAX_CHARS` giờ là vô hạn (10**9), nhưng adapter b318 được train trên prompt cắt ở
+    # 12.000 — suy luận bằng prompt dài gấp rưỡi là đưa model vào phân phối nó chưa từng
+    # thấy, cùng loại lỗi mà `LEGALQA_SO_HIEU` sinh ra. Chạy checkpoint đời cũ thì truyền
+    # `--max-chars 12000`.
+    ap.add_argument("--max-chars", type=int, default=MAX_CHARS)
     a = ap.parse_args()
 
     ra = Path(a.ra)
@@ -238,7 +245,7 @@ def main() -> None:
         chunks = nap_chunks()
         r = Retriever(index=nap_index(chunks), chunks=chunks, docs=nap_docs(),
                       reranker=reranker, pool=a.pool)
-        pha_prompt(rows, r, prompts, a.gio_pha1 * 3600)
+        pha_prompt(rows, r, prompts, a.gio_pha1 * 3600, a.max_chars)
         # Trả VRAM của reranker trước khi nạp Qwen: 0,568B fp16 + 2B fp16 + KV cache của
         # batch 4 × 6.000 token cùng lúc là sát trần 16 GB của T4.
         del r, reranker

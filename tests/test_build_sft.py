@@ -30,8 +30,13 @@ def test_loai_khi_retrieval_truot():
     assert giu_mau([_Ev("a")], {"z"}, 1000) == "retrieval_truot_gold"
 
 
-def test_loai_khi_vuot_max_seq_du_da_trung_gold():
-    """Trúng gold vẫn phải loại nếu quá dài: truncate cắt từ đuôi, mà đuôi là reference
-    answer — giữ lại là dạy model dừng giữa câu."""
-    assert giu_mau([_Ev("a")], {"a"}, MAX_SEQ + 1) == "vuot_max_seq"
-    assert giu_mau([_Ev("a")], {"a"}, MAX_SEQ) == ""
+def test_khong_con_loai_theo_seq_len():
+    """`giu_mau` KHÔNG được loại theo độ dài nữa (quyết định 2026-09-14: bỏ trần token).
+
+    Lọc hai chỗ là nguồn lỗi thật chứ không phải chuyện thẩm mỹ: `build_sft` loại theo
+    tokenizer nó tự nạp, `train_sft` loại lại theo chat template — hai con số khác nhau
+    trên cùng một mẫu. Cổng duy nhất bây giờ là `train_sft.py --max-seq`, nơi seq_len
+    đo đúng thứ sẽ vào GPU.
+    """
+    assert giu_mau([_Ev("a")], {"a"}, MAX_SEQ + 1) == ""
+    assert giu_mau([_Ev("a")], {"a"}, 10 * MAX_SEQ) == ""

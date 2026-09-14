@@ -48,14 +48,21 @@ CAU_HINH = ((5, 24_000), (5, 12_000), (3, 12_000), (5, 8_000), (3, 8_000))
 #   |     3 |    12.000 | 86,6% |    2,9 | 3014 | 5109 |  4,3% |
 #   |     5 |     8.000 | 83,2% |    2,1 | 2249 | 3740 |  0,0% |
 #
-# 24k mua thêm 1,1 điểm gold bằng cái giá 83% mẫu vượt 4096 token — không đáng.
-# `top_n=3` không tiết kiệm gì (2,9 vs 3,4 Evidence, vì `max_chars` mới là ràng buộc
-# cắn thật) mà mất 1,5 điểm. Chọn 5/12.000.
-TOP_N, MAX_CHARS = 5, 12_000
+# Quyết định của người dùng (2026-09-14): BỎ trần ký tự, mỗi câu lấy đủ `top_n=5`
+# Evidence. Đọc bảng trên theo đúng cột đang đánh đổi: `max_chars=12.000` cắn trước
+# `top_n` (3,4 Evidence/câu chứ không phải 5), nên nó là thứ đang vứt bằng chứng —
+# và 21,3% câu train bị loại vì "retrieval_truot_gold" là loại SAU khi đã cắt. Trần ký
+# tự vừa cắt bằng chứng vừa bị tính vào tỉ lệ trượt.
+#
+# `chon_evidence` dừng theo `top_n` HOẶC `max_chars`, cái nào chặn trước thì thắng, nên
+# tắt trần bằng một số lớn hơn mọi prompt có thể có thay vì sửa chữ ký hàm. 10**9 ký tự
+# > tổng corpus, tức nhánh ký tự không bao giờ cắn — `top_n` là ràng buộc duy nhất.
+TOP_N, MAX_CHARS = 5, 10**9
 
-# Cắt trên seq len. Max đo được là 5.109 trên 300 mẫu; 6.144 chừa biên cho đuôi của
-# 6.908 mẫu. Mẫu vượt bị LOẠI chứ không truncate: truncate cắt từ đuôi, mà đuôi là
-# reference answer — mẫu còn lại dạy model dừng giữa câu.
+# MAX_SEQ giữ lại làm HẰNG SỐ BÁO CÁO, không còn là bộ lọc: `giu_mau` đã bỏ nhánh
+# "vuot_max_seq" theo cùng quyết định trên. Vẫn in phân phối quanh mốc này để biết bao
+# nhiêu mẫu đắt hơn ngân sách VRAM cũ. Cổng thật sự bây giờ nằm ở `train_sft.py
+# --max-seq`, nơi mẫu quá dài bị bỏ ngay lúc mã hoá — một chỗ thay vì hai.
 MAX_SEQ = 6_144
 
 
@@ -169,7 +176,7 @@ def do_token(rows: list[dict], r: Retriever, tok, batch: int) -> None:
     print("\n(p50/p90/p95/max và cột >N là prompt + answer, tức seq len thật lúc train)")
 
 
-def giu_mau(evs, gold_docs: set[str] | None, seq_len: int) -> str:
+def giu_mau(evs, gold_docs: set[str] | None, seq_len: int = 0) -> str:
     """Lý do loại, hoặc "" nếu giữ. Tách khỏi vòng lặp để test được không cần GPU.
 
     Quyết định của người dùng: mẫu mà retrieval trượt gold thì LOẠI hẳn, không chèn gold
@@ -186,8 +193,10 @@ def giu_mau(evs, gold_docs: set[str] | None, seq_len: int) -> str:
         return "khong_co_weak_gold"
     if not any(e.doc_id in gold_docs for e in evs):
         return "retrieval_truot_gold"
-    if seq_len > MAX_SEQ:
-        return "vuot_max_seq"
+    # Không còn loại theo `seq_len`. Trước đây trần ký tự 12.000 đã cắt bằng chứng RỒI
+    # mới đo seq_len, nên mẫu "vuot_max_seq" là mẫu dài kể cả sau khi đã bị cắt — loại
+    # nó là loại đúng những câu cần nhiều Điều nhất. Mẫu quá dài bây giờ bị bỏ ở
+    # `train_sft.py --max-seq` lúc mã hoá, đúng nơi ràng buộc VRAM thật sự nằm.
     return ""
 
 
@@ -200,7 +209,7 @@ def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path, ten_gold: str, giu_h
     bài trích — masking phần prompt là bắt buộc, không phải tuỳ chọn.
     """
     gold = nap_gold(ten_gold)
-    bo = {"khong_co_weak_gold": 0, "retrieval_truot_gold": 0, "vuot_max_seq": 0}
+    bo = {"khong_co_weak_gold": 0, "retrieval_truot_gold": 0}
     giu = 0
     t0 = time.time()
     with ra.open("w", encoding="utf-8") as f:

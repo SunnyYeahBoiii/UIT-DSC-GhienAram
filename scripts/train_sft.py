@@ -323,7 +323,13 @@ def main() -> None:
     ap.add_argument("--dropout", type=float, default=0.05)
     ap.add_argument("--bs", type=int, default=1)
     ap.add_argument("--accum", type=int, default=16)
-    ap.add_argument("--max-seq", type=int, default=6144)
+    # 10.240 chứ không 6.144: bỏ trần ký tự trong `build_sft` đẩy seq_len p50 3.442 ->
+    # 5.071, p99 4.847 -> 8.244, max 6.162 -> 8.377 (đo 300 câu, BM25, tokenizer Qwen2).
+    # 6.144 sẽ âm thầm vứt 18,3% mẫu ngay lúc mã hoá — đúng những câu nhiều Điều mà việc
+    # bỏ trần sinh ra. 10.240 chừa biên trên max đo được vì rerank xếp khác BM25.
+    # Cái giá: activation ở bs=1 tăng ~1,7x so với 6.144. Gradient checkpointing đã bật
+    # và lm_head chỉ chạy trên lát đáp án, nhưng đây VẪN là rủi ro OOM chưa đo trên T4.
+    ap.add_argument("--max-seq", type=int, default=10240)
     ap.add_argument("--eval-steps", type=int, default=150)
     ap.add_argument("--dev-n", type=int, default=120)
     ap.add_argument("--max-new", type=int, default=768)
