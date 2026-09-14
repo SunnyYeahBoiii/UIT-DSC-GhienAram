@@ -28,9 +28,14 @@ cat > "$DIR/dataset-metadata.json" <<JSON
 }
 JSON
 
-# `version` hỏng khi dataset chưa tồn tại trên tài khoản mới; thử create trước, im lặng
-# bỏ qua nếu đã có rồi mới lên version.
+# Hỏi TỒN TẠI trước, đừng dựa vào mã thoát: `kaggle datasets create` trên dataset đã có
+# in "title already in use" rồi vẫn TRẢ VỀ 0, nên `create || version` không bao giờ chạy
+# tới version và bản đẩy im lặng không lên. Cùng họ với lỗi `!python` không ném theo mã
+# thoát đã đốt một phiên Kaggle.
 MSG="$(git log --oneline -1 "$BRANCH")"
-kaggle datasets create -p "$DIR" -r zip 2>/dev/null \
-  || kaggle datasets version -p "$DIR" -r zip -m "$MSG"
+if kaggle datasets files "$OWNER/legalqa-v10-src" >/dev/null 2>&1; then
+  kaggle datasets version -p "$DIR" -r zip -m "$MSG"
+else
+  kaggle datasets create -p "$DIR" -r zip
+fi
 echo "https://www.kaggle.com/datasets/$OWNER/legalqa-v10-src"
