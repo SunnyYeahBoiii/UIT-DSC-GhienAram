@@ -51,8 +51,11 @@ fi
 OWNER=$(kaggle config view 2>/dev/null | sed -n 's/^- username: //p')
 [ -n "$OWNER" ] || { echo "không đọc được username — chạy: kaggle config view"; exit 1; }
 echo "chủ sở hữu kernel: $OWNER"
-DS=${KAGGLE_DS:-official,legalqa-v10-src,legalqa-warmup}
-DSJ="[$(echo "$DS" | sed "s|[^,]*|\"$OWNER/&\"|g")]"
+# Mục có sẵn "/" giữ nguyên chủ: dữ liệu thi vẫn nằm ở `sunny070306/official` (được
+# share sang), chỉ dataset do ta đẩy mới thuộc $OWNER. Prefix tất tay thành
+# "$OWNER/official" là 404 im lặng — kernel chạy rồi mới chết ở assert selected-contexts.
+DS=${KAGGLE_DS:-sunny070306/official,legalqa-v10-src,legalqa-clean}
+DSJ="[$(echo "$DS" | tr ',' '\n' | sed "s|^\([^/]*\)$|$OWNER/\1|; s|.*|\"&\"|" | paste -sd, -)]"
 
 cat > "$DIR/kernel-metadata.json" <<JSON
 {
