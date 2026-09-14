@@ -79,7 +79,18 @@ JSON
 # này khẳng định ngược lại vì chỉ thử cờ --accelerator với giá trị rác và thấy nó không
 # báo lỗi — client không validate, nhưng giá trị VẪN được gửi lên. Kết luận cũ dựa trên
 # "không báo lỗi", không dựa trên đọc lại giá trị thật.
-kaggle kernels push -p "$DIR"
+# Bắt "successfully pushed" chứ không tin mã thoát: đẩy trong lúc kernel ĐANG CHẠY thì
+# Kaggle in URL, thoát 0, mà KHÔNG tạo version mới. 2026-09-14 đã mất một vòng vì thế —
+# tưởng v10-build-data chạy bản bỏ trần ký tự, server vẫn giữ bản cũ. Cùng họ với
+# `datasets create` in "title already in use" rồi vẫn thoát 0.
+OUT=$(kaggle kernels push -p "$DIR" 2>&1)
+echo "$OUT"
+echo "$OUT" | grep -q "successfully pushed" || {
+  echo
+  echo "PUSH KHÔNG TẠO VERSION MỚI. Thường vì kernel đang chạy — chờ nó xong rồi đẩy lại."
+  echo "    kaggle kernels status $OWNER/$SLUG"
+  exit 1
+}
 echo "https://www.kaggle.com/code/$OWNER/$SLUG"
 
 # Vẫn phải xác nhận: đặt được KHÔNG có nghĩa là đặt đúng. Đọc lại từ server sau khi đẩy.
