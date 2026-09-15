@@ -114,6 +114,24 @@ def gop(batch: list[dict], pad_id: int) -> dict:
     }
 
 
+# Khối 512 token cho cross-entropy. v10-train-sft3 v1 OOM ở backward với
+# `Tried to allocate 2.71 GiB`, đúng bằng 2.933 x 248.070 x 4 byte — gradient của logits
+# một MẪU ĐƠN LẺ. `--bs` đã là 1 nên giảm batch không cứu được: phải cắt BÊN TRONG mẫu.
+# Đo trên sft.jsonl phiên 3: token đáp án p50 455 (khớp giả định cũ trong docstring)
+# nhưng max 3.469 — đuôi này trước đây bị trần 12.000 ký tự loại hộ, bỏ trần là nó quay
+# lại. 512 giữ đỉnh ở 512*248.070*4 = 508 MB.
+KHOI_CE = 512
+
+
+def _ce_khoi(lm, h, nhan):
+    """Một khối cross-entropy. Tách ra hàm riêng để `checkpoint` gọi lại được lúc backward."""
+    import torch.nn.functional as F
+
+    # float() trước cross_entropy: logsumexp trên 248.070 lớp ở fp16 mất chính xác đủ để
+    # gradient nhiễu. Chỉ KHOI_CE hàng nên upcast ở đây rẻ.
+    return F.cross_entropy(lm(h).float(), nhan, reduction="sum")
+
+
 def loss_dap_an(model, lo, batch):
     """Cross-entropy chỉ trên token đáp án, lm_head chỉ chạy trên lát đáp án.
 
@@ -126,7 +144,7 @@ def loss_dap_an(model, lo, batch):
     tránh.
     """
     import torch
-    import torch.nn.functional as F
+    from torch.utils.checkpoint import checkpoint
 
     lm = model.get_output_embeddings()
     # Mỏ neo đồ thị dựng LƯỜI, chỉ khi batch không có token đáp án nào. Bản trước khởi
@@ -144,9 +162,19 @@ def loss_dap_an(model, lo, batch):
             continue
         h = lo[i, a - 1 : b - 1, :]
         nhan = batch["input_ids"][i, a:b].to(h.device)
-        # float() trước cross_entropy: logsumexp trên 248.070 lớp ở fp16 mất chính xác
-        # đủ để gradient nhiễu. Chỉ 450 hàng nên upcast ở đây rẻ.
-        ce = F.cross_entropy(lm(h).float(), nhan, reduction="sum")
+        # Tổng CE theo khối BẰNG ĐÚNG CE một lần: reduction="sum" cộng theo hàng độc
+        # lập nên đây là phép biến đổi bộ nhớ, không đổi toán. Không có checkpoint thì
+        # autograd giữ log_softmax của CẢ lát, tức đúng cái tensor đã làm OOM.
+        #
+        # use_reentrant=False: bản reentrant đòi input requires_grad và không khôi phục
+        # autocast state lúc recompute. `loss_dap_an` được gọi NGOÀI khối autocast của
+        # vòng train (train_sft.py:483-487) nên recompute phải khớp lần forward đầu,
+        # và non-reentrant là đường bảo đảm điều đó.
+        ce = None
+        for s in range(0, h.size(0), KHOI_CE):
+            phan = checkpoint(_ce_khoi, lm, h[s : s + KHOI_CE], nhan[s : s + KHOI_CE],
+                              use_reentrant=False)
+            ce = phan if ce is None else ce + phan
         tong = ce if tong is None else tong + ce
         dem += b - a
     if tong is None:

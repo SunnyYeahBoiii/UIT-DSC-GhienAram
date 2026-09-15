@@ -68,3 +68,57 @@ def test_bo_qua_mau_khong_co_token_dap_an():
     batch["n_prompt"] = torch.tensor([5])
     loss, dem = loss_dap_an(_ModelGia(), lo, batch)
     assert dem == 0 and loss.item() == 0.0
+
+
+def test_ce_theo_khoi_bang_ce_mot_lan():
+    """Lát đáp án dài hơn KHOI_CE phải cho ĐÚNG cùng loss như tính một phát.
+
+    Chia khối là phép biến đổi bộ nhớ để tránh OOM (v10-train-sft3 v1 chết vì gradient
+    logits 2,71 GiB của một mẫu đơn lẻ), không được đổi toán. Lệch chỉ số giữa lát
+    hidden và lát nhãn trong vòng khối sẽ không làm gì đổ — chỉ làm loss sai lặng lẽ.
+    """
+    import torch.nn.functional as F
+
+    from train_sft import KHOI_CE
+
+    V, n_ans = 7, KHOI_CE * 2 + 37  # cố ý KHÔNG chia hết cho KHOI_CE
+    torch.manual_seed(0)
+    n_prompt = 3
+    ids = torch.randint(0, V, (1, n_prompt + n_ans))
+    lo = torch.randn(1, n_prompt + n_ans, V)
+    batch = {
+        "input_ids": ids,
+        "n_prompt": torch.tensor([n_prompt]),
+        "n_tong": torch.tensor([n_prompt + n_ans]),
+    }
+    loss, dem = loss_dap_an(_ModelGia(), lo, batch)
+
+    h = lo[0, n_prompt - 1 : n_prompt + n_ans - 1, :]
+    mong = F.cross_entropy(h.float(), ids[0, n_prompt:], reduction="sum") / n_ans
+    assert dem == n_ans
+    assert torch.allclose(loss, mong, atol=1e-5), f"{loss.item()} != {mong.item()}"
+
+
+def test_gradient_chay_qua_checkpoint():
+    """`checkpoint` nuốt gradient nếu nối đồ thị sai, và loss vẫn in ra số đẹp.
+
+    Không có test này thì một lượt train 6 giờ có thể chạy với grad toàn 0 mà chỉ dấu
+    hiệu duy nhất là gnorm — thứ chỉ đọc được sau khi đã đốt quota.
+    """
+    V, n_ans = 7, 600  # > KHOI_CE để đi qua nhiều khối
+    torch.manual_seed(0)
+    n_prompt = 2
+    ids = torch.randint(0, V, (1, n_prompt + n_ans))
+    lo = torch.randn(1, n_prompt + n_ans, V, requires_grad=True)
+    batch = {
+        "input_ids": ids,
+        "n_prompt": torch.tensor([n_prompt]),
+        "n_tong": torch.tensor([n_prompt + n_ans]),
+    }
+    loss, _ = loss_dap_an(_ModelGia(), lo, batch)
+    loss.backward()
+    assert lo.grad is not None
+    assert torch.isfinite(lo.grad).all()
+    assert lo.grad.abs().sum() > 0
+    # Token prompt (trừ vị trí cuối, vốn dự đoán token đáp án đầu) KHÔNG được nhận grad.
+    assert lo.grad[0, : n_prompt - 1, :].abs().sum() == 0
