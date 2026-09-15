@@ -504,17 +504,49 @@ def main() -> None:
     assert _ckpt, "gradient checkpointing không gắn vào lớp nào — sẽ OOM ở batch đầu"
     print(f"train mode | {len(_ckpt)} lớp bật gradient checkpointing", flush=True)
 
+    # Số đo để phiên sau không phải đoán: T của mẫu OOM, và T lớn nhất đã chạy lọt.
+    # Hai con số này kẹp được ngưỡng --max-seq an toàn, thứ mà suy luận từ traceback
+    # đã cho ra kết luận sai một lần.
+    bo_qua, T_ok = [], 0
+
     for ep in range(math.ceil(a.epochs)):
         random.shuffle(order)
         for i in range(0, len(order), a.bs):
             batch = gop([rows[j] for j in order[i : i + a.bs]], tok.pad_token_id)
             batch = {k: v.cuda() for k, v in batch.items()}
-            with torch.autocast("cuda", dtype=torch.float16):
-                lo = than(
-                    input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
-                ).last_hidden_state
-            loss, _ = loss_dap_an(model, lo, batch)
-            scaler.scale(loss / a.accum).backward()
+            T = int(batch["input_ids"].shape[1])
+            # Bắt OOM ở MỨC MẪU thay vì để nó giết phiên. Phiên 3 v1 và v2 đều chết ở
+            # backward sau ~1h với "Tried to allocate 2.71 GiB", tức mất sạch giờ GPU đã
+            # đốt và không kịp ghi checkpoint nào (mốc eval đầu ở bước 40). Một mẫu xấu
+            # không được phép giết một phiên 10 giờ.
+            #
+            # Vì sao KHÔNG zero_grad ở đây: gradient của các mẫu TRƯỚC trong cùng cụm
+            # accum là hợp lệ và đã tích luỹ xong. Mẫu này có thể đã kịp đóng góp một
+            # phần gradient trước lúc backward ném — chấp nhận, vì accum=16 và tỷ lệ
+            # OOM đo được dưới 1%. Xoá cả cụm mới là mất dữ liệu thật.
+            #
+            # Thủ phạm 2,71 GiB CHƯA xác định: `than` là thân decoder (không lm_head) nên
+            # giả thuyết "logits toàn chuỗi" đã bị bác. Nghi vấn còn lại là bản torch
+            # thuần của linear attention (log: "fast path is not available ...
+            # flash-linear-attention"), vốn hiện thực hoá state theo T. `bo_qua` ghi lại
+            # T của từng mẫu chết để phiên này TRẢ VỀ SỐ ĐO thay vì một giả thuyết nữa.
+            try:
+                with torch.autocast("cuda", dtype=torch.float16):
+                    lo = than(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    ).last_hidden_state
+                loss, _ = loss_dap_an(model, lo, batch)
+                scaler.scale(loss / a.accum).backward()
+            except torch.OutOfMemoryError:
+                bo_qua.append(T)
+                lo = loss = None
+                torch.cuda.empty_cache()
+                print(f"  OOM bỏ mẫu T={T} (tổng {len(bo_qua)}) "
+                      f"Tmax_ok={T_ok} đỉnh {torch.cuda.max_memory_allocated()/2**30:.2f}G",
+                      flush=True)
+                continue
+            T_ok = max(T_ok, T)
 
             if (i // a.bs + 1) % a.accum:
                 continue
@@ -534,7 +566,9 @@ def main() -> None:
                 print(
                     f"  b{moc+buoc}/{moc+tong_buoc} ep{ep} loss {loss.item():.4f} "
                     f"gnorm {gnorm:.2f} lr {sched.get_last_lr()[0]:.2e} "
-                    f"{(time.time()-t0)/60:.0f}p",
+                    f"{(time.time()-t0)/60:.0f}p "
+                    f"Tok{T_ok} oom{len(bo_qua)} "
+                    f"dinh{torch.cuda.max_memory_allocated()/2**30:.1f}G",
                     flush=True,
                 )
 
