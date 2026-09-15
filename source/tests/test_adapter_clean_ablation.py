@@ -5,6 +5,7 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from legalqa.fingerprint import (
@@ -12,6 +13,7 @@ from legalqa.fingerprint import (
     RUNTIME_SOURCE_FILES,
     adapter_fingerprint,
     corpus_content_fingerprint,
+    normalized_text_sha256,
     runtime_source_fingerprint,
     sha256_file,
 )
@@ -37,6 +39,39 @@ def _load_runner_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+@pytest.mark.parametrize("bom", [False, True])
+def test_selector_identity_normalizes_line_endings_and_bom(
+    tmp_path: Path, newline: str, bom: bool
+) -> None:
+    selector = tmp_path / "tuned_selection.yaml"
+    baseline = "schema: selector-weights-v3-agentic-evidence\nselection:\n  fluency: 0.2\n"
+    selector.write_bytes(baseline.encode("utf-8"))
+    expected = normalized_text_sha256(selector)
+    encoded = baseline.replace("\n", newline).encode("utf-8")
+    selector.write_bytes((b"\xef\xbb\xbf" if bom else b"") + encoded)
+    assert normalized_text_sha256(selector) == expected
+
+    notebook = json.loads(
+        (PROJECT / "kaggle" / "legalqa_dsc2026_v5007_adapter_clean_ablation_t4.ipynb").read_text(encoding="utf-8")
+    )
+    discovery = next(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if "weight_candidates = []" in "".join(cell.get("source", []))
+    )
+    discovery = discovery[discovery.index("weight_candidates = []"):discovery.index("selection_weights = weight_candidates[0]")]
+    namespace = {
+        "input_root": tmp_path,
+        "normalized_text_sha256": normalized_text_sha256,
+        "yaml": yaml,
+        "EXPECTED_SELECTOR_SHA256": expected,
+        "EXPECTED_SELECTOR_SCHEMA": "selector-weights-v3-agentic-evidence",
+    }
+    exec(compile(discovery, "<notebook-selector-discovery>", "exec"), namespace)
+    assert namespace["weight_candidates"] == [selector]
 
 
 def test_adapter_ablation_guard_accepts_a_single_consistent_fixture(tmp_path: Path) -> None:
@@ -90,7 +125,7 @@ def test_adapter_ablation_guard_accepts_a_single_consistent_fixture(tmp_path: Pa
         "adapter_fingerprint": adapter_fingerprint(adapter),
         "adapter_scope": "full",
         "adapter_global_step": 7,
-        "selector_sha256": sha256_file(selector),
+        "selector_sha256": normalized_text_sha256(selector),
         "selector_schema": "selector-weights-v3-agentic-evidence",
         "expected_run_fingerprint": "fixture-fingerprint",
     }
@@ -114,6 +149,31 @@ def test_adapter_ablation_guard_accepts_a_single_consistent_fixture(tmp_path: Pa
     assert report["inputs"]["source_fingerprint"] == runtime_source_fingerprint(PROJECT)
     assert report["expected_run_fingerprint"] == "fixture-run"
 
+    # The same selector saved by Windows must pass the complete guard too.
+    selector.write_bytes(selector.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-8"))
+    windows_report = guard.validate_ablation_inputs(
+        public_file=public,
+        train_file=train,
+        corpus_dir=corpus,
+        dense_index_dir=dense,
+        adapter_dir=adapter,
+        selector_weights=selector,
+        expected=expected,
+    )
+    assert windows_report["inputs"]["selector_sha256"] == expected["selector_sha256"]
+
+    selector.write_text(yaml.safe_dump({"schema": expected["selector_schema"], "selection": {"fluency": 0.3}}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Selector YAML content differs"):
+        guard.validate_ablation_inputs(
+            public_file=public,
+            train_file=train,
+            corpus_dir=corpus,
+            dense_index_dir=dense,
+            adapter_dir=adapter,
+            selector_weights=selector,
+            expected=expected,
+        )
+
 
 def test_ablation_notebook_and_runner_pin_both_identities() -> None:
     runner = (PROJECT / "kaggle" / "run_inference_only.py").read_text(encoding="utf-8")
@@ -123,8 +183,9 @@ def test_ablation_notebook_and_runner_pin_both_identities() -> None:
     assert "--expected-source-fingerprint" in runner
     assert "--expected-run-fingerprint" in runner
     assert "590a732d4ea601e20b68d27407206265a52fd5753402ae2f9dc3e7084ccd850a" in notebook
-    assert "5bc266cb8120439d9afdb695484927bf7c3e8d688e1e902d3de4ea859fba6192" in notebook
-    assert "b2b10d3ea7c9efbf" in notebook
+    assert "97aaa9cabf0385f9d72abf8359910ece5f3e539cd151a65db7225c7159c7f0a1" in notebook
+    assert runtime_source_fingerprint(PROJECT) in notebook
+    assert "00345b636cec2c37" in notebook
     assert "--no-train-memory" in notebook
 
 

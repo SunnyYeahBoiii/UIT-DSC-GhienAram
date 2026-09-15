@@ -114,6 +114,16 @@ def adapter_fingerprint(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def normalized_text_sha256(path: str | Path) -> str:
+    """Hash text after universal-newline and optional UTF-8 BOM normalization.
+
+    Windows CRLF and Unix LF represent the same YAML artifact. Other content,
+    including every selector weight, remains part of the identity.
+    """
+    text = Path(path).read_text(encoding="utf-8-sig")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def runtime_source_fingerprint(path: str | Path) -> str:
     """Hash every source/dependency file that can affect public inference.
 

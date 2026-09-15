@@ -19,6 +19,9 @@ Attach only:
 5. the clean adapter A1 extracted as files, not kept only inside a ZIP;
 6. the original v0.5007 `tuned_selection.yaml` (`85a00e...`).
 
+The selector SHA-256 is computed after normalizing UTF-8 BOM and CRLF/LF
+line endings. Saving the same weights in Windows does not change its identity.
+
 Do not attach a different dense index, another full adapter, `train_clean.json`,
 a v4 selector, or any old inference recovery. Set `AUTO_RESUME = False` and
 run all cells.
@@ -28,8 +31,8 @@ The run must print these identities before expensive retrieval:
 ```text
 adapter: 590a732d4ea601e20b68d27407206265a52fd5753402ae2f9dc3e7084ccd850a
 dense:   b5c6eadb46ee7aceab44b8643fa8a5beefde5420c02cf2146e0fd30e38eccf23
-source:  5bc266cb8120439d9afdb695484927bf7c3e8d688e1e902d3de4ea859fba6192
-run:     b2b10d3ea7c9efbf
+source:  97aaa9cabf0385f9d72abf8359910ece5f3e539cd151a65db7225c7159c7f0a1
+run:     00345b636cec2c37
 ```
 
 Any mismatch is intentional failure: do not submit that run.
@@ -39,7 +42,7 @@ Any mismatch is intentional failure: do not submit that run.
 If the first session reports `PAUSED SAFELY`, save its
 `legalqa_recovery_latest.zip` as a Dataset. Attach exactly the same six inputs
 above plus this one recovery Dataset. Set `AUTO_RESUME = True`. The recovery
-fingerprint must be `b2b10d3ea7c9efbf`. The ZIP or Dataset may have a Windows
+fingerprint must be `00345b636cec2c37`. The ZIP or Dataset may have a Windows
 suffix/custom Kaggle slug; discovery uses its internal fingerprint, not its name.
 
 Never resume with a recovery from the original adapter (`de25...`) or from the
@@ -48,5 +51,5 @@ newer full-pipeline run (`a090...`).
 ## Completion
 
 The final cell accepts only a completed manifest with run fingerprint
-`b2b10d3ea7c9efbf` and a ZIP containing exactly one non-empty 1,000-answer
+`00345b636cec2c37` and a ZIP containing exactly one non-empty 1,000-answer
 `submission.json`.

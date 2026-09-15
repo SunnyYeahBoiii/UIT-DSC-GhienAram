@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT / "src"))
 from legalqa.fingerprint import (  # noqa: E402
     adapter_fingerprint,
     corpus_content_fingerprint,
+    normalized_text_sha256,
     runtime_source_fingerprint,
     sha256_file,
 )
@@ -141,8 +142,11 @@ def validate_ablation_inputs(
 
     dense = _validate_dense_index(dense_index_dir, expected)
     adapter = _validate_adapter(adapter_dir, expected)
-    selector_sha = sha256_file(selector_weights)
-    _require(selector_sha == expected["selector_sha256"], "Selector YAML differs from v0.5007")
+    selector_sha = normalized_text_sha256(selector_weights)
+    _require(
+        selector_sha == expected["selector_sha256"],
+        "Selector YAML content differs from v0.5007 after newline normalization",
+    )
     try:
         selector = yaml.safe_load(selector_weights.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
