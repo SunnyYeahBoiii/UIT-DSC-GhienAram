@@ -140,7 +140,19 @@ def ghi_warmup() -> int:
        `build_sft.giu_mau`), nên nếu dev cũng loại thì không còn chỗ nào phát hiện được
        model bịa khi context thiếu — đúng thứ cần đo nhất.
     """
-    raw = json.loads((DATA_DIR.parent / "warmup" / "warmup.json").read_text(encoding="utf-8"))
+    # warmup.json KHÔNG nằm cạnh train.json — trên Kaggle nó là dataset riêng, và bản
+    # `official` mount cho tài khoản tunvln không có nó (kernel v10-build-clean v1 chết ở
+    # đây sau khi đã ghi xong corpus.jsonl). Dò thêm /kaggle/input rồi mới chịu thua.
+    wp = DATA_DIR.parent / "warmup" / "warmup.json"
+    if not wp.exists():
+        wp = next(Path("/kaggle/input").glob("**/warmup.json"), None)
+    if wp is None:
+        # Thiếu warmup = thiếu tập DEV, không thiếu corpus/chunk. Lượt dựng clean/ để
+        # chạy infer không đọc tới nó, nên dừng cả script ở đây là vứt 10 phút đã chạy
+        # vì một file không dùng đến. In to để không ai tưởng dev có sẵn.
+        print("  KHÔNG thấy warmup.json — BỎ QUA warmup_sft.jsonl (clean/ không có tập dev)")
+        return 0
+    raw = json.loads(wp.read_text(encoding="utf-8"))
     items = raw.items() if isinstance(raw, dict) else ((str(i), r) for i, r in enumerate(raw))
     out = OUT_DIR / "warmup_sft.jsonl"
     n = 0
