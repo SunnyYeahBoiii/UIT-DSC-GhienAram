@@ -164,6 +164,21 @@ def van_ban_log(raw: str) -> str:
     return raw
 
 
+LOI_RE = re.compile(r"^\s*([A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit))\s*:\s*(\S.*)$")
+
+
+def dong_loi(log: str) -> str:
+    """Dòng exception THẬT cho người đọc. Dòng cuối log Kaggle là `[NbConvertApp] Writing
+    ... __results__.html` (smoke 2026-09-16), còn papermill bọc lỗi trong
+    `PapermillExecutionError:` rỗng — nên lấy dòng `XError: msg` cuối cùng có nội dung."""
+    for l in reversed(log.splitlines()):
+        m = LOI_RE.match(l)
+        if m and not m.group(1).startswith("papermill"):
+            return f"{m.group(1)}: {m.group(2)}"[:200]
+    dong = [l for l in log.strip().splitlines() if l.strip()]
+    return dong[-1][:200] if dong else "log rỗng"
+
+
 def phan_loai(log: str) -> str:
     """"oom" | "code" | "moi_truong". Xét OOM trước: OOM của torch cũng in Traceback."""
     if OOM_RE.search(log):
@@ -617,8 +632,7 @@ class DieuPhoi:
         else:
             log = self._log_cua(lan)
             loai = phan_loai(log)
-            dong = [l for l in log.strip().splitlines() if l.strip()]
-            ly = f"{tt}: " + (dong[-1][:200] if dong else "log rỗng")
+            ly = f"{tt}: {dong_loi(log)}"
         s["lich_su"].append({"acc": s["acc"], "ket_qua": loai, "ly_do": ly})
         self.log(f"  s{s['i']} dừng trên {s['acc']} — {loai}: {ly}")
         if self.st["trang_thai"] == "HONG":

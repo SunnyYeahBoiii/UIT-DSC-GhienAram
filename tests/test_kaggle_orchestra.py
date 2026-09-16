@@ -40,6 +40,16 @@ def test_phan_loai_log():
     assert ko.phan_loai(dai) == "code"
 
 
+def test_dong_loi_bo_qua_duoi_nbconvert_va_papermill():
+    log = ("Traceback (most recent call last):\n"
+           "papermill.exceptions.PapermillExecutionError: \n"
+           "FileNotFoundError                         Traceback (most recent call last)\n"
+           "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/repo/COMMIT.txt'\n"
+           "[NbConvertApp] Writing 292517 bytes to __results__.html\n")
+    assert ko.dong_loi(log) == "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/repo/COMMIT.txt'"
+    assert ko.dong_loi("a\nb\n") == "b"
+
+
 def test_van_ban_log_doc_dinh_dang_json_cua_kaggle():
     raw = json.dumps([{"stream_name": "stdout", "time": 1, "data": "a\n"},
                       {"stream_name": "stderr", "time": 2, "data": "KeyError: x\n"}])
