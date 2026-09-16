@@ -235,7 +235,8 @@ def giu_mau(evs, gold_docs: set[str] | None, seq_len: int = 0) -> str:
     return ""
 
 
-def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path, ten_gold: str, giu_het: bool) -> None:
+def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path, ten_gold: str, giu_het: bool,
+             noi_tiep: bool = False) -> None:
     """Sinh tập SFT thật: câu hỏi -> Evidence từ chính Retriever của inference -> prompt.
 
     Ghi `prompt` và `answer` TÁCH RIÊNG chứ không nối sẵn: prompt-loss masking cần biết
@@ -247,7 +248,16 @@ def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path, ten_gold: str, giu_h
     bo = {"khong_co_weak_gold": 0, "retrieval_truot_gold": 0}
     giu = 0
     t0 = time.time()
-    with ra.open("w", encoding="utf-8") as f:
+    # Nối tiếp: shard bị đổi acc giữa chừng mang sẵn phần đã ghi. Mẫu bị LOẠI không nằm
+    # trong file nên sẽ bị tính lại — chấp nhận, rẻ hơn thêm một file sổ sách thứ hai.
+    if noi_tiep:
+        from kaggle_orchestra import bo_dong_vo, doc_ids
+
+        bo_dong_vo(ra)
+        xong = set(doc_ids(ra))
+        rows = [x for x in rows if x["id"] not in xong]
+        print(f"nối tiếp: {len(xong):,} dòng đã có, còn {len(rows):,} câu", flush=True)
+    with ra.open("a" if noi_tiep else "w", encoding="utf-8") as f:
         for i, row in enumerate(rows):
             ranked = r.rank(row["question"])
             evs = chon_evidence(ranked, r.docs, top_n=TOP_N, max_chars=MAX_CHARS)
@@ -271,6 +281,7 @@ def sinh_tap(rows: list[dict], r: Retriever, tok, ra: Path, ten_gold: str, giu_h
                 "doc_ids": [e.doc_id for e in evs],
                 "ly_do_loai": ly_do,
             }, ensure_ascii=False) + "\n")
+            f.flush()
             if (i + 1) % 200 == 0:
                 con = (len(rows) - i - 1) * (time.time() - t0) / (i + 1)
                 print(f"  ... {i+1}/{len(rows)}  giữ {giu}  còn ~{con/60:.0f} phút", flush=True)
@@ -297,6 +308,11 @@ def main() -> None:
     ap.add_argument("--ra", default="", help="file jsonl đầu ra; mặc định CLEAN/sft.jsonl")
     ap.add_argument("--nguon", default="train_sft.jsonl")
     ap.add_argument("--gold", default="gold.jsonl")
+    # Chia shard cho kaggle_orchestra: khoảng [tu, den) SAU khi đã cắt --n. Mốc hoàn
+    # thành chỉ ghi khi có --den, để chạy tay một máy không sinh file lạ.
+    ap.add_argument("--tu", type=int, default=0)
+    ap.add_argument("--den", type=int, default=0, help="0 = tới hết")
+    ap.add_argument("--noi-tiep", action="store_true", help="bỏ qua id đã có trong --ra, ghi nối")
     ap.add_argument("--giu-het", action="store_true",
                     help="ghi cả mẫu bị loại kèm ly_do_loai — dùng cho tập dev")
     a = ap.parse_args()
@@ -304,6 +320,7 @@ def main() -> None:
     rows = [json.loads(l) for l in (CLEAN / a.nguon).open(encoding="utf-8")]
     if a.n:
         rows = rows[: a.n]
+    rows = rows[a.tu : a.den or None]
 
     reranker = None
     if a.model:
@@ -332,7 +349,12 @@ def main() -> None:
     # Không mặc định ghi vào CLEAN: khi CLEAN là output kernel trước thì nó read-only,
     # và lỗi đó chỉ nổ SAU 3,5 giờ GPU. Cùng lớp lỗi với bm25.pkl ở `nap_index`.
     mac_dinh = CLEAN / "sft.jsonl" if os.access(CLEAN, os.W_OK) else Path("sft.jsonl")
-    sinh_tap(rows, r, tok, Path(a.ra) if a.ra else mac_dinh, a.gold, a.giu_het)
+    ra = Path(a.ra) if a.ra else mac_dinh
+    sinh_tap(rows, r, tok, ra, a.gold, a.giu_het, a.noi_tiep)
+    if a.den:
+        from kaggle_orchestra import ghi_moc
+
+        print("mốc:", ghi_moc(ra, a.tu, a.den))
 
 
 if __name__ == "__main__":

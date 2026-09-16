@@ -13,3 +13,6 @@ __pycache__/
 artifacts/
 models/
 submission.zip
+
+# kaggle_orchestra: state + output tải về (dữ liệu, không vào repo)
+/orchestra/

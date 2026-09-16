@@ -43,15 +43,18 @@ def nap_cau_hoi(duong: Path) -> list[dict]:
 
 def da_co(duong: Path) -> set[str]:
     """Id đã ghi ở lượt trước. Dòng cuối có thể vỡ nếu kernel bị giết giữa lúc ghi —
-    bỏ dòng vỡ thay vì chết, mất 1 câu rẻ hơn mất cả file."""
+    bỏ dòng vỡ thay vì chết, mất 1 câu rẻ hơn mất cả file. Viết lại file không còn dòng vỡ
+    vì caller mở "a" ngay sau: dòng vỡ không có "\n", câu append đầu tiên sẽ dính vào nó."""
     if not duong.exists():
         return set()
-    ids = set()
+    ids, giu = set(), []
     for line in duong.open(encoding="utf-8"):
         try:
             ids.add(json.loads(line)["id"])
         except (json.JSONDecodeError, KeyError):
-            pass
+            continue
+        giu.append(line if line.endswith("\n") else line + "\n")
+    duong.write_text("".join(giu), encoding="utf-8")
     return ids
 
 
@@ -218,6 +221,11 @@ def main() -> None:
     ap.add_argument("--dense", default="", help="bi-encoder; rỗng = BM25 thuần (không hybrid)")
     ap.add_argument("--ra", default="out")
     ap.add_argument("--n", type=int, default=0)
+    # Shard của kaggle_orchestra. infer vốn đã nối tiếp theo id nên chỉ cần cắt khoảng và
+    # ghi mốc KHI ĐỦ — pha sinh tự dừng lúc hết --gio-pha2 mà vẫn thoát 0, nên "thoát 0"
+    # không có nghĩa là xong.
+    ap.add_argument("--tu", type=int, default=0)
+    ap.add_argument("--den", type=int, default=0, help="0 = tới hết")
     ap.add_argument("--pool", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--max-new", type=int, default=1024)
@@ -239,6 +247,7 @@ def main() -> None:
     rows = nap_cau_hoi(Path(a.cau_hoi))
     if a.n:
         rows = rows[: a.n]
+    rows = rows[a.tu : a.den or None]
     print(f"{len(rows)} câu  |  CLEAN={CLEAN}  |  số hiệu trong prompt: "
           f"{os.environ.get('LEGALQA_SO_HIEU', '1') != '0'}", flush=True)
 
@@ -268,6 +277,15 @@ def main() -> None:
 
     du_doan = ra / "du_doan.jsonl"
     pha_sinh(prompts, du_doan, a.model, a.adapter, a.max_new, a.gen_bs, a.gio_pha2 * 3600)
+    if a.den:
+        can = {x["id"] for x in rows}
+        co = can & da_co(du_doan)
+        if co == can:
+            from kaggle_orchestra import ghi_moc
+
+            print("mốc:", ghi_moc(du_doan, a.tu, a.den))
+        else:
+            print(f"CHƯA XONG shard: {len(co)}/{len(can)} câu — không ghi mốc", flush=True)
     if a.submission:
         ghi_submission(rows, du_doan, ra)
     cham_diem(du_doan)

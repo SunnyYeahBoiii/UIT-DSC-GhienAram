@@ -1,0 +1,26 @@
+{
+ "_ghi_chu": "5.516 câu train_sft, prompt hybrid. Dev 500 câu nhỏ, chạy một acc bằng build_data.ipynb.",
+ "ten": "build-sft5",
+ "notebook": "kaggle/shard_build_sft.ipynb",
+ "tong": 5516,
+ "output": "sft.jsonl",
+ "merge": "jsonl",
+ "gpu": true,
+ "datasets": [
+  "sunny070306/official",
+  "legalqa-v10-src",
+  "sunny0703/legalqa-clean"
+ ],
+ "models": [
+  "sunny070306/qwen3-5-2b-base/TensorFlow2/default/1"
+ ],
+ "params": {
+  "nguon": "train_sft.jsonl",
+  "gold": "gold.jsonl",
+  "giu_het": false
+ },
+ "publish": {
+  "acc": "tunvln",
+  "dataset": "legalqa-sft-phien5"
+ }
+}

@@ -1,0 +1,25 @@
+{
+ "_ghi_chu": "1.000 câu test, hybrid + adapter phien5. Mỗi shard ~250 câu x ~25 s = ~1,8 giờ.",
+ "ten": "infer-hybrid5",
+ "notebook": "kaggle/shard_infer.ipynb",
+ "tong": 1000,
+ "output": "du_doan.jsonl",
+ "merge": "submission",
+ "gpu": true,
+ "datasets": [
+  "sunny070306/official",
+  "legalqa-v10-src",
+  "sunny0703/legalqa-clean",
+  "legalqa-adapter-phien5"
+ ],
+ "models": [
+  "sunny070306/qwen3-5-2b-base/TensorFlow2/default/1"
+ ],
+ "params": {
+  "adapter_loc": "phien5",
+  "max_new": 1024,
+  "gen_bs": 4,
+  "gio_pha1": 1.0,
+  "gio_pha2": 9.5
+ }
+}

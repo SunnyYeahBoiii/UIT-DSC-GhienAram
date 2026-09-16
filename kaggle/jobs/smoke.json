@@ -1,0 +1,15 @@
+{
+ "_ghi_chu": "Kiểm CLI bằng kernel CPU. loi_o_shard=-1 là không lỗi; đặt 1 để kiểm nhánh HỎNG.",
+ "ten": "orch-smoke",
+ "notebook": "kaggle/shard_smoke.ipynb",
+ "tong": 12,
+ "output": "smoke.jsonl",
+ "merge": "submission",
+ "gpu": false,
+ "datasets": [
+  "legalqa-v10-src"
+ ],
+ "params": {
+  "loi_o_shard": -1
+ }
+}
