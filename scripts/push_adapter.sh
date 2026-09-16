@@ -20,8 +20,17 @@ OWNER=$(kaggle config view 2>/dev/null | sed -n 's/^- username: //p')
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-echo "tải output $OWNER/$KERNEL ..."
-kaggle kernels output "$OWNER/$KERNEL" -p "$TMP/raw" --force
+# ADAPTER_SRC: thư mục out/ đã tải sẵn trên máy dev. Cần vì output kernel KHÔNG chia sẻ
+# giữa hai tài khoản — adapter train bằng `sunny0703` không tải lại được bằng `tunvln`,
+# nhưng bản đã nằm trên đĩa thì publish lên tài khoản nào cũng được.
+if [ -n "${ADAPTER_SRC:-}" ]; then
+  [ -d "$ADAPTER_SRC" ] || { echo "ADAPTER_SRC không tồn tại: $ADAPTER_SRC"; exit 1; }
+  mkdir -p "$TMP/raw"
+  cp -R "$ADAPTER_SRC" "$TMP/raw/out"
+else
+  echo "tải output $OWNER/$KERNEL ..."
+  kaggle kernels output "$OWNER/$KERNEL" -p "$TMP/raw" --force
+fi
 
 # `repo/` là bản sao codebase kernel tự copy ra working — 30 MB không liên quan, và đẩy
 # nó lên làm dataset adapter là nhầm lẫn chờ sẵn cho lần sau. Chỉ lấy out/.

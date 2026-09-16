@@ -23,6 +23,9 @@ SHAPE="${4:-NvidiaTeslaT4}"
 # dựng lại clean/chunk/gold mất 26 phút, và kernel bật GPU thì 26 phút đó đốt quota
 # GPU dù không chạm GPU. Ngân sách là 30 GPU-h/tuần nên đây không phải tối ưu vặt.
 KERNELS="${5:-}"
+# KAGGLE_GPU=false cho kernel CPU thuần. Dựng clean/ mất 26 phút mà không chạm GPU —
+# bật GPU thì 26 phút đó vẫn bị trừ vào quota 30 giờ/tuần, đúng thứ đang cạn.
+GPU="${KAGGLE_GPU:-true}"
 
 # Kiểm cú pháp mọi cell TRƯỚC khi đẩy. Notebook sinh bằng script từng mất "\n" cuối dòng
 # -> mọi dòng nối liền nhau, JSON vẫn hợp lệ nên không ai biết cho tới khi Kaggle ném
@@ -65,7 +68,7 @@ cat > "$DIR/kernel-metadata.json" <<JSON
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,
-  "enable_gpu": true,
+  "enable_gpu": $GPU,
   "enable_internet": true,
   "dataset_sources": $DSJ,
   "competition_sources": [],
