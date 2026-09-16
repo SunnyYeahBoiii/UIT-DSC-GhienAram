@@ -24,6 +24,7 @@ sys.path.insert(0, "src")
 
 from legalqa.prompt import dung_prompt
 from legalqa.retrieve import Retriever, chon_evidence
+from legalqa.sanitize import cat_lap
 
 from build_sft import CLEAN, MAX_CHARS, TOP_N, nap_chunks, nap_dense, nap_docs, nap_index
 
@@ -182,7 +183,10 @@ def ghi_submission(rows: list[dict], du_doan: Path, ra: Path) -> None:
     Câu chưa sinh kịp ghi chuỗi rỗng."""
     co = {json.loads(l)["id"]: json.loads(l)["du_doan"]
           for l in du_doan.open(encoding="utf-8")} if du_doan.exists() else {}
-    sub = {x["id"]: {"answer": co.get(x["id"], "")} for x in rows}
+    # Cắt vòng lặp ở đây chứ không ở pha sinh: du_doan.jsonl giữ bản thô để còn đo lại.
+    # Lượt hybrid phiên 3: 34/1.000 câu lặp, bỏ 13.205 từ; dev phiên 3 METEOR câu bị cắt
+    # 0,158 -> 0,204 và 0,240 -> 0,268, không câu nào tụt.
+    sub = {x["id"]: {"answer": cat_lap(co.get(x["id"], ""))} for x in rows}
     thieu = sum(1 for v in sub.values() if not v["answer"])
     js = ra / "submission.json"
     js.write_text(json.dumps(sub, ensure_ascii=False), encoding="utf-8")
@@ -238,6 +242,8 @@ def main() -> None:
     ap.add_argument("--max-new", type=int, default=1024)
     ap.add_argument("--gen-bs", type=int, default=4)
     ap.add_argument("--submission", action="store_true")
+    # Sinh lại một nhóm id cụ thể (vd 62 câu bị max-new 1024 cắt cụt) mà không đụng shard.
+    ap.add_argument("--ids-file", default="", help="file mỗi dòng một id; rỗng = không lọc")
     ap.add_argument("--bo-qua-pha1", action="store_true", help="prompts.jsonl đã đủ")
     ap.add_argument("--gio-pha1", type=float, default=3.0)
     ap.add_argument("--gio-pha2", type=float, default=7.0)
@@ -255,6 +261,9 @@ def main() -> None:
     if a.n:
         rows = rows[: a.n]
     rows = rows[a.tu : a.den or None]
+    if a.ids_file:
+        chon = set(Path(a.ids_file).read_text(encoding="utf-8").split())
+        rows = [x for x in rows if x["id"] in chon]
     print(f"{len(rows)} câu  |  CLEAN={CLEAN}  |  số hiệu trong prompt: "
           f"{os.environ.get('LEGALQA_SO_HIEU', '1') != '0'}", flush=True)
 
