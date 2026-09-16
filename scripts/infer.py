@@ -91,6 +91,11 @@ def pha_prompt(rows: list[dict], r: Retriever, ra: Path, han: float,
 def nap_model(base: str, adapter: str):
     import torch
     import transformers
+    import transformers.integrations.sdpa_attention as _sdpa
+
+    # Cùng lý do với train_sft.py: batch không pad (cùng độ dài, hoặc gen-bs 1) thì mask
+    # bị bỏ, enable_gqa bật và T4 rơi về kernel math T x T. Vi-Qwen2-3B-RAG OOM đúng chỗ đó.
+    _sdpa.use_gqa_in_sdpa = lambda *_a, **_k: False
 
     model = None
     for ten in ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoModel"):
@@ -118,11 +123,13 @@ def nap_model(base: str, adapter: str):
 
 
 def pha_sinh(prompts: Path, ra: Path, base: str, adapter: str,
-             max_new: int, bs: int, han: float) -> None:
+             max_new: int, bs: int, han: float, ids: set[str]) -> None:
     import torch
     from transformers import AutoTokenizer
 
-    rows = [json.loads(l) for l in prompts.open(encoding="utf-8")]
+    # Lọc theo `ids` của khoảng [tu, den): với `--bo-qua-pha1` prompts.jsonl là bản ĐỦ
+    # 1.000 câu chép từ lượt trước, không lọc thì mỗi shard sinh lại cả tập.
+    rows = [x for x in map(json.loads, prompts.open(encoding="utf-8")) if x["id"] in ids]
     xong = da_co(ra)
     con = [x for x in rows if x["id"] not in xong]
     print(f"pha 2 sinh: {len(xong)} đã có, còn {len(con)}", flush=True)
@@ -276,7 +283,8 @@ def main() -> None:
         torch.cuda.empty_cache()
 
     du_doan = ra / "du_doan.jsonl"
-    pha_sinh(prompts, du_doan, a.model, a.adapter, a.max_new, a.gen_bs, a.gio_pha2 * 3600)
+    pha_sinh(prompts, du_doan, a.model, a.adapter, a.max_new, a.gen_bs, a.gio_pha2 * 3600,
+             {x["id"] for x in rows})
     if a.den:
         can = {x["id"] for x in rows}
         co = can & da_co(du_doan)
