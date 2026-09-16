@@ -1,0 +1,16 @@
+{
+ "_ghi_chu": "Kiểm nhánh đổi acc thật: job GPU chia cho mọi acc, acc 0h GPU bị từ chối rồi shard phải chuyển sang acc rảnh.",
+ "ten": "smoke-gpu",
+ "notebook": "kaggle/shard_smoke.ipynb",
+ "tong": 12,
+ "output": "smoke.jsonl",
+ "merge": "submission",
+ "gpu": true,
+ "machine_shape": "NvidiaTeslaT4",
+ "datasets": [
+  "legalqa-v10-src"
+ ],
+ "params": {
+  "loi_o_shard": -1
+ }
+}
