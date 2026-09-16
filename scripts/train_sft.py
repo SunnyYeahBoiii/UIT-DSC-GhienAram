@@ -451,6 +451,14 @@ def main() -> None:
     from peft import LoraConfig, get_peft_model
     from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
+    # Tắt GQA gốc của SDPA. bs=1 nên mask toàn 1 bị transformers bỏ thành None, và khi đó
+    # `use_gqa_in_sdpa` bật `enable_gqa=True`. T4 sm75 không có flash, còn mem-efficient
+    # không nhận enable_gqa -> torch rơi về kernel MATH dựng đủ ma trận T x T: Vi-Qwen2-3B
+    # (16 head query, 2 head KV) OOM "Tried to allocate 5.85 GiB" ở T~10k ngay trong
+    # kiem_fp16. Tự `repeat_kv` KV lên 16 head chỉ tốn vài chục MB mà mở được mem-efficient.
+    import transformers.integrations.sdpa_attention as _sdpa
+    _sdpa.use_gqa_in_sdpa = lambda *_a, **_k: False
+
     random.seed(a.seed)
     torch.manual_seed(a.seed)
     chuan_bi_nltk()
