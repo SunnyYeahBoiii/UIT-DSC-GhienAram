@@ -213,6 +213,50 @@ def tim_than(model):
     raise SystemExit("không tìm được phần Transformer — kiểm lại cấu trúc model")
 
 
+FP16_MAX = 65504.0
+
+
+def kiem_fp16(than, rows: list[dict]) -> float:
+    """Forward mẫu DÀI NHẤT, móc output từng decoder layer, đo |activation| lớn nhất.
+
+    T4 là sm_75 nên chỉ có fp16. Số đo "max |act| 62,9" trong probe_fp16_overflow.py là
+    của Qwen3.5-2B; model khác (vd Vi-Qwen2-3B-RAG, trọng số gốc bf16) chưa ai đo, và
+    GradScaler chỉ cứu gradient — tràn ở FORWARD thành inf/nan thì loss hỏng mà scaler
+    im lặng bỏ bước mãi. Chết trong một phút ở đây rẻ hơn 10 giờ GPU ra adapter rác.
+    """
+    import torch
+
+    lop = getattr(than, "layers", None)
+    assert lop is not None, "phần Transformer không có .layers — không móc được"
+    dinh = [0.0]
+    hong = []
+
+    def moc(i):
+        def f(_m, _in, out):
+            h = out[0] if isinstance(out, tuple) else out
+            v = float(h.detach().abs().float().max())
+            if not torch.isfinite(torch.tensor(v)):
+                hong.append(i)
+            dinh[0] = max(dinh[0], v)
+        return f
+
+    dai = max(rows, key=lambda r: len(r["input_ids"]))
+    ids = torch.tensor([dai["input_ids"]], device=next(than.parameters()).device)
+    hs = [m.register_forward_hook(moc(i)) for i, m in enumerate(lop)]
+    try:
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+            than(input_ids=ids, attention_mask=torch.ones_like(ids))
+    finally:
+        for h in hs:
+            h.remove()
+    print(f"fp16: max |act| {dinh[0]:,.1f} / {FP16_MAX:,.0f} ({dinh[0]/FP16_MAX:.2%}) "
+          f"trên mẫu T={ids.size(1):,}", flush=True)
+    if hong:
+        raise SystemExit(f"fp16 TRÀN ở layer {sorted(set(hong))[:5]} — model này không train được fp16 trên T4")
+    torch.cuda.empty_cache()
+    return dinh[0]
+
+
 def ghi_du_doan(dev: list[dict], du_doan: dict[str, str], ra: Path, buoc: int) -> Path:
     """Ghi nguyên văn output một lần eval ra `du_doan_b{buoc}.jsonl`.
 
@@ -473,6 +517,7 @@ def main() -> None:
     random.Random(a.seed).shuffle(dev)
     dev = dev[: a.dev_n] if a.dev_n else dev
     print(f"train {len(rows):,} mẫu | dev {len(dev):,} mẫu", flush=True)
+    kiem_fp16(than, rows)
 
     tong_buoc = int(len(rows) * a.epochs / (a.bs * a.accum))
     opt = torch.optim.AdamW(
