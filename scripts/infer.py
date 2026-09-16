@@ -55,6 +55,41 @@ def da_co(duong: Path) -> set[str]:
     return ids
 
 
+def nap_dense(model_path: str, chunks: dict):
+    """(BiEncoder, DenseIndex) cho nhánh dense. Encode một lần rồi ghi cache ra CLEAN.
+
+    Vì sao encode TẠI ĐÂY chứ không đòi dataset dựng sẵn: 436s trên T4 cho 287.358 chunk
+    (§15.8) — rẻ hơn một vòng publish dataset 0,22 GB rồi verify nó đã materialize. Nhưng
+    vẫn ghi cache: kernel bị giết giữa pha 2 rồi chạy lại thì 7 phút đó không phải trả lại.
+
+    THỨ TỰ hàng của ma trận phải khớp THỨ TỰ `chunks.jsonl` — `DenseIndex` chỉ giữ list
+    chunk_id song song, không có dict tra ngược. Lặp trên `chunks.values()` giữ đúng thứ
+    tự chèn của dict (`nap_chunks` đọc tuần tự file), nên hai bên khớp; sắp lại một bên
+    là lệch toàn bộ ánh xạ mà không có assert nào bắt được.
+    """
+    import numpy as np
+
+    from legalqa.dense import BiEncoder, DenseIndex
+
+    enc = BiEncoder(model_path, batch_size=256, max_len=256)
+    npy, ids_txt = CLEAN / "dense.npy", CLEAN / "dense.ids"
+    if npy.exists() and ids_txt.exists():
+        print(f"nạp dense cache: {npy}", flush=True)
+        return enc, DenseIndex.load(npy, ids_txt)
+    ids = list(chunks.keys())
+    t0 = time.time()
+    M = enc.encode([chunks[i].text for i in ids])
+    print(f"encode dense {M.shape} {time.time()-t0:.0f}s", flush=True)
+    try:
+        np.save(npy, M)
+        ids_txt.write_text("\n".join(ids), encoding="utf-8")
+    except OSError as e:
+        # CLEAN có thể là thư mục chỉ-đọc (mount dataset trực tiếp). Mất cache thì chỉ
+        # tốn lại 7 phút ở lần chạy sau, không đáng để chết sau khi đã encode xong.
+        print(f"không ghi được cache dense ({e}) — bỏ qua", flush=True)
+    return enc, DenseIndex(ids, M)
+
+
 def pha_prompt(rows: list[dict], r: Retriever, ra: Path, han: float,
                max_chars: int = MAX_CHARS) -> None:
     xong = da_co(ra)
@@ -209,6 +244,11 @@ def main() -> None:
     ap.add_argument("--model", required=True, help="model nền")
     ap.add_argument("--adapter", default="")
     ap.add_argument("--rerank", default="", help="cross-encoder; rỗng = BM25 thuần")
+    # Nhánh dense của hybrid search. §15.8 chốt `intfloat/multilingual-e5-small` ở
+    # max_len 256: trần pool@50 96,7% -> 97,9% (+1,2), encode 287.358 chunk mất 436s trên
+    # T4. ĐỪNG truyền max_len 512 — §15.8 đo ngược (hybrid@50 tụt 0,4 vì mean pooling
+    # loãng) và tốn gấp đôi thời gian.
+    ap.add_argument("--dense", default="", help="bi-encoder; rỗng = BM25 thuần (không hybrid)")
     ap.add_argument("--ra", default="out")
     ap.add_argument("--n", type=int, default=0)
     ap.add_argument("--pool", type=int, default=50)
@@ -243,12 +283,15 @@ def main() -> None:
 
             reranker = CrossEncoderReranker(a.rerank, batch_size=a.batch_size)
         chunks = nap_chunks()
+        encoder = dense_idx = None
+        if a.dense:
+            encoder, dense_idx = nap_dense(a.dense, chunks)
         r = Retriever(index=nap_index(chunks), chunks=chunks, docs=nap_docs(),
-                      reranker=reranker, pool=a.pool)
+                      reranker=reranker, encoder=encoder, dense=dense_idx, pool=a.pool)
         pha_prompt(rows, r, prompts, a.gio_pha1 * 3600, a.max_chars)
         # Trả VRAM của reranker trước khi nạp Qwen: 0,568B fp16 + 2B fp16 + KV cache của
         # batch 4 × 6.000 token cùng lúc là sát trần 16 GB của T4.
-        del r, reranker
+        del r, reranker, encoder, dense_idx
         import gc
 
         import torch
