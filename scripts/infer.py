@@ -25,7 +25,7 @@ sys.path.insert(0, "src")
 from legalqa.prompt import dung_prompt
 from legalqa.retrieve import Retriever, chon_evidence
 
-from build_sft import CLEAN, MAX_CHARS, TOP_N, nap_chunks, nap_docs, nap_index
+from build_sft import CLEAN, MAX_CHARS, TOP_N, nap_chunks, nap_dense, nap_docs, nap_index
 
 
 def nap_cau_hoi(duong: Path) -> list[dict]:
@@ -55,39 +55,6 @@ def da_co(duong: Path) -> set[str]:
     return ids
 
 
-def nap_dense(model_path: str, chunks: dict):
-    """(BiEncoder, DenseIndex) cho nhánh dense. Encode một lần rồi ghi cache ra CLEAN.
-
-    Vì sao encode TẠI ĐÂY chứ không đòi dataset dựng sẵn: 436s trên T4 cho 287.358 chunk
-    (§15.8) — rẻ hơn một vòng publish dataset 0,22 GB rồi verify nó đã materialize. Nhưng
-    vẫn ghi cache: kernel bị giết giữa pha 2 rồi chạy lại thì 7 phút đó không phải trả lại.
-
-    THỨ TỰ hàng của ma trận phải khớp THỨ TỰ `chunks.jsonl` — `DenseIndex` chỉ giữ list
-    chunk_id song song, không có dict tra ngược. Lặp trên `chunks.values()` giữ đúng thứ
-    tự chèn của dict (`nap_chunks` đọc tuần tự file), nên hai bên khớp; sắp lại một bên
-    là lệch toàn bộ ánh xạ mà không có assert nào bắt được.
-    """
-    import numpy as np
-
-    from legalqa.dense import BiEncoder, DenseIndex
-
-    enc = BiEncoder(model_path, batch_size=256, max_len=256)
-    npy, ids_txt = CLEAN / "dense.npy", CLEAN / "dense.ids"
-    if npy.exists() and ids_txt.exists():
-        print(f"nạp dense cache: {npy}", flush=True)
-        return enc, DenseIndex.load(npy, ids_txt)
-    ids = list(chunks.keys())
-    t0 = time.time()
-    M = enc.encode([chunks[i].text for i in ids])
-    print(f"encode dense {M.shape} {time.time()-t0:.0f}s", flush=True)
-    try:
-        np.save(npy, M)
-        ids_txt.write_text("\n".join(ids), encoding="utf-8")
-    except OSError as e:
-        # CLEAN có thể là thư mục chỉ-đọc (mount dataset trực tiếp). Mất cache thì chỉ
-        # tốn lại 7 phút ở lần chạy sau, không đáng để chết sau khi đã encode xong.
-        print(f"không ghi được cache dense ({e}) — bỏ qua", flush=True)
-    return enc, DenseIndex(ids, M)
 
 
 def pha_prompt(rows: list[dict], r: Retriever, ra: Path, han: float,

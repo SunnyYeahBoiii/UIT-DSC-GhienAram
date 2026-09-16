@@ -11,9 +11,11 @@
 # sunny070306, kernel của sunny0703).
 set -euo pipefail
 
-KERNEL="${1:-v10-train-sft3}"
-TEN="${2:-legalqa-adapter-phien3}"   # tên PHẢI chứa "phien3" — infer_submit lọc theo chuỗi này
-case "$TEN" in *phien3*) ;; *) echo "tên dataset phải chứa 'phien3', infer_submit lọc theo đó"; exit 1;; esac
+KERNEL="${1:-v10-train-sft5}"
+# Tên PHẢI chứa "phien3" (infer_submit) hoặc "phien5" (infer_hybrid, adapter train trên
+# prompt hybrid) — notebook infer lọc adapter theo đúng chuỗi đó, sai tên là assert chết.
+TEN="${2:-legalqa-adapter-phien5}"
+case "$TEN" in *phien3*|*phien5*) ;; *) echo "tên dataset phải chứa 'phien3' hoặc 'phien5', notebook infer lọc theo đó"; exit 1;; esac
 
 OWNER=$(kaggle config view 2>/dev/null | sed -n 's/^- username: //p')
 [ -n "$OWNER" ] || { echo "không đọc được username — chạy: kaggle config view"; exit 1; }
@@ -72,5 +74,5 @@ echo "https://www.kaggle.com/datasets/$OWNER/$TEN"
 echo
 echo "Bước sau — đẩy infer:"
 echo "  KAGGLE_DS=sunny070306/official,legalqa-v10-src,legalqa-clean,$TEN \\"
-echo "    bash scripts/push_kernel.sh kaggle/infer_submit.ipynb v10-infer-submit \\"
+echo "    bash scripts/push_kernel.sh kaggle/infer_hybrid.ipynb v10-infer-hybrid \\"
 echo "    \"sunny070306/qwen3-5-2b-base/TensorFlow2/default/1\" NvidiaTeslaT4"

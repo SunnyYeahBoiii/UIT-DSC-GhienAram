@@ -315,6 +315,11 @@ def sinh_va_cham(
             )["meteor"]
             diem[f"n_{ten}"] = len(co)
     diem["do_dai_tb"] = sum(len(v.split()) for v in du_doan.values()) / max(1, len(du_doan))
+    # Tỉ lệ câu có MỘT 12-gram lặp >= 3 lần. METEOR không bắt được vòng lặp sớm: recall
+    # bão hoà nên đuôi lặp chỉ kéo precision một chút (lượt 4 tụt 0,0015). Mốc so sánh:
+    # đáp án thật trong sft.jsonl là 23,4% (luật lặp cấu trúc hợp lệ), lượt 3 trên test
+    # là 37,0%. Checkpoint đang hết lặp thì số này phải đi về phía 23%.
+    diem["ti_le_lap"] = sum(_lap(v) for v in du_doan.values()) / max(1, len(du_doan))
 
     # Ghi nguyên văn output mỗi lần eval. Điểm số nói model tốt lên bao nhiêu, KHÔNG nói
     # nó sai kiểu gì — trích nhầm Điều, bịa khi thiếu căn cứ, hay cụt câu. Muốn biết thì
@@ -327,6 +332,19 @@ def sinh_va_cham(
     # suy ra từ lúc kernel chết vì hết giờ.
     diem["giay_eval"] = round(time.time() - t_eval, 1)
     return diem
+
+
+def _lap(s: str, n: int = 12, k: int = 3) -> bool:
+    """Có một n-gram từ xuất hiện >= k lần. n=12 vì trích dẫn luật hợp lệ lặp cụm ngắn
+    ("theo quy định tại khoản 1 Điều") rất nhiều — ở n=3 đáp án thật p50 đã lặp 7 lần."""
+    w = s.split()
+    dem: dict[tuple, int] = {}
+    for i in range(len(w) - n + 1):
+        g = tuple(w[i : i + n])
+        dem[g] = dem.get(g, 0) + 1
+        if dem[g] >= k:
+            return True
+    return False
 
 
 def _LOP_MODEL() -> list:
@@ -358,6 +376,14 @@ def main() -> None:
     # Cái giá: activation ở bs=1 tăng ~1,7x so với 6.144. Gradient checkpointing đã bật
     # và lm_head chỉ chạy trên lát đáp án, nhưng đây VẪN là rủi ro OOM chưa đo trên T4.
     ap.add_argument("--max-seq", type=int, default=10240)
+    # Oversample đáp án dài. Tập train chỉ 2,5% đáp án vượt 800 từ (p50 312, p90 572), còn
+    # lượt 4 có 109/1.000 câu test sinh tới 816 từ ở trần 1.024 — và 89,0% trong số đó
+    # rơi vào vòng lặp 12-gram. Model hiếm khi thấy một câu trả lời dài KẾT THÚC thế nào,
+    # nên ra ngoài vùng độ dài đó thì token xác suất cao nhất là token vừa viết.
+    # Nhân mẫu chứ không đổi trọng số loss: mẫu dài vốn đã đóng góp nhiều token hơn vào
+    # tổng CE, thứ thiếu là SỐ LẦN model thấy cảnh "đáp án dài -> EOS", không phải độ lớn.
+    ap.add_argument("--nhan-dai", type=int, default=1, help="số bản của mỗi mẫu đáp án dài")
+    ap.add_argument("--nguong-dai", type=int, default=600, help="số từ để coi là đáp án dài")
     ap.add_argument("--eval-steps", type=int, default=150)
     ap.add_argument("--dev-n", type=int, default=120)
     ap.add_argument("--max-new", type=int, default=768)
@@ -432,7 +458,14 @@ def main() -> None:
     model.print_trainable_parameters()
     than = tim_than(model)
 
-    rows = [m for m in (ma_hoa(r, tok, a.max_seq) for r in nap(Path(a.data))) if m]
+    goc = nap(Path(a.data))
+    dai = [r for r in goc if len(r["answer"].split()) > a.nguong_dai]
+    # Nhân TRƯỚC `ma_hoa` để mẫu dài vượt --max-seq bị loại cùng cả bản sao — và in ra số
+    # thật sau lọc, vì chính bộ lọc im lặng này từng cắt 13,4% tập ở max_seq 6.144.
+    goc = goc + dai * max(0, a.nhan_dai - 1)
+    rows = [m for m in (ma_hoa(r, tok, a.max_seq) for r in goc) if m]
+    print(f"mẫu > {a.nguong_dai} từ: {len(dai):,} x{a.nhan_dai} | vào {len(goc):,} "
+          f"-> sau --max-seq {len(rows):,} (loại {len(goc)-len(rows):,})", flush=True)
     # Xáo trước khi cắt: dev.jsonl giữ nguyên thứ tự warmup.json, lấy 120 dòng đầu là
     # lấy một lát cắt tuỳ hứng — tỉ lệ nhóm trượt gold trong đó không phản ánh cả tập,
     # mà `meteor_truot` đọc đúng nhóm đó. Seed cố định để hai lần chạy cùng một dev.
