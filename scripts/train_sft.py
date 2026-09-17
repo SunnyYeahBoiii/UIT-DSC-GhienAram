@@ -450,11 +450,33 @@ def main() -> None:
     # card = khuôn model card Vi-Qwen2-RAG (system + "### Ngữ cảnh"). --epochs 0 để chỉ
     # eval dev zero-shot, không train.
     ap.add_argument("--kieu-prompt", choices=["goc", "card"], default="goc")
+    # Tách eval khỏi vòng train: tới mốc chỉ lưu `b{N}/`, `scripts/eval_moc.py` trên GPU
+    # khác chấm dev. Eval dev100 tốn ~30 phút trong khi 40 bước train chỉ ~21 phút (vast,
+    # D1 b135->b175) — eval trong vòng làm GPU train ngồi chờ quá nửa thời gian.
+    ap.add_argument("--eval-rieng", action="store_true")
     a = ap.parse_args()
 
+    import os
+
     import torch
+    import torch.distributed as dist
     from peft import LoraConfig, get_peft_model
     from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
+
+    # Chạy bằng torchrun thì mỗi rank train một nửa luồng mẫu. KHÔNG bọc
+    # DistributedDataParallel: forward đi thẳng `than(...)` + `loss_dap_an` chứ không qua
+    # `model.forward`, nên hook của DDP không đăng ký được gradient. All_reduce tay các
+    # tham số LoRA mỗi bước optimizer — rẻ, và không vướng unused-param/checkpointing.
+    # CHƯA KIỂM CHỨNG: test 10 bước (vast 5080, D1 b135->b145, tắt dropout) cho Δ trọng
+    # số DDP lệch bản 1 GPU cos 0,77, trong khi nhiễu số học (đổi init_scale) chỉ 0,95.
+    # Đừng dùng cho phiên thật trước khi so gradient bước đầu.
+    the_gioi = int(os.environ.get("WORLD_SIZE", "1"))
+    hang = int(os.environ.get("RANK", "0"))
+    if the_gioi > 1:
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        dist.init_process_group("nccl")
+        # Rank0 eval 30 phút trong vòng thì rank1 treo ở all_reduce kế tiếp -> NCCL timeout.
+        assert a.eval_rieng, "DDP cần --eval-rieng"
 
     # Tắt GQA gốc của SDPA. bs=1 nên mask toàn 1 bị transformers bỏ thành None, và khi đó
     # `use_gqa_in_sdpa` bật `enable_gqa=True`. T4 sm75 không có flash, còn mem-efficient
@@ -541,7 +563,10 @@ def main() -> None:
         print(f"  == EVAL zero-shot: {d}", flush=True)
         return
 
-    tong_buoc = int(len(rows) * a.epochs / (a.bs * a.accum))
+    # Một bước = bs*accum*the_gioi mẫu. D1 DDP 2 GPU đặt --accum 8 để vẫn 16 mẫu/bước:
+    # giữ nguyên lr 3e-5 và phép bỏ qua mẫu khi nối tiếp phiên 1 GPU.
+    mau_moi_buoc = a.bs * a.accum * the_gioi
+    tong_buoc = int(len(rows) * a.epochs / mau_moi_buoc)
     opt = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=a.lr, weight_decay=0.0
     )
@@ -615,18 +640,22 @@ def main() -> None:
     # không được: dev 120 xáo theo cùng seed, số dev sẽ không so được với phiên trước.
     # Xáo đủ số epoch đã qua để tái lập đúng hoán vị; đếm mẫu bằng `dem` vì vị trí bắt
     # đầu có thể không chia hết cho accum.
-    ep_dau, vi_tri_dau = divmod(moc * a.bs * a.accum, len(order))
+    ep_dau, vi_tri_dau = divmod(moc * mau_moi_buoc, len(order))
     if moc:
-        print(f"bỏ qua {moc * a.bs * a.accum:,} mẫu đã học: bắt đầu ep{ep_dau} "
+        print(f"bỏ qua {moc * mau_moi_buoc:,} mẫu đã học: bắt đầu ep{ep_dau} "
               f"vị trí {vi_tri_dau:,}/{len(order):,}", flush=True)
     dem = 0
     for ep in range(ep_dau + math.ceil(a.epochs) + 1):
         random.shuffle(order)
         if ep < ep_dau:
             continue
-        for i in range(vi_tri_dau if ep == ep_dau else 0, len(order), a.bs):
+        # Mọi rank cùng hoán vị (cùng seed), rank r lấy lát thứ r của mỗi cụm bs*the_gioi.
+        for i in range(vi_tri_dau if ep == ep_dau else 0, len(order), a.bs * the_gioi):
             dem += 1
-            batch = gop([rows[j] for j in order[i : i + a.bs]], tok.pad_token_id)
+            lat = order[i + hang * a.bs : i + (hang + 1) * a.bs]
+            if not lat:  # đuôi epoch lẻ: vẫn đếm để các rank all_reduce cùng nhịp
+                continue
+            batch = gop([rows[j] for j in lat], tok.pad_token_id)
             batch = {k: v.cuda() for k, v in batch.items()}
             T = int(batch["input_ids"].shape[1])
             # Bắt OOM ở MỨC MẪU thay vì để nó giết phiên. Phiên 3 v1 và v2 đều chết ở
@@ -664,6 +693,14 @@ def main() -> None:
 
             if dem % a.accum:
                 continue
+            if the_gioi > 1:
+                # Trước unscale_: inf ở một rank lan sang mọi rank, nên GradScaler bỏ bước
+                # và hạ scale đồng loạt — tham số các rank không lệch nhau.
+                for p in model.parameters():
+                    if p.requires_grad:
+                        if p.grad is None:
+                            p.grad = torch.zeros_like(p)
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
             scaler.unscale_(opt)
             # Ghi grad norm TRƯỚC khi clip: sau clip nó luôn <= 1,0 nên không còn nói
             # được gì. Norm tăng vọt là dấu hiệu phân kỳ, và đó là thứ cần thấy.
@@ -686,7 +723,16 @@ def main() -> None:
                     flush=True,
                 )
 
-            if buoc % a.eval_steps == 0 or buoc == tong_buoc:
+            if a.eval_rieng and (buoc % a.eval_steps == 0 or buoc == tong_buoc):
+                if hang == 0:
+                    model.save_pretrained(ra / f"b{moc+buoc}")
+                    # Ghi SAU adapter: eval_moc chỉ nhận thư mục có file này, tránh nạp
+                    # adapter đang ghi dở.
+                    (ra / f"b{moc+buoc}" / "moc.json").write_text(json.dumps(
+                        {"buoc": moc + buoc, "loss": loss.item() if loss is not None else None,
+                         "gnorm": gnorm}), encoding="utf-8")
+                    print(f"  -> lưu {ra}/b{moc+buoc} cho eval_moc", flush=True)
+            elif buoc % a.eval_steps == 0 or buoc == tong_buoc:
                 # Điều kiện eval và lịch scheduler chạy theo `buoc` NỘI BỘ (0..tong_buoc),
                 # còn nhãn ghi ra file theo `moc+buoc` — hai đại lượng khác nhau, trộn
                 # vào nhau thì phiên nối tiếp sẽ eval sai nhịp.
@@ -710,13 +756,20 @@ def main() -> None:
             if buoc >= tong_buoc:
                 dung = True
                 break
-            if (time.time() - t0) / 3600 >= a.gio_toi_da:
-                model.save_pretrained(ra / "cuoi")
-                # Ghi bước THẬT cạnh adapter: `lich_su.json` chỉ có mốc eval nên phiên
-                # sau không suy ra được chỗ dừng, và nhãn bước sẽ lệch.
-                (ra / "cuoi_buoc.json").write_text(
-                    json.dumps({"buoc": moc + buoc}), encoding="utf-8"
-                )
+            het_gio = (time.time() - t0) / 3600 >= a.gio_toi_da
+            if the_gioi > 1:
+                # Đồng hồ mỗi rank lệch nhau vài giây: một rank thoát, rank kia treo.
+                c = torch.tensor([int(het_gio)], device="cuda")
+                dist.all_reduce(c, op=dist.ReduceOp.MAX)
+                het_gio = bool(c.item())
+            if het_gio:
+                if hang == 0:
+                    model.save_pretrained(ra / "cuoi")
+                    # Ghi bước THẬT cạnh adapter: `lich_su.json` chỉ có mốc eval nên phiên
+                    # sau không suy ra được chỗ dừng, và nhãn bước sẽ lệch.
+                    (ra / "cuoi_buoc.json").write_text(
+                        json.dumps({"buoc": moc + buoc}), encoding="utf-8"
+                    )
                 print(f"  hết {a.gio_toi_da} giờ ở bước {moc+buoc} — lưu {ra/'cuoi'} để "
                       f"chạy tiếp bằng --tiep", flush=True)
                 dung = True
@@ -728,6 +781,10 @@ def main() -> None:
     # cắt ngang, nên một phiên chạy trọn `tong_buoc` sẽ kết thúc mà KHÔNG có adapter cuối
     # — phiên sau mất chỗ bám để `--tiep`, và toàn bộ số giờ GPU đó chỉ còn lại `tot_nhat/`
     # nếu may mắn vượt mốc. Ghi lại là rẻ (83 MB), mất là không lấy lại được.
+    if the_gioi > 1:
+        dist.destroy_process_group()
+        if hang:
+            return
     model.save_pretrained(ra / "cuoi")
     (ra / "cuoi_buoc.json").write_text(json.dumps({"buoc": moc + buoc}), encoding="utf-8")
     print(f"adapter cuối ở bước {moc+buoc} -> {ra/'cuoi'}")
