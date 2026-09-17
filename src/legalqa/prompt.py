@@ -13,6 +13,7 @@ tại, và 75,9% reference answer trích NGUYÊN VĂN — bịa một ký tự l
 from __future__ import annotations
 
 import os
+import re
 
 from .evidence import Evidence
 
@@ -65,3 +66,69 @@ def dung_prompt(question: str, evidences: list[Evidence]) -> str:
     thay vì trả lời.
     """
     return f"Căn cứ pháp luật:\n{dung_can_cu(evidences)}\n\nCâu hỏi: {question}\nTrả lời:"
+
+
+# --- Prompt theo model card Vi-Qwen2-RAG -------------------------------------------------
+# Vi-Qwen2-3B-RAG được AITeamVN SFT trên đúng khuôn này (system tiếng Việt + "### Ngữ cảnh"
+# / "### Câu hỏi"). Prompt gốc ở trên không có system nên chat template tự chèn "You are a
+# helpful assistant." — model nhận phân phối nó chưa từng thấy lúc SFT RAG. Phiên C (prompt
+# gốc) đỉnh 0,5727 ở b40 rồi tụt: nghi prior của model chống lại khuôn lạ.
+# Bỏ dòng "từ chối trả lời" của card: 5.676 đáp án BTC không câu nào từ chối.
+HE_THONG_CARD = (
+    "Bạn là một trợ lí Tiếng Việt nhiệt tình và trung thực. "
+    "Hãy luôn trả lời một cách hữu ích nhất có thể."
+)
+_DAU_CARD = (
+    "Chú ý các yêu cầu sau:\n"
+    "- Câu trả lời phải chính xác và đầy đủ nếu ngữ cảnh có câu trả lời. \n"
+    "- Chỉ sử dụng các thông tin có trong ngữ cảnh được cung cấp.\n"
+    "Hãy trả lời câu hỏi dựa trên ngữ cảnh:\n"
+    "### Ngữ cảnh :\n"
+)
+_MO = "Căn cứ pháp luật:\n"
+_CAU_HOI = "\n\nCâu hỏi: "
+_TRA_LOI = "\nTrả lời:"
+
+
+def _tach_khoi(can_cu: str) -> list[str]:
+    """Tách khối "[i] ..." theo SỐ TĂNG DẦN, không split mù trên "\\n\\n[": text Evidence
+    giữ nguyên `\\n\\n` và có thể chứa "[2]" trích dẫn — chỉ nhận mốc "\\n\\n[k] " đúng số
+    kế tiếp."""
+    assert can_cu.startswith("[1] "), can_cu[:40]
+    khoi, dau, k = [], 0, 2
+    while (vt := can_cu.find(f"\n\n[{k}] ", dau)) != -1:
+        khoi.append(can_cu[dau:vt])
+        dau, k = vt + 2, k + 1
+    khoi.append(can_cu[dau:])
+    return [re.sub(r"^\[\d+\] ", "", b, count=1) for b in khoi]
+
+
+def sang_card(prompt: str) -> str:
+    """Chuyển prompt gốc (chuỗi `dung_prompt`) sang khuôn card. Làm trên chuỗi chứ không
+    dựng lại từ Evidence để dùng thẳng sft.jsonl/dev.jsonl/prompts test đã build."""
+    assert prompt.startswith(_MO) and prompt.endswith(_TRA_LOI), prompt[:40]
+    than = prompt[len(_MO) : -len(_TRA_LOI)]
+    # rpartition: câu hỏi đứng cuối, còn text luật có thể chứa "Câu hỏi: ".
+    can_cu, _, cau_hoi = than.rpartition(_CAU_HOI)
+    ngu_canh = []
+    for i, b in enumerate(_tach_khoi(can_cu), 1):
+        nhan, _, con = b.partition("\n")
+        # Giữ nhãn quan hệ (sửa đổi...) vì §15.7 cần model phân biệt gốc/sửa đổi; nhãn
+        # "Căn cứ chính" không mang tin gì thêm.
+        dau = "" if nhan == NHAN_GOC else f"({nhan}) "
+        ngu_canh.append(f"- Ngữ cảnh {i}: {dau}{con}")
+    return (
+        _DAU_CARD + "\n\n".join(ngu_canh)
+        + f"\n\n### Câu hỏi :\n{cau_hoi}\n\n### Trả lời :"
+    )
+
+
+def tin_nhan(prompt: str, kieu: str = "goc") -> list[dict]:
+    """Messages cho `apply_chat_template`. Một chỗ duy nhất để train, eval dev và infer
+    test dùng CÙNG khuôn — lệch khuôn giữa train và infer là lỗi im lặng."""
+    if kieu == "card":
+        return [
+            {"role": "system", "content": HE_THONG_CARD},
+            {"role": "user", "content": sang_card(prompt)},
+        ]
+    return [{"role": "user", "content": prompt}]

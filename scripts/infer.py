@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from legalqa.prompt import dung_prompt
+from legalqa.prompt import dung_prompt, tin_nhan
 from legalqa.retrieve import Retriever, chon_evidence
 from legalqa.sanitize import cat_lap
 
@@ -124,7 +124,7 @@ def nap_model(base: str, adapter: str):
 
 
 def pha_sinh(prompts: Path, ra: Path, base: str, adapter: str,
-             max_new: int, bs: int, han: float, ids: set[str]) -> None:
+             max_new: int, bs: int, han: float, ids: set[str], kieu: str = "goc") -> None:
     import torch
     from transformers import AutoTokenizer
 
@@ -147,7 +147,7 @@ def pha_sinh(prompts: Path, ra: Path, base: str, adapter: str,
     with ra.open("a", encoding="utf-8") as f:
         for i in range(0, len(con), bs):
             lo = con[i : i + bs]
-            vb = [tok.apply_chat_template([{"role": "user", "content": x["prompt"]}],
+            vb = [tok.apply_chat_template(tin_nhan(x["prompt"], kieu),
                                           add_generation_prompt=True, tokenize=False)
                   for x in lo]
             # Pad TRÁI khi sinh: pad phải thì token cuối của chuỗi ngắn là <pad> và model
@@ -247,6 +247,8 @@ def main() -> None:
     ap.add_argument("--bo-qua-pha1", action="store_true", help="prompts.jsonl đã đủ")
     ap.add_argument("--gio-pha1", type=float, default=3.0)
     ap.add_argument("--gio-pha2", type=float, default=7.0)
+    # Phải trùng --kieu-prompt lúc train adapter: lệch khuôn thì adapter gặp prompt lạ.
+    ap.add_argument("--kieu-prompt", choices=["goc", "card"], default="goc")
     # Ngân sách ký tự phải KHỚP checkpoint đang chạy, không phải khớp mặc định hiện tại.
     # `MAX_CHARS` giờ là vô hạn (10**9), nhưng adapter b318 được train trên prompt cắt ở
     # 12.000 — suy luận bằng prompt dài gấp rưỡi là đưa model vào phân phối nó chưa từng
@@ -293,7 +295,7 @@ def main() -> None:
 
     du_doan = ra / "du_doan.jsonl"
     pha_sinh(prompts, du_doan, a.model, a.adapter, a.max_new, a.gen_bs, a.gio_pha2 * 3600,
-             {x["id"] for x in rows})
+             {x["id"] for x in rows}, a.kieu_prompt)
     if a.den:
         can = {x["id"] for x in rows}
         co = can & da_co(du_doan)

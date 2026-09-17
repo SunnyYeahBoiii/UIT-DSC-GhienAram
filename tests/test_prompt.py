@@ -111,3 +111,26 @@ def test_cờ_tắt_số_hiệu_cho_checkpoint_đời_cũ(monkeypatch):
     finally:
         monkeypatch.delenv("LEGALQA_SO_HIEU")
         importlib.reload(mod)
+
+
+def test_sang_card_giu_nhan_sua_doi_va_ngat_dong():
+    from legalqa.prompt import HE_THONG_CARD, sang_card, tin_nhan
+
+    # Text luật chứa "\n\n[2] " giả và "Câu hỏi: " — không được cắt nhầm ở đó.
+    evs = [
+        _ev(text="1. Khoản  một.\n\n[3] trích dẫn\n\nCâu hỏi: giả"),
+        _ev(article_number="5", relation="Sửa đổi, bổ sung", text="Nội dung  mới.\n\n2. Hai."),
+    ]
+    p = dung_prompt("Hỏi  gì?", evs)
+    c = sang_card(p)
+    assert c.startswith("Chú ý các yêu cầu sau:")
+    assert "từ chối" not in c
+    assert "- Ngữ cảnh 1: Điều 127, " in c
+    assert "1. Khoản  một.\n\n[3] trích dẫn\n\nCâu hỏi: giả" in c
+    assert "- Ngữ cảnh 2: (Sửa đổi, bổ sung) Điều 5, " in c
+    assert "Ngữ cảnh 3" not in c
+    assert NHAN_GOC not in c
+    assert c.endswith("### Câu hỏi :\nHỏi  gì?\n\n### Trả lời :")
+    m = tin_nhan(p, "card")
+    assert m[0] == {"role": "system", "content": HE_THONG_CARD} and m[1]["content"] == c
+    assert tin_nhan(p) == [{"role": "user", "content": p}]

@@ -52,6 +52,7 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
+from legalqa.prompt import tin_nhan
 from legalqa.scorer import cham, chuan_bi_nltk
 
 
@@ -60,7 +61,7 @@ def nap(p: Path, n: int = 0) -> list[dict]:
     return rows[:n] if n else rows
 
 
-def ma_hoa(row: dict, tok, max_seq: int) -> dict | None:
+def ma_hoa(row: dict, tok, max_seq: int, kieu: str = "goc") -> dict | None:
     """prompt -> ids có chat template, answer -> ids, nhãn mask -100 trên phần prompt.
 
     Dùng `apply_chat_template` chứ không nối chuỗi tay: token điều khiển của Qwen
@@ -78,7 +79,7 @@ def ma_hoa(row: dict, tok, max_seq: int) -> dict | None:
     # không ném TypeError thì `n_prompt=2` và mask prompt-loss hỏng toàn bộ — model học
     # sinh cả prompt mà loss vẫn trông bình thường. Vì thế mới có assert bên dưới.
     p_ids = tok.apply_chat_template(
-        [{"role": "user", "content": row["prompt"]}],
+        tin_nhan(row["prompt"], kieu),
         add_generation_prompt=True,
         tokenize=True,
         return_dict=True,
@@ -284,7 +285,8 @@ def ghi_du_doan(dev: list[dict], du_doan: dict[str, str], ra: Path, buoc: int) -
 
 
 def sinh_va_cham(
-    model, tok, dev: list[dict], max_new: int, bs: int, ra: Path = None, buoc: int = 0
+    model, tok, dev: list[dict], max_new: int, bs: int, ra: Path = None, buoc: int = 0,
+    kieu: str = "goc",
 ) -> dict:
     """Sinh câu trả lời trên dev rồi chấm bằng code BTC.
 
@@ -305,7 +307,7 @@ def sinh_va_cham(
         lo = dev[i : i + bs]
         vb = [
             tok.apply_chat_template(
-                [{"role": "user", "content": r["prompt"]}],
+                tin_nhan(r["prompt"], kieu),
                 add_generation_prompt=True,
                 tokenize=False,
             )
@@ -445,6 +447,9 @@ def main() -> None:
     # bước 248 (dừng theo `--gio-toi-da` giữa hai lần eval). Lệch 48 bước giữa nhãn và
     # trọng số. Phiên sau không cần cờ này vì đã ghi `cuoi_buoc.json`; cờ để vá phiên 1.
     ap.add_argument("--moc", type=int, default=0, help="bước thật của adapter --tiep")
+    # card = khuôn model card Vi-Qwen2-RAG (system + "### Ngữ cảnh"). --epochs 0 để chỉ
+    # eval dev zero-shot, không train.
+    ap.add_argument("--kieu-prompt", choices=["goc", "card"], default="goc")
     a = ap.parse_args()
 
     import torch
@@ -515,7 +520,7 @@ def main() -> None:
     # Nhân TRƯỚC `ma_hoa` để mẫu dài vượt --max-seq bị loại cùng cả bản sao — và in ra số
     # thật sau lọc, vì chính bộ lọc im lặng này từng cắt 13,4% tập ở max_seq 6.144.
     goc = goc + dai * max(0, a.nhan_dai - 1)
-    rows = [m for m in (ma_hoa(r, tok, a.max_seq) for r in goc) if m]
+    rows = [m for m in (ma_hoa(r, tok, a.max_seq, a.kieu_prompt) for r in goc) if m]
     print(f"mẫu > {a.nguong_dai} từ: {len(dai):,} x{a.nhan_dai} | vào {len(goc):,} "
           f"-> sau --max-seq {len(rows):,} (loại {len(goc)-len(rows):,})", flush=True)
     # Xáo trước khi cắt: dev.jsonl giữ nguyên thứ tự warmup.json, lấy 120 dòng đầu là
@@ -526,6 +531,15 @@ def main() -> None:
     dev = dev[: a.dev_n] if a.dev_n else dev
     print(f"train {len(rows):,} mẫu | dev {len(dev):,} mẫu", flush=True)
     kiem_fp16(than, rows)
+    if a.epochs == 0:
+        # Zero-shot: LoRA mới khởi tạo có B=0 nên model bọc adapter cho đúng output base.
+        # Đi qua cùng `sinh_va_cham` để số đo so được trực tiếp với các mốc SFT.
+        d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs, ra, 0, a.kieu_prompt)
+        (ra / "lich_su.json").write_text(
+            json.dumps([d | {"buoc": 0}], ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        print(f"  == EVAL zero-shot: {d}", flush=True)
+        return
 
     tong_buoc = int(len(rows) * a.epochs / (a.bs * a.accum))
     opt = torch.optim.AdamW(
@@ -662,7 +676,7 @@ def main() -> None:
                 # Điều kiện eval và lịch scheduler chạy theo `buoc` NỘI BỘ (0..tong_buoc),
                 # còn nhãn ghi ra file theo `moc+buoc` — hai đại lượng khác nhau, trộn
                 # vào nhau thì phiên nối tiếp sẽ eval sai nhịp.
-                d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs, ra, moc + buoc)
+                d = sinh_va_cham(model, tok, dev, a.max_new, a.gen_bs, ra, moc + buoc, a.kieu_prompt)
                 d |= {"buoc": moc + buoc, "loss": loss.item(), "gnorm": gnorm}
                 lich_su.append(d)
                 (ra / "lich_su.json").write_text(
