@@ -609,9 +609,23 @@ def main() -> None:
     # đã cho ra kết luận sai một lần.
     bo_qua, T_ok = [], 0
 
-    for ep in range(math.ceil(a.epochs)):
+    # Phiên nối tiếp đi TIẾP thứ tự xáo của phiên trước thay vì xáo lại từ đầu. Seed cố
+    # định (và `random.shuffle` là lời gọi random toàn cục duy nhất) nên không bỏ qua thì
+    # phiên 2 của D1/D2 (135 bước = 2.160 mẫu) học lại đúng 2.160 mẫu cũ. Đổi seed cũng
+    # không được: dev 120 xáo theo cùng seed, số dev sẽ không so được với phiên trước.
+    # Xáo đủ số epoch đã qua để tái lập đúng hoán vị; đếm mẫu bằng `dem` vì vị trí bắt
+    # đầu có thể không chia hết cho accum.
+    ep_dau, vi_tri_dau = divmod(moc * a.bs * a.accum, len(order))
+    if moc:
+        print(f"bỏ qua {moc * a.bs * a.accum:,} mẫu đã học: bắt đầu ep{ep_dau} "
+              f"vị trí {vi_tri_dau:,}/{len(order):,}", flush=True)
+    dem = 0
+    for ep in range(ep_dau + math.ceil(a.epochs) + 1):
         random.shuffle(order)
-        for i in range(0, len(order), a.bs):
+        if ep < ep_dau:
+            continue
+        for i in range(vi_tri_dau if ep == ep_dau else 0, len(order), a.bs):
+            dem += 1
             batch = gop([rows[j] for j in order[i : i + a.bs]], tok.pad_token_id)
             batch = {k: v.cuda() for k, v in batch.items()}
             T = int(batch["input_ids"].shape[1])
@@ -648,7 +662,7 @@ def main() -> None:
                 continue
             T_ok = max(T_ok, T)
 
-            if (i // a.bs + 1) % a.accum:
+            if dem % a.accum:
                 continue
             scaler.unscale_(opt)
             # Ghi grad norm TRƯỚC khi clip: sau clip nó luôn <= 1,0 nên không còn nói
