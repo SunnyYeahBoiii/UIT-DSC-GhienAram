@@ -32,6 +32,8 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--prefix", default="", choices=["", "e5", "none"])
     p.add_argument("--out", default="dense")
+    p.add_argument("--pooling", default="", choices=["", "mean", "cls"])
+    p.add_argument("--tin-code", action="store_true", help="model có kiến trúc riêng trên Hub")
     a = p.parse_args()
 
     ids: list[str] = []
@@ -43,7 +45,8 @@ def main() -> None:
             texts.append(d["text"])
     print(f"{len(ids):,} chunk · {a.model} · max_len {a.max_len}", flush=True)
 
-    enc = BiEncoder(a.model, batch_size=a.batch_size, max_len=a.max_len, prefix=a.prefix or None)
+    enc = BiEncoder(a.model, batch_size=a.batch_size, max_len=a.max_len,
+                    prefix=a.prefix or None, pooling=a.pooling or None, tin_code=a.tin_code)
     t = time.time()
     M = enc.encode(texts)
     npy = CLEAN_DIR / f"{a.out}.npy"

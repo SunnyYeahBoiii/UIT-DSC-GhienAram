@@ -31,3 +31,29 @@ def test_giu_hai_ban_va_so_dieu_khac_nhau():
     # Số không ở đầu dòng không bị chuẩn hoá thành lặp giả.
     t2 = "Theo Điều 1. Điều 2. Điều 3. Điều 4."
     assert cat_lap(t2) == t2
+
+
+def test_so_thu_tu_kem_chu():
+    # b535-rrft 3055: "2z. / 3a. / 3b. X;" số kèm chữ trôi, nội dung giống hệt.
+    dong = ["Căn cứ Điều 30 như sau:"] + [f"{i}{c}. Dán nhãn không đúng quy định;" for i in (2, 3) for c in "xyzabc"]
+    ra = cat_lap("\n".join(dong))
+    assert ra.count("Dán nhãn") == 1
+    # "a)" "b)" khác nội dung thì giữ nguyên.
+    t = "như sau:\na) Tên doanh nghiệp;\nb) Mã số thuế;\nc) Địa chỉ trụ sở."
+    assert cat_lap(t) == t
+
+
+def test_va_cau_dan():
+    from legalqa.sanitize import va_cau_dan
+    p = ("Căn cứ pháp luật:\n[1] Căn cứ chính\nĐiều 43, 78/2015/NĐ-CP\nĐiều 43. Đăng ký thay đổi\n"
+         "1. Hồ sơ gồm:\na) Thông báo;\n[2] Liên quan\nĐiều 44, X\nKhác\n\nCâu hỏi: Mẫu thông báo\nTrả lời: ")
+    ra = va_cau_dan("Căn cứ theo mẫu thông báo như sau:", p)
+    assert ra == "Căn cứ theo mẫu thông báo như sau:\nĐiều 43. Đăng ký thay đổi\n1. Hồ sơ gồm:\na) Thông báo;"
+    dai = "Căn cứ Điều 5 như sau: " + "x " * 60
+    assert va_cau_dan(dai, p) == dai
+
+
+def test_bo_so_thu_tu_treo_cuoi():
+    # 3055: đơn vị lặp bắt đầu giữa dòng "1a." nên bản giữ lại kết bằng "1b." treo.
+    t = "như sau:\n\"1a. Dán nhãn có thời hạn, dán nhãn sai;\n" + "".join(f"1{c}. Dán nhãn sai;\n" for c in "bcdefgh")
+    assert cat_lap(t) == "như sau:\n\"1a. Dán nhãn có thời hạn, dán nhãn sai;"

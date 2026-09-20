@@ -1,0 +1,24 @@
+{
+  "_ghi_chu": "1918 câu private, chỉ pha prompt (rerank_v11 + Vietnamese_Embedding) để so với prompts_g2. Không sinh đáp án, không nộp LB. 16 shard ≈ 120 câu; rerank ~2s/câu.",
+  "ten": "prompt-priv-v11",
+  "notebook": "kaggle/shard_prompt.ipynb",
+  "tong": 1918,
+  "output": "prompts.jsonl",
+  "merge": "jsonl",
+  "gpu": true,
+  "so_shard": 16,
+  "datasets": [
+    "legalqa-v10-src",
+    "sunny0703/legalqa-clean",
+    "sunny0703/legalqa-rerank-v11",
+    "sunny0703/legalqa-private-q",
+    "sunny0703/legalqa-dense-ai"
+  ],
+  "models": [],
+  "params": {
+    "dense": "AITeamVN/Vietnamese_Embedding",
+    "gio_pha1": 2.5,
+    "pool": 50,
+    "batch_size": 32
+  }
+}

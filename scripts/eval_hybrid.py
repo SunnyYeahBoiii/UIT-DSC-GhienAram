@@ -64,6 +64,7 @@ def main() -> None:
     # Mặc định đổi 512 -> 256 sau lượt đo đó; giả thuyết "512 giữ gần trọn" đã bị bác.
     p.add_argument("--max-len", type=int, default=256)
     p.add_argument("--prefix", default="", choices=["", "e5", "none"], help="rỗng = suy từ tên")
+    p.add_argument("--pooling", default="", choices=["", "mean", "cls"], help="rỗng = đọc 1_Pooling")
     p.add_argument("--cache", default="", help="tên file .npy; rỗng = suy từ tên model")
     a = p.parse_args()
 
@@ -87,6 +88,7 @@ def main() -> None:
         batch_size=a.batch_size,
         max_len=a.max_len,
         prefix=a.prefix or None,
+        pooling=a.pooling or None,
     )
 
     # Encode một lần rồi cache: 287k chunk mất 20-40 phút T4, còn đo thì chạy nhiều lần

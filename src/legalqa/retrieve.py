@@ -50,19 +50,25 @@ class Retriever:
     reranker: "CrossEncoderReranker | None" = None
     encoder: "BiEncoder | None" = None
     dense: "DenseIndex | None" = None
+    # Nhánh dense thứ hai (tuỳ chọn): grid §8 đo "e5 + VN-Emb" là combo R@5 cao nhất
+    # (95,1) trong toàn bộ lưới — hai bi-encoder bù nhau tốt hơn một cái + rerank riêng.
+    encoder2: "BiEncoder | None" = None
+    dense2: "DenseIndex | None" = None
     pool: int = 50
     deep: int = 1000
     rrf_k: int = 60
 
     def pool_chunks(self, question: str) -> list["Chunk"]:
-        """Pool ứng viên sau khi trộn hai nhánh. Dài đúng `self.pool`."""
+        """Pool ứng viên sau khi trộn các nhánh (BM25 + tối đa 2 dense). Dài đúng `self.pool`."""
         bm = [cid for cid, _ in self.index.search(question, top_k=self.deep)]
-        if self.dense is None or self.encoder is None:
-            ids = bm[: self.pool]
-        else:
+        nhanh = [bm]
+        if self.dense is not None and self.encoder is not None:
             qv = self.encoder.encode([question], is_query=True)[0]
-            de = [cid for cid, _ in self.dense.search(qv, top_k=self.deep)]
-            ids = rrf([bm, de], k=self.rrf_k)[: self.pool]
+            nhanh.append([cid for cid, _ in self.dense.search(qv, top_k=self.deep)])
+        if self.dense2 is not None and self.encoder2 is not None:
+            qv2 = self.encoder2.encode([question], is_query=True)[0]
+            nhanh.append([cid for cid, _ in self.dense2.search(qv2, top_k=self.deep)])
+        ids = bm[: self.pool] if len(nhanh) == 1 else rrf(nhanh, k=self.rrf_k)[: self.pool]
         return [self.chunks[c] for c in ids]
 
     def rank(self, question: str) -> list["Chunk"]:

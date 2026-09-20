@@ -732,6 +732,18 @@ n=1.000, deep 1.000, rrf-k 60. Dòng BM25 trùng khít qua cả bốn lượt ch
 **Chốt: e5-small, max_len 256.** 97,9% vượt BM25 pool 100 (97,5%) mà còn rẻ hơn nó 4 phút.
 Ngân sách 2,274 + 0,568 + 0,118 = **2,96B, dư 1,04B**.
 
+> **Lỗi thời, 20-09.** Con số 2,96B đúng tại thời điểm §15.8 (một reranker, chưa có
+> adapter). Pipeline hiện tại có **hai** reranker và hai adapter LoRA. Bảng đếm đầy đủ:
+> `docs/PIPELINE_V10.md` mục "Ngân sách params".
+>
+> **Sửa lần hai, cùng ngày.** Bản vá đầu của ô này ghi 3,571B (dư 0,429B) vì tin dòng
+> dense e5-small ở §15.8 này. Đọc code mới thấy đường chạy thật dùng
+> `AITeamVN/Vietnamese_Embedding` 568M ở **cả ba lượt** A/C/E: `dung_pr_private.py` mặc
+> định `--dense /workspace/base/Vietnamese_Embedding` và `pri_g2.sh` không ghi đè. Tổng
+> thật **4.020.984.131 = 4,021B, VƯỢT trần 4B 20.984.131 params**. Tức kết luận "loại
+> AITeamVN" của mục này chưa bao giờ tới được đường chạy — mục viết một chuyện, hệ thống
+> làm chuyện khác, suốt nhiều tuần, và cả hai bản nộp Task 2 đều ở sai phía trần.
+
 > **Sửa số, 12-09.** Ba dòng trên trước đây ghi generator là 3,09B ("Qwen 3B") — con số
 > tôi áng chứ không đếm. Số đếm thật nằm ở `docs/CHECKPOINT_VALIDATION.md` nhánh `main`:
 > `Qwen3.5-2B (gồm vision tower trong checkpoint) = 2.274.069.824`. Chênh 816M, tức chỗ
@@ -789,6 +801,23 @@ Zalo trong model card của chính tác giả cho reranker thắng embedding ở
 | Vietnamese_Embedding | 0,727 | 0,931 | 0,957 | 0,818 |
 
 Cùng 568M, cùng nhóm tác giả, cùng benchmark. Đổi là nước lỗ — không cần tốn GPU để biết.
+
+> **Xét lại, 20-09.** Lập luận "đường vào duy nhất là thay chỗ reranker" dựa trên tiền đề
+> ngân sách chật, nhưng ô "Sửa số, 12-09" ngay phía trên vừa tuyên dư **1,04B** — thừa chỗ
+> cho 568M mà không phải động vào reranker. Tiền đề bị chính đoạn văn trên phủ định, tức
+> kết luận đúng nhưng mất chỗ dựa. Nay có chỗ dựa thật, và nó mạnh hơn dự kiến: hệ **đã**
+> chạy AITeamVN suốt, tổng 4,021B, **vượt** trần 21M. Nên đây không còn là câu hỏi "có nên
+> thêm AITeamVN?" mà là "phải bỏ bớt cái gì để xuống dưới trần?". Bài học lặp lại từ vụ
+> ViLegalBERT ở §15.8.1, nặng thêm một bậc: ở đó một model card chưa đo dẫn tới kết luận
+> sai; ở đây một kết luận **đúng** nhưng không bao giờ được thực thi, và không có phép
+> kiểm nào đối chiếu tài liệu với đường chạy để bắt lỗi đó.
+>
+> Nhánh còn mở, 20-09: đang đo trên Kaggle (kernel `tdwuyn/prb-e5-goc`, `prb-e5-ft`,
+> `prb-ai-ft`) đúng phép head-to-head còn thiếu — cùng corpus 287.358 chunk, cùng 500 câu
+> train có gold, cùng reranker, chỉ đổi dense e5-small ↔ AITeamVN. Ba cấu hình để tách ảnh
+> hưởng của dense khỏi ảnh hưởng của việc phải đổi reranker (`rerank_ft_g2` đã mất cùng
+> instance Vast, thay bằng `rerank_ft_ai`). Đây cũng là bước 1 của phương án hạ params
+> xuống 3,571B mà vẫn giữ cả ba lượt MBR.
 Cùng lý do loại `mainguyen9/vietlegal-e5` (560M). Ứng viên 278M đúng miền pháp luật
 `truro7/vn-law-embedding` chưa đo: 118M đã vượt mốc, chưa cần tiêu thêm 160M params.
 
@@ -827,6 +856,56 @@ trần nữa** — hệ số không bất biến theo chất lượng pool.
 Giá thực: encode 287.358 chunk **421s** (comment cũ trong `eval_hybrid.py` ghi 20-40
 phút — sai gấp 4). Vòng đo 1,56s/câu có dense so với 1,58s/câu không có: dense **không**
 tốn thời gian chạy, chỉ tốn 118M params và 0,22 GB index.
+
+### 15.8.1 ViLegalBERT và giới hạn của MLM làm retriever (20-09)
+
+`ntphuc149/ViLegalBERT` = PhoBERT-base-v2 continual-pretrain MLM trên 16GB văn bản pháp
+lý, 134.410.000 params. Đúng miền, vừa ngân sách — ứng viên hợp lý trên giấy.
+
+**Dự báo ghi trước khi đo** (docstring `scratchpad/vlb/vlb-do.py`): kém hơn, vì nó là MLM
+`fill-mask` chưa từng thấy mục tiêu contrastive, nên embedding bị *anisotropy* — mọi vector
+dồn vào một nón hẹp, cosine giữa hai câu bất kỳ đều cao, thứ hạng gần vô nghĩa.
+
+Giao thức bước 0: pool BM25 50 chunk dựng **một lần** dùng chung cho mọi biến thể, 500 câu
+train có gold, seed 1. Đo khả năng **xếp lại trong pool đã cho** — không phải dựng pool,
+nên đường cơ sở phải đo tại chỗ chứ không lấy từ bảng §15.8. Một model không phân biệt nổi
+gold trong 50 ứng viên thì không thể phân biệt nổi trong 287.358; test loại trừ hợp lệ và
+rẻ hơn bước full corpus 11 lần.
+
+| biến thể | params | hit@5 | recall@5 | Δhit vs bm25 |
+|---|---:|---:|---:|---:|
+| bm25 (thứ tự gốc, không làm gì) | 0 | 0,8160 | 0,7166 | — |
+| **e5-small** (đang dùng) | 118M | **0,8740** | **0,7715** | **+0,0580** |
+| phobert-base-v2 + PyVi | 135M | 0,7760 | 0,6727 | −0,0400 |
+| **ViLegalBERT + PyVi** | 134M | **0,7620** | **0,6593** | **−0,0540** |
+| phobert-base-v2, không segment | 135M | 0,7000 | 0,5979 | −0,1160 |
+| ViLegalBERT, không segment | 134M | 0,6480 | 0,5552 | −0,1680 |
+
+Cả hai MLM **tệ hơn cả thứ tự BM25 thô**: xếp lại pool bằng chúng làm hỏng pool. Cổng
+trong script chặn bước full corpus, tiết kiệm 26 phút GPU. Dự báo khớp cả dấu lẫn độ lớn.
+
+Hai con số thứ cấp đáng giá hơn con số chính:
+
+**(1) ViLegalBERT 0,7620 < phobert-base-v2 0,7760.** Continual-pretrain trên 16GB văn bản
+pháp lý làm embedding *tệ đi* 0,014 cho mục đích truy hồi. Không nghịch lý: MLM tối ưu dự
+đoán token bị mask, và pretrain thêm trên một miền hẹp khiến mọi vector trong miền đó
+**càng giống nhau hơn** — tốt cho dự đoán token, chết cho phân biệt thứ hạng.
+Domain-adaptation làm nón anisotropy *hẹp lại*, không rộng ra. Suy ra quy tắc sàng lọc rẻ:
+**kiểm model có head contrastive chưa (`1_Pooling/` trong repo, hoặc model card nói
+sentence-transformers) trước khi tốn GPU**; không có head đó thì miền khớp đến đâu cũng
+không thành retriever.
+
+**(2) Cột có segment chênh cột không segment 0,076 (phobert) và 0,114 (ViLegalBERT)** —
+lớn hơn toàn bộ khoảng cách e5 vs BM25 (0,058). PyVi word segmentation là điều kiện **cần**
+cho mọi model PhoBERT-family. Nếu về sau dùng model PhoBERT-family đã train contrastive
+(ví dụ bkai ở §15.8), **bỏ segmentation là sai nghiêm trọng hơn chọn sai model**.
+
+Ghi chú vận hành: model gated AGPL-3.0. Đo không phát sinh nghĩa vụ giấy phép (không phân
+phối), nhưng đẩy lên dataset Kaggle **công khai** thì có — dataset tạm phải đặt private.
+`max_position_embeddings = 258` → trần 256 token thật, ngang e5-small ở L256 nên không phải
+bất lợi riêng.
+
+Script: `scratchpad/vlb/vlb-do.py`, kernel `sunny0703/vlb-do`.
 
 ### 15.9 Tái lập
 

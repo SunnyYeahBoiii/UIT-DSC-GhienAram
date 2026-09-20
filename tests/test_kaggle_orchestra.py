@@ -340,6 +340,17 @@ def test_job_cpu_khong_mang_machine_shape(moi_truong):
     assert all("machine_shape" not in p["meta"] and p["meta"]["enable_gpu"] is False for p in kg.pushes)
 
 
+def test_nhan_hai_chia_round_robin_moi_acc_hai_kernel():
+    """nhan=2: 3 acc → 6 shard, acc lặp a,b,c,a,b,c. GPU thứ 2 cùng acc không đẩy song song."""
+    accs = [ko.Acc("a", "t"), ko.Acc("b", "t"), ko.Acc("c", "t")]
+    job = ko.Job(ten="t", notebook="n.ipynb", tong=12, output="o.jsonl", gpu=False, nhan=2)
+    dp = ko.DieuPhoi(job, kg=None, accs=accs, ngu=lambda *_: None, commit="x",
+                     day_src=lambda *_: None, log=lambda *_: None)
+    st = dp.lap_ke_hoach()
+    assert [s["acc"] for s in st["shards"]] == ["a", "b", "c", "a", "b", "c"]
+    assert [(s["tu"], s["den"]) for s in st["shards"]] == ko.chia_deu(12, 6)
+
+
 def test_job_that_trong_repo_doc_duoc():
     goc = Path(__file__).resolve().parents[1]
     for f in sorted((goc / "kaggle" / "jobs").glob("*.json")):

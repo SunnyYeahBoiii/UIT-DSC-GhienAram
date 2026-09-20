@@ -25,8 +25,12 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from legalqa.corpus import DOC_NUMBER_RE
 from legalqa.graph import SO_HIEU_RE
+
+# `corpus.DOC_NUMBER_RE` chỉ bắt "Số:" viết hoa — trượt 309/8.512 văn bản dạng "Luật số:",
+# phần lớn là luật/bộ luật (Bộ luật TTHS 101/2015/QH13). Nới ở đây, KHÔNG sửa corpus.py vì
+# Document.number còn nuôi legal graph lúc infer.
+_SO_RE = re.compile(r"\b[Ss]ố:\s*([\w./\-]+)")
 
 CLEAN_DIR = Path(os.environ.get("CLEAN_DIR", "data/clean"))
 TRAIN = Path(os.environ.get("TRAIN_JSON", "data/official/train.json"))
@@ -49,6 +53,17 @@ def _probe(answer: str) -> str | None:
         return None
     mid = len(w) // 2
     return " ".join(w[mid - _W // 2 : mid + _W // 2])
+
+
+# Probe giữa trượt 750/7.000 câu train (answer <30 từ, hoặc đoạn giữa là lời người soạn).
+# Dự phòng: dò MỌI cửa sổ 12 từ, gold = văn bản khớp >= nửa số cửa sổ của văn bản khớp
+# nhiều nhất — cứu 704/750; kiểm trên câu vốn có gold: top-1 trùng 93,4%, tập trùng 97%.
+_NGUONG = 0.5
+
+
+def _moi_cua_so(answer: str) -> list[str]:
+    w = answer.split()
+    return [" ".join(w[i : i + _W]) for i in range(len(w) - _W + 1)]
 
 
 def main() -> None:
@@ -80,12 +95,33 @@ def main() -> None:
                     kenh[qid].add("nguyen_van")
     print(f"có gold nguyên văn {len(gold):,}")
 
+    # Lượt 2 chỉ cho câu probe giữa trượt, chạy TRƯỚC kênh số hiệu: câu chỉ có gold số hiệu
+    # (văn bản được trích, chưa chắc là văn bản chứa câu trả lời) được thêm văn bản nguồn.
+    du_phong: dict[str, set[str]] = defaultdict(set)
+    for qid, v in qa.items():
+        if v.get("answer") and qid not in gold:
+            for p in _moi_cua_so(v["answer"]):
+                du_phong[p].add(qid)
+    dem: dict[str, Counter] = defaultdict(Counter)
+    with (CLEAN_DIR / "chunks.jsonl").open(encoding="utf-8") as f:
+        for line in f:
+            c = json.loads(line)
+            w = c["text"].split()
+            for i in range(len(w) - _W + 1):
+                for qid in du_phong.get(" ".join(w[i : i + _W]), ()):
+                    dem[qid][c["doc_id"]] += 1
+    for qid, ct in dem.items():
+        top = max(ct.values())
+        gold[qid] |= {d for d, n in ct.items() if n >= _NGUONG * top}
+        kenh[qid].add("nguyen_van_moi_cua_so")
+    print(f"cứu bằng mọi cửa sổ {len(dem):,}")
+
     # Kênh số hiệu. Document.number đọc từ passage nên phải quét corpus.jsonl.
     by_number: dict[str, str] = {}
     with (CLEAN_DIR / "corpus.jsonl").open(encoding="utf-8") as f:
         for line in f:
             d = json.loads(line)
-            m = DOC_NUMBER_RE.search(d["passage"][:4000])
+            m = _SO_RE.search(d["passage"][:4000])
             if m:
                 # Số hiệu trùng nhau giữa hai văn bản là có thật (khác cơ quan ban hành).
                 # Giữ bản đầu: gold yếu chấp nhận nhiễu, nhưng không được ghi đè im lặng.

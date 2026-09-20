@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
+from .rerank import _sach
+
 if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
 
@@ -48,14 +50,23 @@ class BiEncoder:
         max_len: int = 256,
         device: str | None = None,
         prefix: str | None = None,
+        # "mean" | "cls" | None (đọc 1_Pooling/config.json). Dòng bge-m3
+        # (AITeamVN/Vietnamese_Embedding) train contrastive trên CLS — mean pooling model
+        # đó là đo một model khác, số ra thấp oan. Tự đọc config chứ không suy theo tên:
+        # suy prefix theo tên đã từng hỏng im lặng một lượt (xem dưới).
+        pooling: str | None = None,
+        # Bật cho model có kiến trúc riêng trong repo HF (gte-multilingual-base là
+        # `NewModel`, không có trong transformers). Mặc định TẮT: cờ này thực thi code
+        # tải từ Hub, chỉ mở cho model đã nằm trong danh sách BTC cho phép.
+        tin_code: bool = False,
     ) -> None:
         import torch
         from transformers import AutoModel, AutoTokenizer
 
         self._torch = torch
         self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self._tok = AutoTokenizer.from_pretrained(model_path)
-        self._model = AutoModel.from_pretrained(model_path)
+        self._tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=tin_code)
+        self._model = AutoModel.from_pretrained(model_path, trust_remote_code=tin_code)
         self._model.to(self._device).eval()
         # fp16 chỉ khi compute capability >= 7.0. Kaggle cấp P100 (sm_60) khi T4 hết
         # slot, mà torch bản trên Kaggle chỉ build kernel từ sm_70 -> .half() ném
@@ -64,6 +75,17 @@ class BiEncoder:
             self._model.half()
         self._bs = batch_size
         self._max_len = max_len
+        if pooling is None:
+            import json
+
+            from transformers.utils import cached_file
+
+            f = cached_file(model_path, "1_Pooling/config.json",
+                            _raise_exceptions_for_missing_entries=False)
+            cls_tok = f is not None and json.load(open(f)).get("pooling_mode_cls_token")
+            pooling = "cls" if cls_tok else "mean"
+        assert pooling in ("mean", "cls"), pooling
+        self._pooling = pooling
         # prefix: "e5" | "none" | None (suy từ tên). Suy theo tên từng làm hỏng một lượt đo
         # — truro7/vn-law-embedding là e5-base finetune nhưng tên không chứa "e5", nên prefix
         # bị bỏ im lặng và điểm tụt mà không ai biết vì sao. Giữ auto cho tiện, nhưng cho
@@ -80,7 +102,7 @@ class BiEncoder:
         out = []
         with torch.inference_mode():
             for i in range(0, len(texts), self._bs):
-                batch = [pre + t for t in texts[i : i + self._bs]]
+                batch = [pre + _sach(t) for t in texts[i : i + self._bs]]
                 enc = self._tok(
                     batch,
                     padding=True,
@@ -89,8 +111,11 @@ class BiEncoder:
                     return_tensors="pt",
                 ).to(self._device)
                 h = self._model(**enc).last_hidden_state
-                m = enc["attention_mask"].unsqueeze(-1).to(h.dtype)
-                v = (h * m).sum(1) / m.sum(1).clamp(min=1e-9)
+                if self._pooling == "cls":
+                    v = h[:, 0]
+                else:
+                    m = enc["attention_mask"].unsqueeze(-1).to(h.dtype)
+                    v = (h * m).sum(1) / m.sum(1).clamp(min=1e-9)
                 v = torch.nn.functional.normalize(v.float(), dim=-1)
                 out.append(v.half().cpu().numpy())
         return np.concatenate(out) if out else np.zeros((0, 0), dtype=np.float16)

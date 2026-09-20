@@ -77,16 +77,21 @@ def main() -> None:
                 **{k: d[k] for k in ("chunk_id", "doc_id", "start", "end", "text")}
             )
 
-    dense = enc = None
+    # --dense/--dense-model nhận danh sách phẩy: mỗi nhánh là một bi-encoder riêng,
+    # RRF trộn theo HẠNG nên không cần chung số chiều (e5 384 + AITeamVN 1024 trộn được).
+    nhanh_dense: list[tuple] = []
     if a.dense:
         from legalqa.dense import BiEncoder, DenseIndex
 
-        stem = a.dense[:-4] if a.dense.endswith(".npy") else a.dense
-        dense = DenseIndex.load(CLEAN_DIR / f"{stem}.npy", CLEAN_DIR / f"{stem}.ids")
-        enc = BiEncoder(a.dense_model, batch_size=256, max_len=256)
+        for npy, mp in zip(a.dense.split(","), a.dense_model.split(",")):
+            stem = npy[:-4] if npy.endswith(".npy") else npy
+            nhanh_dense.append((
+                DenseIndex.load(CLEAN_DIR / f"{stem}.npy", CLEAN_DIR / f"{stem}.ids"),
+                BiEncoder(mp, batch_size=256, max_len=256),
+            ))
 
     rr = CrossEncoderReranker(a.model, batch_size=a.batch_size)
-    nhanh = "BM25+dense (RRF)" if dense is not None else "BM25"
+    nhanh = f"BM25+{len(nhanh_dense)} dense (RRF)" if nhanh_dense else "BM25"
     print(f"{len(gold):,} câu · pool {a.pool} chunk từ {nhanh} · {a.model}\n", flush=True)
 
     hit_bm25: Counter = Counter()
@@ -95,15 +100,16 @@ def main() -> None:
     t0 = time.time()
     for i, g in enumerate(gold, 1):
         gd = set(g["gold_docs"])
-        if dense is None:
+        if not nhanh_dense:
             res = idx.search(g["question"], top_k=a.pool)
         else:
-            bm = [cid for cid, _ in idx.search(g["question"], top_k=a.deep)]
-            qv = enc.encode([g["question"]], is_query=True)[0]
-            de = [cid for cid, _ in dense.search(qv, top_k=a.deep)]
+            xep = [[cid for cid, _ in idx.search(g["question"], top_k=a.deep)]]
+            for di, en in nhanh_dense:
+                qv = en.encode([g["question"]], is_query=True)[0]
+                xep.append([cid for cid, _ in di.search(qv, top_k=a.deep)])
             # Điểm BM25 mất nghĩa sau khi trộn theo hạng; truyền 0.0 vì §15.3 đo rerank
             # thuần, không hoà điểm.
-            res = [(cid, 0.0) for cid in rrf([bm, de], k=a.rrf_k)[: a.pool]]
+            res = [(cid, 0.0) for cid in rrf(xep, k=a.rrf_k)[: a.pool]]
         cands = [(by_id[cid], s) for cid, s in res]
 
         base = _doc_theo_thu_tu([c.doc_id for c, _ in cands])

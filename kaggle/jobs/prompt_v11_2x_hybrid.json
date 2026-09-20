@@ -1,0 +1,26 @@
+{
+  "_ghi_chu": "prompt-v11-2x cu dung 1-dense (VN-Embedding), lech pool voi luc finetune rerank_v11 (mine_rerank mac dinh RRF e5-small + VN-Embedding). Job nay thay the, dung dung 2-dense hybrid. 18 shard XONG + 30 dang chay cua job cu bo, khong ghep.",
+  "ten": "prompt-v11-2x-hybrid",
+  "notebook": "kaggle/shard_prompt.ipynb",
+  "tong": 1918,
+  "output": "prompts.jsonl",
+  "merge": "jsonl",
+  "gpu": true,
+  "so_shard": 0,
+  "nhan": 2,
+  "datasets": [
+    "legalqa-v10-src",
+    "sunny0703/legalqa-clean",
+    "sunny0703/legalqa-rerank-v11",
+    "sunny0703/legalqa-private-q",
+    "sunny0703/legalqa-dense-ai",
+    "sunny0703/legalqa-dense-e5"
+  ],
+  "models": [],
+  "params": {
+    "dense": "intfloat/multilingual-e5-small,AITeamVN/Vietnamese_Embedding",
+    "gio_pha1": 2.5,
+    "pool": 50,
+    "batch_size": 32
+  }
+}

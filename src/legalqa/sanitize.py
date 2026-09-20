@@ -13,7 +13,9 @@ import re
 # Số thứ tự đầu dòng "(23)", "24.", "1.2." bị chuẩn hoá thành một ký hiệu, nếu không thì
 # vòng lặp 80189 có số tăng dần và không bản nào giống bản nào. Chỉ áp cho từ ĐẦU DÒNG:
 # chuẩn hoá mọi số sẽ biến "Điều 1. Điều 2. Điều 3." thành lặp giả.
-_SO_THU_TU = re.compile(r"^[(\[]?\d+(?:\.\d+)*[.)\]]?$")
+# b535-rrft 3055: "2z. / 3a. / 3b. Dán nhãn ... ;" ×58 lọt vì "3a." không khớp số thuần ->
+# nhận thêm số kèm 1 chữ ("3a.") và chữ đơn có dấu chấm/ngoặc ("a)", "đ.").
+_SO_THU_TU = re.compile(r"^[(\[]?(?:\d+[a-zđ]?(?:\.\d+)*[.)\]]?|[a-zđ][.)\]])$")
 
 _MOD = (1 << 61) - 1
 _CO_SO = 1_000_003
@@ -88,4 +90,26 @@ def cat_lap(text: str, *, max_chu_ky: int = 300, min_ban: int = 3) -> str:
         else:
             ra.append(goc[i])
             i += 1
-    return "".join(ra).rstrip()
+    ra_str = "".join(ra).rstrip()
+    # Đơn vị lặp có thể bắt đầu giữa dòng rồi kết bằng số thứ tự dòng sau (3055: giữ
+    # "...quy định;\n1b.") -> bỏ dòng cuối chỉ còn mỗi số thứ tự.
+    dau, _, cuoi = ra_str.rpartition("\n")
+    if dau and _SO_THU_TU.match(cuoi.strip().lower()):
+        return dau.rstrip()
+    return ra_str
+
+
+def va_cau_dan(text: str, prompt: str, *, max_tu: int = 45, lay_tu: int = 300) -> str:
+    """Câu trả lời chỉ có câu dẫn ("... như sau:") thì nối thân Evidence [1] của prompt.
+
+    b535-rrft: 7/1.000 câu hỏi "mẫu ..." dừng ở câu dẫn 23-41 từ (b135 cùng câu trả
+    98-488 từ). METEOR nặng recall 9:1 nên câu 24 từ gần như mất trọn; Evidence [1] là
+    điều luật reranker xếp đầu, đúng thứ model lẽ ra phải chép.
+    """
+    if len(text.split()) >= max_tu or not text.rstrip().endswith(":"):
+        return text
+    m = re.search(r"^\[1\][^\n]*\n[^\n]*\n(.*?)(?=^\[2\]|\n\nCâu hỏi:)", prompt, re.S | re.M)
+    if not m:
+        return text
+    than = m.group(1).split(" ")
+    return text.rstrip() + "\n" + " ".join(than[:lay_tu]).strip()

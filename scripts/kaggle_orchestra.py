@@ -28,6 +28,7 @@ mà vẫn thoát 0.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import re
@@ -116,6 +117,7 @@ class Job:
     models: list[str] = field(default_factory=list)
     params: dict = field(default_factory=dict)
     so_shard: int = 0  # 0 = bằng số acc
+    nhan: int = 1  # số kernel / acc; >1 thì shard thứ 2 chờ vì Kaggle 1 GPU/acc
     publish: dict | None = None
 
     @staticmethod
@@ -442,9 +444,13 @@ class DieuPhoi:
             # acc 0 giờ — chắc chắn fail rồi đổi — nằm cuối và chờ acc rảnh sớm nhất.
             q = {t: self.kg.quota_gpu(self.accs[t]) for t in ten}
             ten.sort(key=lambda t: -q[t])
-        k = self.job.so_shard or len(ten)
-        assert k <= len(ten), f"so_shard={k} > {len(ten)} acc"
-        shards = [{"i": i, "tu": tu, "den": den, "acc": ten[i], "slug": f"{self.job.ten}-s{i}",
+        n_acc = self.job.so_shard or len(ten)
+        assert n_acc <= len(ten), f"so_shard={n_acc} > {len(ten)} acc"
+        nhan = max(int(self.job.nhan or 1), 1)
+        dung = ten[:n_acc]
+        k = n_acc * nhan
+        shards = [{"i": i, "tu": tu, "den": den, "acc": dung[i % n_acc],
+                   "slug": f"{self.job.ten}-s{i}",
                    "trang_thai": "CHO", "lan": 0, "day_luc": 0, "noi_tiep": None, "lich_su": []}
                   for i, (tu, den) in enumerate(chia_deu(self.job.tong, k))]
         return {"job": self.job.ten, "trang_thai": "DANG_CHAY", "commit": self.commit,
@@ -560,7 +566,13 @@ class DieuPhoi:
     # -- vòng theo dõi
 
     def _ban(self) -> set[str]:
-        return {s["acc"] for s in self.st["shards"] if s["trang_thai"] == "DANG_CHAY"}
+        """Acc đã kín chỗ. Trần là `nhan` (kernel/acc) chứ không phải 1: Kaggle cho đẩy
+        kernel thứ 2, nó nằm QUEUED tới khi kernel 1 nhả GPU — giữ hàng đợi luôn đầy,
+        không mất khoảng chết giữa hai lượt."""
+        tran = max(int(self.job.nhan or 1), 1)
+        dem = collections.Counter(s["acc"] for s in self.st["shards"]
+                                  if s["trang_thai"] == "DANG_CHAY")
+        return {t for t, n in dem.items() if n >= tran}
 
     def chon_acc(self, s: dict) -> str | None:
         """Acc rảnh (không chạy shard nào của job này), nhiều quota nhất, tránh acc vừa làm

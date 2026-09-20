@@ -136,7 +136,10 @@ def nap_dense(model_path: str, chunks: dict):
     from legalqa.dense import BiEncoder, DenseIndex
 
     enc = BiEncoder(model_path, batch_size=256, max_len=256)
-    npy, ids_txt = CLEAN / "dense.npy", CLEAN / "dense.ids"
+    # Tên cache mang tên model: tên chung `dense.npy` thì đổi e5 -> AITeamVN vẫn nạp im
+    # lặng ma trận e5 cũ, và query 1024 chiều nhân ma trận 384 chiều chỉ chết nếu may.
+    stem = f"dense_{model_path.rstrip('/').split('/')[-1]}_L256"
+    npy, ids_txt = CLEAN / f"{stem}.npy", CLEAN / f"{stem}.ids"
     if npy.exists() and ids_txt.exists():
         print(f"nạp dense cache: {npy}", flush=True)
         return enc, DenseIndex.load(npy, ids_txt)
@@ -302,7 +305,8 @@ def main() -> None:
     # nó sẽ gặp lúc sinh. Train trên prompt BM25 rồi infer bằng hybrid là đổi phân phối
     # evidence dưới chân model — cùng họ lỗi "vượt độ dài từng thấy khi train" đã sinh
     # ra vòng lặp ở lượt 4.
-    ap.add_argument("--dense", default="", help="bi-encoder; rỗng = BM25 thuần")
+    ap.add_argument("--dense", default="",
+                     help="bi-encoder, phân tách phẩy tối đa 2 (vd e5-small,VN-Embedding); rỗng = BM25 thuần")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--pool", type=int, default=50)
     ap.add_argument("--ra", default="", help="file jsonl đầu ra; mặc định CLEAN/sft.jsonl")
@@ -328,9 +332,13 @@ def main() -> None:
 
         reranker = CrossEncoderReranker(a.model, batch_size=a.batch_size)
     chunks = nap_chunks()
-    encoder = dense_idx = None
-    if a.dense:
-        encoder, dense_idx = nap_dense(a.dense, chunks)
+    ten_dense = [t for t in a.dense.split(",") if t]
+    assert len(ten_dense) <= 2, "--dense nhận tối đa 2 model (RRF 2 nhánh dense)"
+    encoder = dense_idx = encoder2 = dense_idx2 = None
+    if len(ten_dense) >= 1:
+        encoder, dense_idx = nap_dense(ten_dense[0], chunks)
+    if len(ten_dense) == 2:
+        encoder2, dense_idx2 = nap_dense(ten_dense[1], chunks)
     r = Retriever(
         index=nap_index(chunks),
         chunks=chunks,
@@ -338,6 +346,8 @@ def main() -> None:
         reranker=reranker,
         encoder=encoder,
         dense=dense_idx,
+        encoder2=encoder2,
+        dense2=dense_idx2,
         pool=a.pool,
     )
     from tokenizers import Tokenizer

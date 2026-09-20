@@ -336,6 +336,14 @@ def sinh_va_cham(
             du_doan[r["id"]] = tok.decode(
                 seq[enc["input_ids"].shape[1] :], skip_special_tokens=True
             ).strip()
+        # Sinh 1.024 token/câu mất cả phút, mà mark chỉ in kết quả khi xong toàn bộ dev
+        # -> im lặng kéo dài trông như treo. In tiến độ mỗi ~5 câu để phân biệt "đang
+        # chạy chậm" với "đã chết".
+        if len(du_doan) // 5 > (len(du_doan) - len(lo)) // 5 or i + bs >= len(dev):
+            print(
+                f"    sinh {len(du_doan)}/{len(dev)} câu, {time.time() - t_eval:.0f}s",
+                flush=True,
+            )
     tok.padding_side = "right"
     model.train()
 
@@ -415,6 +423,9 @@ def main() -> None:
     ap.add_argument("--dropout", type=float, default=0.05)
     ap.add_argument("--bs", type=int, default=1)
     ap.add_argument("--accum", type=int, default=16)
+    # Mặc định bật (an toàn cho T4 16GB). Tắt trên máy VRAM dư (vd 5090 32GB, đỉnh đo
+    # 7,6GB ở bs=1) để bỏ chi phí recompute forward lúc backward.
+    ap.add_argument("--no-grad-ckpt", action="store_true")
     # 10.240 chứ không 6.144: bỏ trần ký tự trong `build_sft` đẩy seq_len p50 3.442 ->
     # 5.071, p99 4.847 -> 8.244, max 6.162 -> 8.377 (đo 300 câu, BM25, tokenizer Qwen2).
     # 6.144 sẽ âm thầm vứt 18,3% mẫu ngay lúc mã hoá — đúng những câu nhiều Điều mà việc
@@ -512,7 +523,8 @@ def main() -> None:
             print(f"{lop.__name__} không nhận: {e}", flush=True)
     assert model is not None, "không lớp Auto* nào nạp được model nền"
     model.config.use_cache = False
-    model.gradient_checkpointing_enable()
+    if not a.no_grad_ckpt:
+        model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     if a.tiep:
         from peft import PeftModel
@@ -567,6 +579,11 @@ def main() -> None:
     # giữ nguyên lr 3e-5 và phép bỏ qua mẫu khi nối tiếp phiên 1 GPU.
     mau_moi_buoc = a.bs * a.accum * the_gioi
     tong_buoc = int(len(rows) * a.epochs / mau_moi_buoc)
+    # Mốc CUỐI MỖI EPOCH phải lưu riêng, không dựa vào `% eval_steps`: 6.670 mẫu / 16 =
+    # 417 bước/epoch, mà 417 % 40 = 17 -> nhịp 40 bước nhảy qua đúng chỗ so sánh
+    # "1 epoch vs 2 epoch". Đó là mốc duy nhất trả lời được câu hỏi epoch thứ hai có
+    # đáng hay chỉ overfit, nên không được để lệ thuộc vào eval_steps chia hết.
+    buoc_moi_epoch = max(1, int(len(rows) / mau_moi_buoc))
     opt = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=a.lr, weight_decay=0.0
     )
@@ -626,7 +643,7 @@ def main() -> None:
     _ckpt = [m for m in model.modules()
              if getattr(m, "gradient_checkpointing", False)
              or getattr(m, "_gradient_checkpointing_func", None) is not None]
-    assert _ckpt, "gradient checkpointing không gắn vào lớp nào — sẽ OOM ở batch đầu"
+    assert _ckpt or a.no_grad_ckpt, "gradient checkpointing không gắn vào lớp nào — sẽ OOM ở batch đầu"
     print(f"train mode | {len(_ckpt)} lớp bật gradient checkpointing", flush=True)
 
     # Số đo để phiên sau không phải đoán: T của mẫu OOM, và T lớn nhất đã chạy lọt.
@@ -723,7 +740,8 @@ def main() -> None:
                     flush=True,
                 )
 
-            if a.eval_rieng and (buoc % a.eval_steps == 0 or buoc == tong_buoc):
+            if a.eval_rieng and (buoc % a.eval_steps == 0 or buoc == tong_buoc
+                                 or buoc % buoc_moi_epoch == 0):
                 if hang == 0:
                     model.save_pretrained(ra / f"b{moc+buoc}")
                     # Ghi SAU adapter: eval_moc chỉ nhận thư mục có file này, tránh nạp
