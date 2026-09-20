@@ -1,0 +1,27 @@
+{
+  "_ghi_chu": "G10 private: b938 x rotation0, 1918 câu, generation-only (không chấm).",
+  "ten": "infer-priv-b938-r0",
+  "notebook": "kaggle/infer_private_shard.ipynb",
+  "tong": 1918,
+  "output": "du_doan.jsonl",
+  "merge": "jsonl",
+  "gpu": true,
+  "so_shard": 8,
+  "nhan": 1,
+  "datasets": [
+    "sunny0703/legalqa-v10-src",
+    "sunny0703/legalqa-clean",
+    "sunny0703/legalqa-ckpt-v11",
+    "sunny0703/legalqa-private-hybrid-rot5"
+  ],
+  "models": [
+    "sunny070306/qwen3-5-2b-base/TensorFlow2/default/1"
+  ],
+  "params": {
+    "checkpoint": "b938",
+    "prompts_ten": "prompts_rot0.jsonl",
+    "max_new": 1024,
+    "gen_bs": 2,
+    "gio_toi_da": 8.5
+  }
+}
