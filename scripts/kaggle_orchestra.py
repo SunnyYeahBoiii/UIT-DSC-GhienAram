@@ -376,8 +376,10 @@ class KaggleCli:
 
     def output(self, acc: Acc, slug: str, dich: Path) -> None:
         dich.mkdir(parents=True, exist_ok=True)
-        self._chay(acc.token, ["kernels", "output", f"{acc.ten}/{slug}", "-p", str(dich), "--force"],
-                   timeout=1800)
+        # ponytail: chi tai manifest/log/moc (KB), bo file du lieu nang (GB) — job download-aic
+        # moi shard giu ~10GB video tren output kernel, dev khong du dia de mirror.
+        self._chay(acc.token, ["kernels", "output", f"{acc.ten}/{slug}", "-p", str(dich), "--force",
+                               "--file-pattern", "(jsonl|moc|log)"], timeout=1800)
 
     def day_dataset(self, acc: Acc, thu_muc: Path, ten: str, msg: str) -> None:
         (thu_muc / "dataset-metadata.json").write_text(json.dumps(

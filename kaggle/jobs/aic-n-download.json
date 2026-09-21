@@ -1,0 +1,15 @@
+{
+  "_ghi_chu": "Tai 9 zip video giao thong (~10GB/file) ve output kernel, 1 file/shard, CPU khong dot GPU quota. Manifest tong manifest.jsonl + moc de CLI ghep; zip nam trong output tung kernel.",
+  "ten": "aic-n-download",
+  "notebook": "kaggle/shard_download_aic.ipynb",
+  "tong": 9,
+  "output": "manifest.jsonl",
+  "merge": "jsonl",
+  "gpu": false,
+  "datasets": [],
+  "models": [],
+  "params": {
+    "base": "https://aic-data.ledo.io.vn",
+    "files": ["Video_N001-N010", "Video_N011-N020", "Video_N021-N030", "Video_N041-N050", "Video_N051-N060", "Video_N061-N070", "Video_N071-N080", "Video_N081-N090", "Video_N091-N100"]
+  }
+}
