@@ -12,6 +12,7 @@
     "sunny0703/legalqa-v10-src",
     "sunny0703/legalqa-clean",
     "sunny0703/legalqa-ckpt-v11",
+    "sunny0703/legalqa-ckpt-b920",
     "sunny0703/legalqa-private-hybrid-rot5"
   ],
   "models": [

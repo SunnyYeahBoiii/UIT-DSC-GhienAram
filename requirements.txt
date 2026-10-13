@@ -1,7 +1,0 @@
-# Stack tối thiểu cho 5 module lõi: corpus, chunking, evidence, bm25, clean.
-# Phần sinh câu trả lời (Qwen SFT) thêm sau, kèm wheelhouse build lại trên
-# Linux x86_64 / Python 3.12 khớp runtime Kaggle.
-numpy>=1.26,<3
-scipy>=1,<2
-scikit-learn>=1,<2
-pytest>=8.3
